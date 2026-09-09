@@ -77,11 +77,19 @@ final class DecisionCardTests: XCTestCase {
             .appending(path: "afleet-c6-3-cards-unwritten"))
     }
 
-    private func card(_ fixture: String, id: String, overrides: [String: Any] = [:]) throws -> DecisionCard {
+    private static var stream: LogicalStream {
+        LogicalStream(configHome: channel.configHome, sessionID: channel.session, name: .main)
+    }
+
+    /// The item C3's reducer would have opened for a recorded ask, re-keyed to an invented id.
+    private func item(_ fixture: String, id: String, overrides: [String: Any] = [:]) throws -> DecisionItem {
         let request = try FixtureRunner.request(fixture, subtype: "can_use_tool", id: id, overrides: overrides)
-        let item = try XCTUnwrap(DecisionItem(surfacing: request, in: Self.channel),
-                                 "the surfacing initialiser opened no item for a recorded ask")
-        return DecisionCard(item)
+        return try XCTUnwrap(DecisionItem(surfacing: request, in: Self.channel),
+                             "the surfacing initialiser opened no item for a recorded ask")
+    }
+
+    private func card(_ fixture: String, id: String, overrides: [String: Any] = [:]) throws -> DecisionCard {
+        DecisionCard(try item(fixture, id: id, overrides: overrides))
     }
 
     private func tool(of card: DecisionCard) throws -> CanUseToolRequest {
@@ -120,6 +128,144 @@ final class DecisionCardTests: XCTestCase {
     private func press(_ label: String, in body: Any) throws {
         let button = try XCTUnwrap(ViewTree.button(label, in: body), "the card offered no \(label) button")
         XCTAssertTrue(ViewTree.press(button), "the \(label) button carried no action")
+    }
+
+    // MARK: - Item 43's Developer action
+
+    /// Item 43: "With the Developer action *Send malformed answer to next permission* armed,
+    /// approve a card: the timeline shows the binary's own text … as the tool's denial, and the
+    /// channel continues."
+    ///
+    /// The shape is chosen from the engine's own validator (2.1.263: the response is parsed against
+    /// a union of `{behavior:"allow", updatedInput?: record}` and `{behavior:"deny", message:
+    /// string}`, and the failure produces "The canUseTool callback returned an invalid permission
+    /// result. …" as a tool denial — `cli.pretty.js:282901`, `:282904`, `:283032`, `:283039`).
+    /// `updatedInput` as a **string** fails `z.record(string, unknown)` in the allow arm and the
+    /// literal in the deny arm, so the union is exhausted and the rejection is certain. Extra keys
+    /// are stripped rather than rejected and a bad `updatedPermissions` is swallowed by a `catch`,
+    /// so neither of those would do.
+    ///
+    /// Three clauses, because the arm is one-shot and each is a way for it to be quietly wrong: the
+    /// armed answer is the malformed shape, the answer after it is the ordinary one, and an unarmed
+    /// answer is untouched.
+    func testTheArmedDeveloperActionSendsOneMalformedPermissionAnswer() async throws {
+        let reservations = DecisionReservations()
+        let card = try card("permission-allow", id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa7")
+
+        // Unarmed: the ordinary answer, and the shape below must not be it.
+        let (plainLifecycle, plain) = await armed(reservations, false)
+        try press("Allow once", in: try permissionView(card, .full, plain).body)
+        await plain.whenIdle()
+        let ordinary = try await Self.sentBody(plainLifecycle)
+        let armedShape = try Self.body(of: DecisionAnswering.malformedPermissionAnswer)
+        XCTAssertFalse(ordinary == armedShape,
+                       "an unarmed answer already sends the malformed shape, so the arm proves nothing")
+
+        // Armed: exactly the shape the engine rejects.
+        let (lifecycle, answering) = await armed(reservations, true)
+        try press("Allow once", in: try permissionView(card, .full, answering).body)
+        await answering.whenIdle()
+        let malformed = try await Self.sentBody(lifecycle)
+        XCTAssertTrue(malformed == armedShape,
+                      "the armed answer is not the shape the engine's validator rejects")
+        XCTAssertFalse(reservations.malformedNextPermissionAnswer,
+                       "the one-shot arm survived the answer it was armed for")
+
+        // And the next answer is ordinary again.
+        let (afterLifecycle, after) = await armed(reservations, false)
+        try press("Allow once", in: try permissionView(card, .full, after).body)
+        await after.whenIdle()
+        let restored = try await Self.sentBody(afterLifecycle)
+        XCTAssertTrue(restored == ordinary,
+                      "the answer after the armed one is not the ordinary answer")
+    }
+
+    /// An answering object over a shared reservation set, armed or not.
+    private func armed(_ reservations: DecisionReservations, _ arm: Bool) async -> (LifecycleDouble, DecisionAnswering) {
+        let lifecycle = LifecycleDouble()
+        await lifecycle.always(.success(ActivityFixtures.state(Self.channel)))
+        reservations.malformedNextPermissionAnswer = arm
+        return (lifecycle, DecisionAnswering(lifecycle: lifecycle, reservations: reservations))
+    }
+
+    /// The one answer body a double received.
+    private static func sentBody(_ lifecycle: LifecycleDouble) async throws -> JSONValue {
+        let actions = await lifecycle.actions
+        XCTAssertEqual(actions.count, 1, "one press produced \(actions.count) action(s)")
+        guard case .answer(_, let answer)? = actions.first?.action else {
+            XCTFail("the action emitted was not an answer")
+            return .null
+        }
+        return try body(of: answer)
+    }
+
+    /// The body the transport would write for an answer.
+    private static func body(of answer: InboundAnswer) throws -> JSONValue {
+        guard case .success(let success) = answer.controlResponse(for: RequestID(rawValue: "invented-1")).body,
+              let response = success.response else {
+            XCTFail("the answer did not encode as a success body")
+            return .null
+        }
+        return response
+    }
+
+    // MARK: - Item 52's label
+
+    /// Item 52: "the permission card is labelled `Explore` with the run's description".
+    ///
+    /// The run tree reaches every row through `TimelineRenderContext.neighbourhood.agents`, and the
+    /// Agents tab already formats this sentence for the same ask on the same run — so the two
+    /// surfaces share one formatter and the main timeline's card stops saying only that the ask came
+    /// from somewhere.
+    ///
+    /// Over `nested-depth-2`'s own tree, folded by C3, with a recorded `can_use_tool` re-keyed onto
+    /// one of that recording's agent ids. Both directions: the generic sentence must be gone where a
+    /// node exists, and must be exactly what is drawn where none does — a card labelled from a tree
+    /// that does not hold the run would name the wrong work.
+    func testASubagentPermissionCardIsLabelledFromTheRunTree() async throws {
+        var reducer = WireReducer(stream: Self.stream, slug: "invented-slug")
+        for event in try FixtureRunner.events("nested-depth-2") { _ = reducer.apply(event) }
+        let tree = reducer.agents
+        let run = try XCTUnwrap(tree.nodes.values.first { $0.agentType?.isEmpty == false && !$0.description.isEmpty },
+                                "the recording's tree holds \(tree.nodes.count) node(s) and none names both a type and an errand")
+
+        let labelled = try item("permission-allow", id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa5",
+                                overrides: ["agent_id": run.id])
+        let expected = AgentNodeDecisions.label(agentType: run.agentType, description: run.description)
+        let drawn = try Self.rowCardTexts(labelled, tree: tree)
+        XCTAssertTrue(drawn.contains(expected),
+                      "the row's card is not labelled from the \(tree.nodes.count)-node run tree")
+        XCTAssertFalse(drawn.contains(PermissionCardView.unattributedSubagentLabel),
+                       "the card labelled from a known run still says only that the ask came from a subagent")
+
+        // An id the tree does not hold: the standing sentence, and nothing invented.
+        let unknown = try item("permission-allow", id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa6",
+                               overrides: ["agent_id": "invented-run-nobody-started"])
+        let unknownDrawn = try Self.rowCardTexts(unknown, tree: tree)
+        XCTAssertTrue(unknownDrawn.contains(PermissionCardView.unattributedSubagentLabel),
+                      "a card for a run the tree does not hold does not fall back to the standing sentence")
+        XCTAssertFalse(unknownDrawn.contains(expected),
+                       "a card for a run the tree does not hold borrowed another run's name")
+    }
+
+    /// What the timeline's own decision row draws for a card, with the channel's run tree in the
+    /// neighbourhood the row reads. The descent is spelled out because reflection does not evaluate
+    /// a stored view's `body`.
+    @MainActor
+    private static func rowCardTexts(_ item: DecisionItem, tree: AgentRunTree) throws -> [String] {
+        let lifecycle = LifecycleDouble()
+        let answering = DecisionAnswering(lifecycle: lifecycle)
+        let context = InventedItems.context(neighbourhood: TimelineNeighbourhood(agents: tree),
+                                            lifecycle: lifecycle,
+                                            key: channel)
+        let row = DecisionRowContent(row: TimelineRow(.decision(item)),
+                                     context: context,
+                                     answering: answering)
+        let hosted = try XCTUnwrap(ViewTree.values(of: DecisionCardView.self, in: row.body).first,
+                                   "the decision row hosted no card component")
+        let permission = try XCTUnwrap(CardTree.permissionBody(in: hosted.body),
+                                       "the hosted card drew no permission card")
+        return CardTree.texts(in: permission)
     }
 
     // MARK: - The answers the card emits

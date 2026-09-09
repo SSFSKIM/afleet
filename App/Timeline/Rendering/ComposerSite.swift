@@ -29,6 +29,20 @@ protocol ComposerSite: AnyObject {
     /// Site 3. The replacement for each assistant message this channel's interceptor caught, keyed
     /// by the frame's own uuid.
     var interceptedReplacements: [String: String] { get }
+
+    /// Site 4. The refusal dialog's *Edit the prompt* (§8.4's dialog table): the engine aborts the
+    /// turn and the last user prompt goes back into the field.
+    ///
+    /// The engine does exactly this and no more (2.1.263 `cli.pretty.js:770399`: the abort is
+    /// tagged `refusal-fallback-edit`, and the REPL's teardown at `:523717` restores the last
+    /// human-typed message of the transcript into the input box, only while the box is empty). The
+    /// dialog's `retractedMessageUuids` are the turn's *assistant* and tool-result messages and
+    /// never the prompt, so the text cannot come from them.
+    ///
+    /// Takes no text: the composer is the object that already knows which user messages this
+    /// channel has rendered, and a card that read the timeline to hand one in would be a second
+    /// opinion about the same question.
+    func restoreLastPrompt()
 }
 
 extension ComposerModel: ComposerSite {}

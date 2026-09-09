@@ -55,6 +55,27 @@ public struct WireReducer: Sendable {
     /// retaining answers for the life of the fold.
     public static let retainedAnswerLimit = 64
 
+    /// The overage-consent dialog this fold last saw **raised**, and the one a
+    /// `system/model_consent_fallback` frame belongs to. Nil until an overage ask arrives, and
+    /// dropped on process replacement with the rest of the overlay: the request id belongs to the
+    /// process that issued it.
+    ///
+    /// **Raised and not answered, because the answer does not arrive on this stream.** The host's
+    /// `decisionAnswered` signal and the engine's frames reach this fold by two independent
+    /// asynchronous paths, so "the ask answered most recently" is not a fact the fold can order: a
+    /// frame folded before the signal would attach to the *previous* ask and put one card's outcome
+    /// on another. The ask and its frame are both the engine's own output in the engine's own order,
+    /// and the engine waits for an answer before raising the next ask — so the last ask raised is
+    /// the one the frame concerns, whatever the host's timing does. Attaching to an ask still
+    /// pending is harmless: `DecisionCard.reading` draws the frame only once the card has stopped
+    /// waiting.
+    private var lastRaisedOverageConsent: RequestID?
+
+    /// The `dialog_kind` an overage-consent ask carries. It is `DecisionItem.title` for a dialog —
+    /// `title(of:)` puts the kind there — so this is a comparison and not a second decode of the
+    /// request payload.
+    static let overageConsentDialogKind = "fable_overage_consent_prompt"
+
     public init(stream: LogicalStream, slug: String, seed: DurableProjection = .empty) {
         self.stream = stream
         self.slug = slug
@@ -74,6 +95,7 @@ public struct WireReducer: Sendable {
         self.epoch = .first
         self.pendingDeliveries = 0
         self.retainedAnswers = []
+        self.lastRaisedOverageConsent = nil
         rebuild()
     }
 
@@ -150,6 +172,7 @@ public struct WireReducer: Sendable {
             // ordinary route and this is the one that has to hold when it never arrived — a process
             // the supervisor replaced without the tap seeing it die.
             processGone(at: now)
+            lastRaisedOverageConsent = nil
 
         case .relocated(let mainPath):
             if let (resolved, kind) = TranscriptPath.resolve(mainPath, under: stream.configHome),
@@ -436,6 +459,14 @@ public struct WireReducer: Sendable {
 
         case .modelConsentFallback(let f):
             banner(.modelFallback, text: f.content, at: now)
+            // §8.4: the frame *is* the answered overage card's outcome, in the engine's own words.
+            // The banner alone is the channel-level notice; the card is the surface the user
+            // pressed. The frame carries no request id, so it is correlated with the last overage
+            // ask this fold saw the engine raise — the one ordering that is entirely the engine's
+            // and cannot be reordered by when the host's answer signal happens to arrive.
+            if let raised = lastRaisedOverageConsent {
+                setDecision(raised) { $0.consentFallback = f }
+            }
 
         case .mirrorError(let f):
             // The banner only; the ingestion's switch to file-only is Task 10's.
@@ -467,6 +498,12 @@ public struct WireReducer: Sendable {
             id: id, timestamp: now, provenance: provenance(), requestID: request.id, kind: kind,
             title: Self.title(of: request.payload), toolUseID: Self.toolUseID(of: request.payload),
             agentID: Self.agentID(of: request.payload), state: state, payload: request.raw)
+        // The ask the next `model_consent_fallback` belongs to, recorded where the engine raises it
+        // — the only ordering the fold owns. `title` *is* the `dialog_kind` for a dialog
+        // (`title(of:)` puts it there), so this is a string compare and not a second decode.
+        if kind == .dialog, Self.title(of: request.payload) == Self.overageConsentDialogKind {
+            lastRaisedOverageConsent = request.id
+        }
         if state == .pending, let retained {
             setDecision(request.id) { $0.state = .answered(outcome: retained.label) }
         }

@@ -351,6 +351,33 @@ final class SettingsReadoutTests: XCTestCase {
     /// real diagnostics composer, with only the binary, the version gate and the fleet stubbed.
     /// Returns once the detached index build has reported, which is what makes the readout's
     /// numbers deterministic.
+    /// Item 43's arming control exists in Settings → Developer, is the app's one reservation set's
+    /// arm, and is not on until something presses it.
+    ///
+    /// A one-shot debug arm and not a persisted setting: it dies with the process, which is what a
+    /// "next answer" means. Both directions — the readback is off before the press and on after it —
+    /// because a control that reported *armed* whatever happened would pass either half alone.
+    @MainActor
+    func testTheDeveloperSectionArmsTheMalformedPermissionAnswer() async throws {
+        let temp = try TempTree()
+        let configHome = try temp.directory("home")
+        let built = try await Self.workspace(temp: temp, configHome: configHome)
+        let decisions = DecisionReservations()
+        let readout = SettingsReadout(workspace: built.workspace, decisions: decisions)
+
+        XCTAssertFalse(readout.malformedAnswerArmed, "the arm is on before anything pressed it")
+        XCTAssertFalse(decisions.malformedNextPermissionAnswer, "the app's reservation set opened armed")
+
+        let body = SettingsView(readout: readout).body
+        let button = try XCTUnwrap(ViewTree.button(SettingsView.malformedAnswerAction, in: body),
+                                   "the Developer section offers no arming control")
+        XCTAssertTrue(ViewTree.press(button), "the arming control carried no action")
+
+        XCTAssertTrue(decisions.malformedNextPermissionAnswer,
+                      "pressing the control did not arm the app's one reservation set")
+        XCTAssertTrue(readout.malformedAnswerArmed, "the readback does not report the arm it just set")
+    }
+
     @MainActor
     private static func workspace(temp: TempTree, configHome: URL) async throws -> Built {
         let composerBox = ComposerBox()

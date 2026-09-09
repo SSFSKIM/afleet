@@ -30,10 +30,31 @@ final class SettingsReadout {
     // Developer
     var settings = AfleetSettings()
 
-    init(workspace: Workspace) {
+    /// The app's one reservation set, for item 43's arming control alone (spec §15).
+    ///
+    /// Nil for a Settings window opened over a workspace with no app model behind it — a route that
+    /// has no channels to answer a card on either — and the control is then absent rather than
+    /// arming something nothing reads.
+    @ObservationIgnored private let decisions: DecisionReservations?
+
+    init(workspace: Workspace, decisions: DecisionReservations? = nil) {
         self.workspace = workspace
+        self.decisions = decisions
         counter = UnknownFrameCounter(store: workspace.store)
     }
+
+    // MARK: - Item 43's Developer action
+
+    /// Whether the next permission answer will go out malformed.
+    var malformedAnswerArmed: Bool { decisions?.malformedNextPermissionAnswer ?? false }
+
+    /// Whether the control exists at all: a Settings window with no reservation set behind it can
+    /// arm nothing.
+    var offersMalformedAnswerAction: Bool { decisions != nil }
+
+    /// Arms it. One-shot and unpersisted, so it dies with the process; `DecisionAnswering` spends it
+    /// on the next permission answer from any surface.
+    func armMalformedAnswer() { decisions?.malformedNextPermissionAnswer = true }
 
     // MARK: - Environment
 
@@ -114,6 +135,9 @@ final class SettingsReadout {
 struct SettingsView: View {
     @Bindable var readout: SettingsReadout
 
+    /// Item 43's control, worded as the acceptance item words it.
+    static let malformedAnswerAction = "Send malformed answer to next permission"
+
     var body: some View {
         Form {
             Section("Environment") {
@@ -168,6 +192,14 @@ struct SettingsView: View {
                 Text("Takes effect on the next launch.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if readout.offersMalformedAnswerAction {
+                    Button(Self.malformedAnswerAction) { readout.armMalformedAnswer() }
+                    Text(readout.malformedAnswerArmed
+                         ? "The next permission answer will be sent in a shape the engine rejects."
+                         : "Arms one answer. It is not saved and does not survive a relaunch.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Button("Reveal the diagnostics log") { readout.revealDiagnostics() }
             }
         }

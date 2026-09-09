@@ -21,9 +21,12 @@ import FleetKit
 /// dialog the binary owns, that path cannot be executed to prove it wrong, so the assertion is that
 /// `perform` was never reached at all (§6.3).
 ///
-/// A `ChannelKey` holds a config home and an item id holds a session, and `XCTAssertEqual` prints
-/// both operands (§6.3, §11), so every comparison over one of those is spelled as a boolean with a
-/// written message. Failure messages carry counts and action names.
+/// **No assertion here prints an operand that carries content.** `XCTAssertEqual` prints both sides
+/// on failure, and a `ChannelKey` holds a config home, an item id holds a session, and a card's
+/// reading, an answer body and a fixture's frame all hold engine bytes (§6.3, §11). Every comparison
+/// over one of those is therefore spelled as a boolean with a written message; the equality
+/// assertions that remain compare counts and the engine's own millisecond constants, which carry
+/// nothing. Failure messages carry counts and action names.
 @MainActor
 final class DialogCardTests: XCTestCase {
 
@@ -87,12 +90,14 @@ final class DialogCardTests: XCTestCase {
     private func dialogView(_ card: DecisionCard,
                             _ answering: DecisionAnswering,
                             retraction: RetractionRegistry? = nil,
+                            composer: (any ComposerSite)? = nil,
                             deadline: DialogDeadline = .standard) throws -> DialogCardView {
         guard case .dialog(let request) = card.payload else {
             throw XCTSkip("a recorded dialog request no longer decodes as one")
         }
         return DialogCardView(card: card, request: request, presentation: .full, channel: Self.channel,
-                              answering: answering, retraction: retraction, deadline: deadline)
+                              answering: answering, retraction: retraction, composer: composer,
+                              deadline: deadline)
     }
 
     private func press(_ label: String, in body: Any) throws {
@@ -165,7 +170,7 @@ final class DialogCardTests: XCTestCase {
             try press(label, in: try dialogView(raised, answering).body)
             await answering.whenIdle()
             let sent = try await sentBody(lifecycle, label)
-            XCTAssertEqual(sent, try json(body), "the body sent for \(label) is not the engine's spelling")
+            XCTAssertTrue(sent == (try json(body)), "the body sent for \(label) is not the engine's spelling")
         }
     }
 
@@ -213,10 +218,61 @@ final class DialogCardTests: XCTestCase {
             "originalModel": "invented-original", "fallbackModel": "invented-fallback",
             "apiRefusalCategory": NSNull(),
         ])
-        XCTAssertNil(nulled.refusalFallback?.apiRefusalCategory, "an explicit null decoded as a category")
+        XCTAssertTrue(nulled.refusalFallback?.apiRefusalCategory == nil,
+                      "an explicit null decoded as a category")
         let none = CardTree.texts(in: try dialogView(nulled, answering).body)
         XCTAssertFalse(none.contains(where: { $0.hasPrefix("Category:") }),
                        "a null category still drew a category line")
+    }
+
+    /// §8.4's dialog table: `edit_prompt` — "the engine aborts the turn; the composer is prefilled
+    /// with the last user text". The answer alone is not the behaviour; without the prefill the user
+    /// presses *Edit the prompt* and is left with an aborted turn and an empty field.
+    ///
+    /// All four actions, because the prefill belongs to one of them: three resolutions that must
+    /// leave the field alone are as much of the clause as the one that must fill it. And the refused
+    /// arm, because the prefill rides the same success branch the retraction does — a composer
+    /// filled for an answer the engine was never told is a prompt restored for a dialog still open.
+    func testOnlyEditThePromptRestoresTheLastPromptAndOnlyOnSuccess() async throws {
+        let expected: [(label: String, restores: Int)] = [
+            ("Edit the prompt", 1),
+            ("Retry on the fallback model", 0),
+            ("Keep the refusal", 0),
+            ("Close", 0),
+        ]
+        for (label, restores) in expected {
+            let composer = RecordingComposerSite()
+            let (_, answering) = await hosted()
+            let raised = try card("dialog-refusal-fallback", at: 0)
+            try press(label, in: try dialogView(raised, answering, composer: composer).body)
+            await answering.whenIdle()
+            XCTAssertEqual(composer.restores, restores,
+                           "\(label) restored the last prompt \(composer.restores) time(s), not \(restores)")
+        }
+
+        let refusing = LifecycleDouble()
+        await refusing.always(.failure(.notOwned))
+        let answering = DecisionAnswering(lifecycle: refusing)
+        let composer = RecordingComposerSite()
+        let raised = try card("dialog-refusal-fallback", at: 0)
+        try press("Edit the prompt", in: try dialogView(raised, answering, composer: composer).body)
+        await answering.whenIdle()
+        XCTAssertNotNil(answering.banner, "the refused answer raised no banner, so nothing was refused")
+        XCTAssertEqual(composer.restores, 0,
+                       "a refused answer restored the last prompt \(composer.restores) time(s)")
+    }
+
+    /// A host with no composer answers exactly as it did: the seam is optional and its absence
+    /// removes nothing from the wire (C6.3's rule for a host with no list to filter, applied to the
+    /// composer).
+    func testEditThePromptStillAnswersWhereTheHostHasNoComposer() async throws {
+        let (lifecycle, answering) = await hosted()
+        let raised = try card("dialog-refusal-fallback", at: 0)
+        try press("Edit the prompt", in: try dialogView(raised, answering).body)
+        await answering.whenIdle()
+        let sent = try await sentBody(lifecycle, "Edit the prompt")
+        XCTAssertTrue(sent == (try json(#"{"behavior":"completed","result":"edit_prompt"}"#)),
+                      "a host with no composer did not send the engine's edit_prompt body")
     }
 
     // MARK: - Retraction
@@ -316,8 +372,8 @@ final class DialogCardTests: XCTestCase {
         let retired = DecisionCard(try XCTUnwrap(reducer.overlay.decisions[request.id],
                                                  "the cancelled dialog left the overlay"))
         XCTAssertTrue(retired.state == .cancelled, "a retired dialog did not reach the cancelled state")
-        XCTAssertEqual(retired.reading(inStaleOverlay: false)?.text, "Answered elsewhere.",
-                       "a retired dialog does not read as answered elsewhere")
+        XCTAssertTrue(retired.reading(inStaleOverlay: false)?.text == "Answered elsewhere.",
+                      "a retired dialog does not read as answered elsewhere")
 
         registry.resolved(retired, in: Self.channel)
         XCTAssertTrue(doomed.allSatisfy { !registry.retains($0) },
@@ -342,8 +398,8 @@ final class DialogCardTests: XCTestCase {
         try press("Use usage credits", in: enabledBody)
         await answering.whenIdle()
         let consent = try await sentBody(lifecycle, "Use usage credits")
-        XCTAssertEqual(consent, try json(#"{"behavior":"completed","result":"consent"}"#),
-                       "the consent answer is not the engine's spelling")
+        XCTAssertTrue(consent == (try json(#"{"behavior":"completed","result":"consent"}"#)),
+                      "the consent answer is not the engine's spelling")
 
         let (_, second) = await hosted()
         let disabled = try card("dialog-fable-overage", at: 1)
@@ -384,8 +440,8 @@ final class DialogCardTests: XCTestCase {
             try press(label, in: try dialogView(fresh, answers).body)
             await answers.whenIdle()
             let sent = try await sentBody(resolver, label)
-            XCTAssertEqual(sent, try json(expected),
-                           "the body sent for \(label) is not the engine's spelling")
+            XCTAssertTrue(sent == (try json(expected)),
+                          "the body sent for \(label) is not the engine's spelling")
         }
     }
 
@@ -398,15 +454,15 @@ final class DialogCardTests: XCTestCase {
         // No frame: the card still settles, and it reads its own outcome.
         let alone = try XCTUnwrap(settled.reading(inStaleOverlay: false, consentFallback: nil),
                                   "an answered overage card is still waiting with no fallback frame")
-        XCTAssertEqual(alone.text, "switch_default", "the settled card does not read its own outcome")
+        XCTAssertTrue(alone.text == "switch_default", "the settled card does not read its own outcome")
 
         // The frame the recording carries: its content is the outcome, verbatim.
         let frame = try XCTUnwrap(Self.consentFallbacks(try FixtureRunner.frames("dialog-fable-overage")).first,
                                   "the fixture records no model_consent_fallback frame")
         let withFrame = try XCTUnwrap(settled.reading(inStaleOverlay: false, consentFallback: frame),
                                       "the card with a fallback frame is still waiting")
-        XCTAssertEqual(withFrame.text, frame.fields.content,
-                       "the fallback frame's content is not the card's outcome")
+        XCTAssertTrue(withFrame.text == frame.fields.content,
+                      "the fallback frame's content is not the card's outcome")
 
         let (_, answering) = await hosted()
         let drawn = CardTree.texts(in: DecisionCardView(card: settled, presentation: .full, in: Self.channel,
@@ -423,7 +479,7 @@ final class DialogCardTests: XCTestCase {
 
         // The disabled arm the fixture records carries explicit nulls.
         let nulled = try card("dialog-fable-overage", at: 1)
-        XCTAssertNil(nulled.overageConsent?.balanceCents, "an explicit null decoded as a balance")
+        XCTAssertTrue(nulled.overageConsent?.balanceCents == nil, "an explicit null decoded as a balance")
         XCTAssertFalse(CardTree.texts(in: try dialogView(nulled, answering).body)
                            .contains(where: { $0.hasPrefix("Balance:") }),
                        "a null balance still drew a balance line")
@@ -432,9 +488,9 @@ final class DialogCardTests: XCTestCase {
         // because no recording carries it.
         let unfed = try card("dialog-fable-overage", at: 0,
                              payload: ["overagesEnabled": true, "modelName": "invented-model"])
-        XCTAssertNil(DialogCardView.balanceText(try XCTUnwrap(unfed.overageConsent,
-                                                              "the overage payload no longer decodes")),
-                     "a payload with no balance key drew a balance")
+        XCTAssertTrue(DialogCardView.balanceText(try XCTUnwrap(unfed.overageConsent,
+                                                               "the overage payload no longer decodes")) == nil,
+                      "a payload with no balance key drew a balance")
 
         // And the positive case, so a card that drew nothing at all could not pass.
         let fed = try card("dialog-fable-overage", at: 0)
@@ -443,7 +499,7 @@ final class DialogCardTests: XCTestCase {
                                                                           "the overage payload no longer decodes")),
                                  "a fed balance drew no line")
         XCTAssertTrue(line.hasPrefix("Balance:"), "a fed balance is not drawn as a balance")
-        XCTAssertEqual(balance, 0, "the recorded enabled arm's balance is not the one this clause was written against")
+        XCTAssertTrue(balance == 0, "the recorded enabled arm's balance is not the one this clause was written against")
     }
 
     // MARK: - The kind afleet never declared
@@ -467,17 +523,18 @@ final class DialogCardTests: XCTestCase {
         _ = reducer.apply(.unansweredDialog(undeclared))
         let item = try XCTUnwrap(reducer.overlay.decisions[undeclared.id], "the reducer opened no item for it")
         let opaque = DecisionCard(item)
-        XCTAssertNil(opaque.dialogKind, "an undeclared kind decoded as one afleet declares")
+        XCTAssertTrue(opaque.dialogKind == nil, "an undeclared kind decoded as one afleet declares")
         XCTAssertTrue(opaque.state == .inert, "an unanswered dialog did not open inert")
-        XCTAssertEqual(opaque.reading(inStaleOverlay: false)?.text,
-                       "Left to the binary: afleet does not handle this kind.",
-                       "an undeclared dialog does not read as left to the binary")
+        XCTAssertTrue(opaque.reading(inStaleOverlay: false)?.text
+                          == "Left to the binary: afleet does not handle this kind.",
+                      "an undeclared dialog does not read as left to the binary")
 
         let every: [DecisionAction] = [.retryOnFallbackModel, .editPrompt, .keepTheRefusal,
                                        .useUsageCredits, .switchToDefaultModel, .notNow,
                                        .setUpUsageCredits, .closeDialog]
         for action in every {
-            XCTAssertNil(opaque.answer(action), "the mapping produced an answer for an undeclared dialog kind")
+            XCTAssertTrue(opaque.answer(action) == nil,
+                          "the mapping produced an answer for an undeclared dialog kind")
             answering.send(action, on: opaque, in: Self.channel)
         }
         await answering.whenIdle()
@@ -488,6 +545,111 @@ final class DialogCardTests: XCTestCase {
         _ = reducer.apply(.requestCancelled(undeclared.id, .first))
         let after = await lifecycle.actions.count
         XCTAssertEqual(after, 0, "the cancellation of an undeclared dialog put \(after) actions on the wire")
+    }
+
+    /// Item 62's fallback frame is part of the **card's own state**, and reaches the timeline row
+    /// without any host passing it in.
+    ///
+    /// The whole recording is replayed through C3's fold — every frame and every declared dialog
+    /// request, with the host's own `decisionAnswered` raised for each overage ask as it arrives,
+    /// which is what a card's successful answer does in production. The recording answers five
+    /// overage dialogs and emits four `model_consent_fallback` frames, each after the ask it
+    /// concerns, so the reading is discriminating in both directions: the first ask, which no frame
+    /// followed, must read its own outcome, and each of the other four must read the frame that
+    /// followed **it** rather than the newest one.
+    ///
+    /// Drawn through `DecisionRowContent`, which is the timeline's host path, with no
+    /// `consentFallback` handed to any view.
+    func testTheConsentFallbackReachesTheTimelineRowsCardWithoutBeingHandedIn() async throws {
+        var reducer = WireReducer(stream: Self.stream, slug: "invented-slug")
+        var answered: [RequestID] = []
+        for event in try FixtureRunner.events("dialog-fable-overage") {
+            _ = reducer.apply(event)
+            guard case .request(let request) = event,
+                  case .requestUserDialog(let dialog) = request.payload,
+                  DecisionCard.DialogKind(rawValue: dialog.fields.dialogKind) == .overageConsent else { continue }
+            _ = reducer.apply(.decisionAnswered(request.id, outcome: .answered(summary: "consent")))
+            answered.append(request.id)
+        }
+        XCTAssertEqual(answered.count, 5, "the recording answered \(answered.count) overage dialogs, not 5")
+
+        let frames = Self.consentFallbacks(try FixtureRunner.frames("dialog-fable-overage"))
+        XCTAssertEqual(frames.count, 4, "the recording carries \(frames.count) consent-fallback frames, not 4")
+
+        let (_, answering) = await hosted()
+        let context = InventedItems.context(key: Self.channel)
+
+        // The first ask: no frame followed it, so the settled card reads its own outcome and the
+        // newest frame in the recording must not have leaked onto it.
+        let first = try XCTUnwrap(reducer.overlay.decisions[answered[0]], "the fold dropped the first overage ask")
+        let firstDrawn = try Self.rowCardTexts(first, context, answering)
+        XCTAssertTrue(firstDrawn.contains("consent"),
+                      "the card no frame followed does not read its own outcome")
+        XCTAssertFalse(frames.contains { frame in firstDrawn.contains(frame.fields.content) },
+                       "a consent-fallback frame reached the card that no frame followed")
+
+        // The four the frames followed, each against the frame that followed *it*.
+        for (offset, frame) in frames.enumerated() {
+            let item = try XCTUnwrap(reducer.overlay.decisions[answered[offset + 1]],
+                                     "the fold dropped an answered overage ask")
+            let drawn = try Self.rowCardTexts(item, context, answering)
+            XCTAssertTrue(drawn.contains(frame.fields.content),
+                          "the row's card does not read the frame that followed ask \(offset + 1)")
+        }
+    }
+
+    /// The correlation does not depend on the host's answer signal arriving before the engine's
+    /// frame.
+    ///
+    /// The signal and the engine's frames reach the fold by two independent asynchronous paths —
+    /// `DecisionAnswering` raises `decisionAnswered` once `perform` has returned, while the frame
+    /// comes up the wire — so neither side can promise the order. This arm is the far end of that:
+    /// the **whole recording is folded first**, every frame included, and only then is each overage
+    /// ask answered. A fold that remembered "the ask answered most recently" has nothing recorded
+    /// when any frame lands and loses all four; a fold that records the ask the engine *raised* is
+    /// unaffected, because that ordering is the engine's own.
+    func testTheConsentFallbackSurvivesTheAnswerSignalArrivingAfterTheFrame() async throws {
+        var reducer = WireReducer(stream: Self.stream, slug: "invented-slug")
+        var asks: [RequestID] = []
+        for event in try FixtureRunner.events("dialog-fable-overage") {
+            _ = reducer.apply(event)
+            guard case .request(let request) = event,
+                  case .requestUserDialog(let dialog) = request.payload,
+                  DecisionCard.DialogKind(rawValue: dialog.fields.dialogKind) == .overageConsent else { continue }
+            asks.append(request.id)
+        }
+        XCTAssertEqual(asks.count, 5, "the recording raised \(asks.count) overage dialogs, not 5")
+
+        // Every answer after every frame, which is the order this clause exists for.
+        for id in asks {
+            _ = reducer.apply(.decisionAnswered(id, outcome: .answered(summary: "consent")))
+        }
+
+        let frames = Self.consentFallbacks(try FixtureRunner.frames("dialog-fable-overage"))
+        XCTAssertEqual(frames.count, 4, "the recording carries \(frames.count) consent-fallback frames, not 4")
+
+        let (_, answering) = await hosted()
+        let context = InventedItems.context(key: Self.channel)
+        for (offset, frame) in frames.enumerated() {
+            let item = try XCTUnwrap(reducer.overlay.decisions[asks[offset + 1]],
+                                     "the fold dropped an answered overage ask")
+            let drawn = try Self.rowCardTexts(item, context, answering)
+            XCTAssertTrue(drawn.contains(frame.fields.content),
+                          "ask \(offset + 1)'s card lost its frame when the answer signal arrived late")
+        }
+    }
+
+    /// What the timeline's own decision row draws for an item: the row mount's body, the card
+    /// component it hosts, and that component's body. The descent is spelled out because reflection
+    /// does not evaluate a stored view's `body` — a test that read the row's body alone would find
+    /// no text at all and pass whatever the card says.
+    private static func rowCardTexts(_ item: DecisionItem,
+                                     _ context: TimelineRenderContext,
+                                     _ answering: DecisionAnswering) throws -> [String] {
+        let row = DecisionRowContent(row: TimelineRow(.decision(item)), context: context, answering: answering)
+        let card = try XCTUnwrap(ViewTree.values(of: DecisionCardView.self, in: row.body).first,
+                                 "the decision row hosted no card component")
+        return CardTree.texts(in: card.body)
     }
 
     /// Every `model_consent_fallback` a fixture's frames carry.

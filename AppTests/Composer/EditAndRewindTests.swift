@@ -393,6 +393,77 @@ final class EditAndRewindTests: XCTestCase {
         await rig.finish()
     }
 
+    // MARK: - Site 4, the refusal dialog's *Edit the prompt*
+
+    /// Which text goes back into the field, and when it does not.
+    ///
+    /// The engine restores **the last human-typed message of the transcript**, and only while the
+    /// input box is empty (2.1.263 `cli.pretty.js:523717`, reached from the `refusal-fallback-edit`
+    /// abort at `:770399`). Both halves are asserted against the fold's own messages: an empty field
+    /// takes the newest rendered user message's text, and a field the user has typed into is left
+    /// exactly as it was — the words in front of the user were never given to anything and the
+    /// prompt they would replace is still in the conversation above.
+    func testRestoringTheLastPromptFillsAnEmptyFieldAndLeavesATypedOneAlone() async throws {
+        let rig = try await Rig()
+        let newest = try XCTUnwrap(rig.renderedUserMessages().last, "the fixture folded no user message to restore")
+
+        rig.composer.draft = ""
+        rig.composer.restoreLastPrompt()
+        XCTAssertTrue(rig.composer.draft == newest.text,
+                      "the restored field is not the newest of the fold's \(rig.renderedUserMessages().count) rendered message(s)")
+
+        let typed = "an invented half-typed reply"
+        rig.composer.draft = typed
+        rig.composer.restoreLastPrompt()
+        XCTAssertTrue(rig.composer.draft == typed,
+                      "restoring the prompt overwrote a \(typed.count)-character draft the user had typed")
+        await rig.finish()
+    }
+
+    /// Which message the restore takes, over a list the fold could hand it.
+    ///
+    /// **A subagent's stream carries user messages of its own** — the run's instructions — and they
+    /// sort into the merged timeline after the main thread's newest prompt for as long as the run is
+    /// live. Restoring one of those would put another agent's errand in the field and call it the
+    /// user's words. A replayed message is excluded for the same reason: an `--agent` opening prompt
+    /// is the engine's and not this user's.
+    ///
+    /// Asserted over `lastHumanPrompt(in:)` rather than through the rig, because the committed
+    /// recording the rig opens folds one stream: a fold with no subagent in it cannot be shown to
+    /// pick the wrong stream, and writing a second transcript to prove a selection rule would
+    /// exercise the ingestion instead of the rule. The rig arm above is what holds the production
+    /// path down.
+    func testTheRestoreTakesTheMainStreamsNewestNonReplayPrompt() throws {
+        let main = Self.prompt(key: "u-invented-main-1", text: "the prompt the user typed", stream: .main)
+        let replayed = Self.prompt(key: "u-invented-main-2", text: "an invented replayed prompt",
+                                   stream: .main, isReplay: true)
+        let subagent = Self.prompt(key: "u-invented-agent-1", text: "an invented subagent errand",
+                                   stream: .agent(taskID: "invented-task-1"))
+
+        let chosen = try XCTUnwrap(ComposerModel.lastHumanPrompt(in: [main, replayed, subagent]),
+                                   "the restore chose nothing from a list holding a main-stream prompt")
+        XCTAssertTrue(chosen.id.key == main.id.key,
+                      "the restore took a message that is a replay or another stream's")
+
+        // The negative floor: a list with nothing of the user's own restores nothing rather than
+        // falling back to whatever is newest.
+        XCTAssertTrue(ComposerModel.lastHumanPrompt(in: [replayed, subagent]) == nil,
+                      "the restore fell back to a replayed or a subagent message")
+    }
+
+    /// One rendered user message on a named stream. Every identifier is invented (§11).
+    private static func prompt(key: String, text: String, stream name: StreamName,
+                               isReplay: Bool = false) -> UserMessageItem {
+        let stream = LogicalStream(configHome: URL(fileURLWithPath: "/tmp/invented-config-home"),
+                                   sessionID: LaunchFixtures.sessionA,
+                                   name: name)
+        return UserMessageItem(id: ItemID(stream: stream, key: key),
+                               provenance: Provenance(stream: stream, origin: .wire),
+                               text: text,
+                               isReplay: isReplay,
+                               promptUUID: key)
+    }
+
     // MARK: - Nothing to fork from
 
     /// An edited message with no assistant record before it has no fork point: nothing is offered,

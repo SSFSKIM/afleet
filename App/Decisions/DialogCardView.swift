@@ -80,6 +80,10 @@ struct DialogCardView: View {
     /// Where a resolved refusal dialog's retracted uuids go (spec D11). The host that owns a
     /// timeline list hands one in; a host with no list to filter — Activity's row — passes none.
     let retraction: RetractionRegistry?
+    /// Where *Edit the prompt* puts the prompt back (contract Y6's fourth site). The host that owns
+    /// a composer hands one in; a host that has none — Activity's row, an agent node's card — passes
+    /// none, on the same rule `retraction` follows, and the answer still goes out.
+    let composer: (any ComposerSite)?
     let deadline: DialogDeadline
 
     init(card: DecisionCard,
@@ -88,6 +92,7 @@ struct DialogCardView: View {
          channel: ChannelKey,
          answering: DecisionAnswering,
          retraction: RetractionRegistry? = nil,
+         composer: (any ComposerSite)? = nil,
          deadline: DialogDeadline = .standard) {
         self.card = card
         self.request = request
@@ -95,6 +100,7 @@ struct DialogCardView: View {
         self.channel = channel
         self.answering = answering
         self.retraction = retraction
+        self.composer = composer
         self.deadline = deadline
     }
 
@@ -224,8 +230,13 @@ struct DialogCardView: View {
     /// from the channel for a request that is still waiting. An action that puts nothing on the
     /// wire, which is *Set up usage credits…*, never reaches this closure at all.
     private func send(_ action: DecisionAction) {
-        answering.send(action, on: card, in: channel) { [card, channel, retraction] in
+        answering.send(action, on: card, in: channel) { [card, channel, retraction, composer] in
             retraction?.resolved(card, in: channel)
+            // §8.4: `edit_prompt` alone puts the prompt back. It rides the success branch for the
+            // retraction's reason turned around — a field refilled for an answer `perform` refused
+            // is a prompt restored under a dialog that is still open — and only this action, because
+            // the other three leave the conversation where it is.
+            if action == .editPrompt { composer?.restoreLastPrompt() }
         }
     }
 }

@@ -217,6 +217,178 @@ final class ChannelTimelineModelTests: XCTestCase {
         XCTAssertFalse(model.items.isEmpty, "the settled open read 0 items")
     }
 
+    // MARK: - D11's retraction, from the state the fold publishes
+
+    /// §8.4: the refusal dialog's `retractedMessageUuids` are evicted "on resolution, whatever the
+    /// choice, **or when a `control_cancel_request` retires the dialog**".
+    ///
+    /// The binary retiring a dialog is a resolution nobody pressed, so a registry fed only by a
+    /// card's success callback never hears about it — and the messages the refusal took back stay
+    /// on screen for the life of the channel. This drives the whole thing through the running
+    /// channel: recorded frames and the recorded refusal go in on the wire, the binary's
+    /// cancellation follows, and **no card is ever built and no answer is ever sent**, which is what
+    /// separates a registry fed from the published overlay from one fed by a view.
+    ///
+    /// Both directions, and both readers of the registry: C6.1's list filter drops the retracted
+    /// rows and keeps every other row, and a host reaching the channel's fold the way the Thread tab
+    /// does — through the app's one `ChannelTimelineRegistry` — reads the same eviction.
+    func testACancelledRefusalRetractsItsMessagesWithNoCardEverDrawn() async throws {
+        let rig = try await Rig(fixtures: ["plain-two-turn"])
+        let key = rig.keys[0]
+        await rig.lifecycle.openEvents(of: key)
+        let model = rig.registry.model(for: key)
+        await model.open(rig.row(0, origin: .owned(.ready)))
+
+        let streamed = await Self.settle(until: { Self.messageKeys(of: model).count > 1 })
+        XCTAssertTrue(streamed, "the channel holds \(Self.messageKeys(of: model).count) message(s), fewer than 2")
+        let retracted = Array(Self.messageKeys(of: model).prefix(2))
+
+        // A refusal naming those two, which is the shape §8.4 describes and the shape no recording
+        // carries: the recorded refusals each name one. It is the recorded request with its
+        // `retractedMessageUuids` replaced, so everything but the list under test is the engine's.
+        let request = try FixtureRunner.request("dialog-refusal-fallback", subtype: "request_user_dialog",
+                                                id: "invented-refusal-1",
+                                                overrides: ["payload": ["originalModel": "invented-original",
+                                                                        "fallbackModel": "invented-fallback",
+                                                                        "retractedMessageUuids": retracted]])
+        rig.lifecycle.enqueue(.request(request), to: key)
+        let raised = await Self.settle(until: { model.timeline.overlay.decisions[request.id] != nil })
+        XCTAssertTrue(raised, "the refusal never reached the channel's fold")
+
+        // The messages are on screen while the dialog is open — a registry that evicted on receipt
+        // would already have taken them, and the clause below could not tell it from a working one.
+        XCTAssertTrue(retracted.allSatisfy { uuid in
+            TimelineListView.retained(model.rows, by: model.retraction).contains { $0.item.id.key == uuid }
+        }, "a message was evicted while its dialog was still open")
+
+        // The binary retires the dialog. Nothing is pressed and no card exists.
+        rig.lifecycle.enqueue(.requestCancelled(request.id, .first), to: key)
+
+        let evicted = await Self.settle(until: {
+            let drawn = TimelineListView.retained(model.rows, by: model.retraction)
+            return retracted.allSatisfy { uuid in !drawn.contains { $0.item.id.key == uuid } }
+        })
+        XCTAssertTrue(evicted, "the retired dialog left \(retracted.count) retracted message(s) on screen")
+
+        let survivors = model.rows.filter { row in !retracted.contains(row.item.id.key) }
+        XCTAssertGreaterThan(survivors.count, 0, "the channel holds nothing but the retracted messages")
+        let drawn = TimelineListView.retained(model.rows, by: model.retraction)
+        XCTAssertEqual(drawn.count, survivors.count,
+                       "the filter drew \(drawn.count) of \(survivors.count) unretracted row(s)")
+
+        // The second reader: the same fold reached the way the Thread tab reaches it.
+        let elsewhere = rig.registry.model(for: key).retraction
+        let doomed = model.rows.filter { retracted.contains($0.item.id.key) }
+        XCTAssertEqual(doomed.count, retracted.count,
+                       "the channel holds \(doomed.count) of the \(retracted.count) retracted messages")
+        XCTAssertTrue(doomed.allSatisfy { !elsewhere.retains($0.item) },
+                      "a host reaching the channel's fold does not see the eviction")
+
+        // And nothing was answered: this whole eviction happened with no card and no wire traffic.
+        let actions = await rig.lifecycle.actions.filter { if case .answer = $0.action { return true } else { return false } }
+        XCTAssertEqual(actions.count, 0, "the retired dialog put \(actions.count) answer(s) on the wire")
+    }
+
+    /// A process that dies under an open refusal dialog takes nothing back.
+    ///
+    /// `.exited` rewrites every pending decision to `.inert`, so a registry that read "not pending"
+    /// as "resolved" would evict the messages of a dialog nobody answered and nothing cancelled —
+    /// and the registry is the *channel's*, not the process's, so they would stay hidden through the
+    /// respawn with nothing left to un-hide them. §8.4 evicts on a resolution, and a process dying
+    /// is not one.
+    ///
+    /// Both directions in one fold: the dialog that goes `.inert` keeps its messages, and a second
+    /// dialog the binary cancelled before the exit loses its own — so a registry that simply stopped
+    /// evicting would fail the second half.
+    func testAPendingRefusalLosesNothingWhenTheProcessDies() throws {
+        let key = ChannelKey(configHome: URL(fileURLWithPath: "/tmp/invented-config-home-retraction"),
+                             session: LaunchFixtures.sessionA)
+        let stream = LogicalStream(configHome: key.configHome, sessionID: key.session, name: .main)
+        var reducer = WireReducer(stream: stream, slug: "invented-slug")
+
+        let cancelled = try Self.refusal(id: "invented-refusal-cancelled", retracting: ["invented-doomed-1"])
+        let orphaned = try Self.refusal(id: "invented-refusal-orphaned", retracting: ["invented-survivor-1"])
+        _ = reducer.apply(.request(cancelled))
+        _ = reducer.apply(.request(orphaned))
+        _ = reducer.apply(.requestCancelled(cancelled.id, .first))
+        _ = reducer.apply(.exited(.signal(9, stderrTail: ""), .first))
+
+        XCTAssertTrue(reducer.overlay.decisions[orphaned.id]?.state == .inert,
+                      "the surviving dialog did not go inert when the process died")
+
+        let registry = RetractionRegistry()
+        registry.observe(reducer.overlay, in: key)
+
+        XCTAssertTrue(registry.retains(Self.item(key: "invented-survivor-1", in: stream)),
+                      "a process dying took back the messages of a dialog nobody resolved")
+        XCTAssertFalse(registry.retains(Self.item(key: "invented-doomed-1", in: stream)),
+                       "the dialog the binary retired kept its messages")
+    }
+
+    /// D11's read costs one decode per dialog, not one per publish.
+    ///
+    /// `observe(_:in:)` runs on the thirty-hertz publish path and building a `DecisionCard` encodes
+    /// and re-decodes the whole request payload, so a scan of every settled dialog per publish would
+    /// grow the per-publish cost with the channel's entire dialog history — the growth §8.3 forbids,
+    /// and invisible from the eviction, which is idempotent either way.
+    func testTheRetractionReadsEachSettledDialogOnce() throws {
+        let key = ChannelKey(configHome: URL(fileURLWithPath: "/tmp/invented-config-home-retraction-cost"),
+                             session: LaunchFixtures.sessionA)
+        let stream = LogicalStream(configHome: key.configHome, sessionID: key.session, name: .main)
+        var reducer = WireReducer(stream: stream, slug: "invented-slug")
+        let settled = try Self.refusal(id: "invented-refusal-settled", retracting: ["invented-doomed-2"])
+        _ = reducer.apply(.request(settled))
+        _ = reducer.apply(.requestCancelled(settled.id, .first))
+
+        let registry = RetractionRegistry()
+        for _ in 0..<30 { registry.observe(reducer.overlay, in: key) }
+
+        XCTAssertEqual(registry.decodes, 1,
+                       "30 publishes over one settled dialog cost \(registry.decodes) decode(s), not 1")
+        XCTAssertFalse(registry.retains(Self.item(key: "invented-doomed-2", in: stream)),
+                       "the settled dialog's message survived the read")
+    }
+
+    /// A `refusal_fallback_prompt` naming the uuids it takes back: the recorded request with its
+    /// `retractedMessageUuids` replaced and re-keyed, so everything but the list under test is the
+    /// engine's and every identifier this suite states is invented (§11).
+    private static func refusal(id: String, retracting uuids: [String]) throws -> InboundRequest {
+        try FixtureRunner.request("dialog-refusal-fallback", subtype: "request_user_dialog", id: id,
+                                  overrides: ["payload": ["originalModel": "invented-original",
+                                                          "fallbackModel": "invented-fallback",
+                                                          "retractedMessageUuids": uuids]])
+    }
+
+    /// A timeline item the registry can be asked about, keyed by a record uuid.
+    private static func item(key: String, in stream: LogicalStream) -> TimelineItem {
+        .userMessage(UserMessageItem(id: ItemID(stream: stream, key: key),
+                                     provenance: Provenance(stream: stream, origin: .wire),
+                                     text: "an invented message",
+                                     promptUUID: key))
+    }
+
+    /// The keys of the message rows this channel holds, in the fold's order.
+    private static func messageKeys(of model: ChannelTimelineModel) -> [String] {
+        model.rows.compactMap { row in
+            switch row.item {
+            case .assistantMessage, .userMessage: row.item.id.key
+            default: nil
+            }
+        }
+    }
+
+    /// A bounded wait on a condition the ingestion fulfils asynchronously. It is a hang guard and
+    /// not a measurement: the publish is coalesced at thirty hertz and the fold runs on an actor,
+    /// so there is no synchronous point to read.
+    private static func settle(until condition: @MainActor () -> Bool) async -> Bool {
+        let deadline = Date().addingTimeInterval(LaunchFixtures.hangGuard)
+        while Date() < deadline {
+            if condition() { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return condition()
+    }
+
     // MARK: - The change feed
 
     /// A subscriber attached before the file changes sees the change.

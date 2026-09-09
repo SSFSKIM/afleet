@@ -32,9 +32,20 @@ struct DecisionCardView: View {
     /// Where a resolved refusal dialog's retracted uuids go (spec D11). A host with no list to
     /// filter passes none.
     let retraction: RetractionRegistry?
-    /// The `system/model_consent_fallback` frame that followed an overage answer, where one did.
-    /// **Its absence is equally correct** — the engine emits nothing when provisioning succeeded
-    /// (anchor 5) — so it changes what a settled card *reads* and never whether it settles.
+    /// Where the refusal dialog's *Edit the prompt* puts the prompt back (contract Y6's fourth
+    /// site). A host with no composer passes none, and the answer still goes out.
+    let composer: (any ComposerSite)?
+    /// The channel's agent-run tree, for item 52's label on a card raised inside a subagent. A host
+    /// that holds no tree passes none.
+    let agents: AgentRunTree?
+    /// An override of the `system/model_consent_fallback` frame the card already carries, for a host
+    /// that holds one the fold has not attached.
+    ///
+    /// **The card's own frame is the ordinary route** (`DecisionCard.consentFallback`, written by
+    /// C3's fold): a parameter every host had to remember is a parameter most hosts would forget,
+    /// and the card would then settle reading the wrong outcome. **Its absence is equally correct**
+    /// — the engine emits nothing when provisioning succeeded (anchor 5) — so it changes what a
+    /// settled card *reads* and never whether it settles.
     let consentFallback: ModelConsentFallback?
 
     init(card: DecisionCard,
@@ -44,6 +55,8 @@ struct DecisionCardView: View {
          isActive: Bool = false,
          answering: DecisionAnswering,
          retraction: RetractionRegistry? = nil,
+         composer: (any ComposerSite)? = nil,
+         agents: AgentRunTree? = nil,
          consentFallback: ModelConsentFallback? = nil) {
         self.card = card
         self.presentation = presentation
@@ -52,6 +65,8 @@ struct DecisionCardView: View {
         self.isActive = isActive
         self.answering = answering
         self.retraction = retraction
+        self.composer = composer
+        self.agents = agents
         self.consentFallback = consentFallback
     }
 
@@ -78,7 +93,8 @@ struct DecisionCardView: View {
                                presentation: presentation,
                                channel: channel,
                                isActive: isActive,
-                               answering: answering)
+                               answering: answering,
+                               agents: agents)
         case .question(let tool):
             QuestionCardView(card: card, tool: tool, presentation: presentation,
                              channel: channel, answering: answering)
@@ -90,7 +106,8 @@ struct DecisionCardView: View {
                                 channel: channel, answering: answering)
         case .dialog(let request):
             DialogCardView(card: card, request: request, presentation: presentation,
-                           channel: channel, answering: answering, retraction: retraction)
+                           channel: channel, answering: answering, retraction: retraction,
+                           composer: composer)
         default:
             Text(card.summaryLine)
                 .font(presentation == .full ? .body : .callout)
@@ -119,8 +136,8 @@ extension DecisionCard {
     /// successful path — which is why this only ever replaces the text of an already-settled card.
     func reading(inStaleOverlay stale: Bool,
                  consentFallback: ModelConsentFallback? = nil) -> DecisionReading? {
-        if let consentFallback, dialogKind == .overageConsent, state != .pending {
-            return DecisionReading(text: consentFallback.fields.content)
+        if let frame = consentFallback ?? self.consentFallback, dialogKind == .overageConsent, state != .pending {
+            return DecisionReading(text: frame.fields.content)
         }
         switch state {
         case .pending:

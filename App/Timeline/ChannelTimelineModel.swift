@@ -556,6 +556,11 @@ final class ChannelTimelineModel {
         guard let ingestion else { return }
         let next = await ingestion.timeline
         timeline = next
+        // D11's eviction, read from the state the fold published rather than from a view's callback.
+        // §8.4 counts a `control_cancel_request` that retired a refusal dialog as a resolution, and
+        // nobody presses that: a registry fed only where a card answers never hears about it, and
+        // the messages the refusal took back stay on screen for the life of the channel.
+        retraction.observe(next.overlay, in: key)
         fanout.yield(next)
     }
 

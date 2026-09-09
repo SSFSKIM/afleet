@@ -26,6 +26,10 @@ struct PermissionCardView: View {
     /// that (spec §8.4).
     let isActive: Bool
     let answering: DecisionAnswering
+    /// The channel's agent-run tree, for item 52's label alone. A host that has none — Activity's
+    /// fleet-wide list, a card drawn outside a channel's publish — passes none, and the card then
+    /// says the ask is a subagent's without naming which.
+    let agents: AgentRunTree?
 
     /// Which control opens focused.
     enum Focus: Hashable, Sendable { case approve, decline }
@@ -46,13 +50,15 @@ struct PermissionCardView: View {
          presentation: DecisionCardView.Presentation,
          channel: ChannelKey,
          isActive: Bool = false,
-         answering: DecisionAnswering) {
+         answering: DecisionAnswering,
+         agents: AgentRunTree? = nil) {
         self.card = card
         self.tool = tool
         self.presentation = presentation
         self.channel = channel
         self.isActive = isActive
         self.answering = answering
+        self.agents = agents
         _destination = State(initialValue: card.alwaysAllow?.preselected)
     }
 
@@ -64,13 +70,25 @@ struct PermissionCardView: View {
     /// The consent line — what this call is for, in the engine's words.
     var consentLine: String? { tool.fields.description }
 
-    /// The label for a card raised inside a subagent (item 52's card half). The run's type and
-    /// description are C3's join and arrive with the Agents tab; the id alone is what this card
-    /// has, and a card that said nothing would hide that the ask is not the main thread's.
+    /// What a card raised inside a subagent says (item 52's card half): the run's type and its
+    /// errand, from the channel's own tree, in the Agents tab's own words.
+    ///
+    /// **The tab's formatter and not a second one.** The same ask is drawn on the run's node and in
+    /// the main timeline, and two spellings of one sentence would leave the two surfaces naming the
+    /// same work differently.
+    ///
+    /// The standing sentence survives for the run the tree does not hold — a channel whose fold has
+    /// not opened, or an ask that outran its `task_started`. A card that said nothing would hide
+    /// that the ask is not the main thread's; a card that invented a name would attribute it to the
+    /// wrong work.
     var subagentLabel: String? {
         guard let agent = tool.fields.agentID, !agent.isEmpty else { return nil }
-        return "In a subagent run"
+        guard let node = agents?.node(agent) else { return Self.unattributedSubagentLabel }
+        return AgentNodeDecisions.label(agentType: node.agentType, description: node.description)
     }
+
+    /// What the card says when the ask names a run this channel's tree does not hold.
+    static let unattributedSubagentLabel = "In a subagent run"
 
     /// Why the engine is asking, as text a person reads.
     ///

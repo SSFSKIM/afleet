@@ -34,8 +34,23 @@ struct AgentNodeDecisions: View {
     /// beside it, because two runs of one type are otherwise the same sentence twice. A run that has
     /// named neither says so rather than borrowing "Claude" — the request is the subagent's.
     static func label(of content: AgentNodeContent) -> String {
-        let type = content.agentType.flatMap { $0.isEmpty ? nil : $0 } ?? AgentTranscriptHeader.unknownType
-        return content.description.isEmpty ? type : "\(type) — \(content.description)"
+        label(agentType: content.agentType, description: content.description)
+    }
+
+    /// The same sentence over a run's own two wire strings, for the surface that reaches the run
+    /// through C3's tree rather than through this pane's content value — the main timeline's
+    /// permission card (item 52).
+    ///
+    /// **One formatter and not two.** Item 52 says the card and the node name the same run, and two
+    /// spellings of one sentence is exactly the drift a reader cannot see: the tab and the timeline
+    /// would each be right about a different name for the same work. Sanitising here as well as at
+    /// the content boundary is idempotent and is what lets a caller holding a raw `AgentRunNode`
+    /// use it (root §12).
+    static func label(agentType: String?, description: String) -> String {
+        let type = agentType.map(TextSanitiser.sanitise).flatMap { $0.isEmpty ? nil : $0 }
+            ?? AgentTranscriptHeader.unknownType
+        let errand = TextSanitiser.sanitise(description)
+        return errand.isEmpty ? type : "\(type) — \(errand)"
     }
 
     /// The node's cards, built through C6.3's component and nothing else.

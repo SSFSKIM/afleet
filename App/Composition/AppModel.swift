@@ -525,7 +525,7 @@ final class AppModel: FilesTabHost, SourceControlTabHost {
             return coordinator
         }
         let reached = await configured.run()
-        settingsReadout = reached.workspace.map(SettingsReadout.init(workspace:))
+        settingsReadout = reached.workspace.map { SettingsReadout(workspace: $0, decisions: decisions) }
         // Before Activity, so a channel opened by the first paint already has a registry bound to
         // the workspace this launch reached rather than to the one it replaced.
         if let workspace = reached.workspace {
