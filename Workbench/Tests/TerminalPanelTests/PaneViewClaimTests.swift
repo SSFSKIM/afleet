@@ -235,11 +235,18 @@ final class PaneViewClaimTests: XCTestCase {
     /// outgoing container still has the view does nothing — and the outgoing container then takes
     /// the view out with nobody left to notice, leaving the pane blank until some later update
     /// that may never come. Relinquishing hands the view on instead of merely dropping it.
+    ///
+    /// Both hosts are in a window, because that is what makes the survivor one: a container in no
+    /// window is not somewhere the pane can be seen, and the hand-off passes over it.
     func testAnOutgoingContainerHandsTheSurfaceToTheHostThatStillStands() {
         let surface = GhosttyTerminalSurface()
         let representable = PaneSurfaceView(surface: surface)
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 1_200, height: 700))
         let surviving = representable.makeContainer()
         let outgoing = representable.makeContainer()
+        root.addSubview(surviving)
+        root.addSubview(outgoing)
+        window = PaneTestChild.window(around: root)
 
         // The survivor is laid out first, while the outgoing container is still the one holding
         // the view: it is not eligible to take it, and it does not.
@@ -250,6 +257,76 @@ final class PaneViewClaimTests: XCTestCase {
 
         XCTAssertTrue(surface.view.superview === surviving,
                       "the outgoing host left the pane attached to nothing")
+    }
+
+    /// Which of two standing hosts the view goes to is the newest, which is what the top of a
+    /// claimant stack means — and it is a fact about registration order, not about which container
+    /// happened to be made first. Asserted in the order the existing hand-off test does not cover:
+    /// two hosts still standing, and the older of them must not take it.
+    func testTheHandOffGoesToTheNewestHostThatStillStands() {
+        let surface = GhosttyTerminalSurface()
+        let representable = PaneSurfaceView(surface: surface)
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 1_200, height: 700))
+        let older = representable.makeContainer()
+        let newer = representable.makeContainer()
+        let outgoing = representable.makeContainer()
+        root.addSubview(older)
+        root.addSubview(newer)
+        root.addSubview(outgoing)
+        window = PaneTestChild.window(around: root)
+
+        outgoing.relinquish(surface.view)
+
+        XCTAssertTrue(surface.view.superview === newer, "the hand-off passed over the newest standing host")
+    }
+
+    /// A host that lost the surface to a newer one and was then dismantled is gone, and the stack
+    /// has to know it. Its own teardown removes nothing — the view is not its to remove — so a
+    /// forget that sat below that guard left it standing in the list for ever, and the next
+    /// hand-off chose it: SwiftUI had already taken its view apart, so the window that really was
+    /// drawing the pane drew nothing at all.
+    func testAHostDismantledEarlierIsNotHandedTheSurface() {
+        let surface = GhosttyTerminalSurface()
+        let representable = PaneSurfaceView(surface: surface)
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 1_200, height: 700))
+        let surviving = representable.makeContainer()
+        let dismantled = representable.makeContainer()
+        let outgoing = representable.makeContainer()
+        root.addSubview(surviving)
+        root.addSubview(dismantled)
+        root.addSubview(outgoing)
+        window = PaneTestChild.window(around: root)
+
+        // The middle host goes away while the newest one holds the view: it removes nothing,
+        // correctly, and that is the whole of what it does.
+        dismantled.relinquish(surface.view)
+        outgoing.relinquish(surface.view)
+
+        XCTAssertTrue(surface.view.superview === surviving,
+                      "the surface was handed to a host that had already been dismantled")
+    }
+
+    /// And a host in no window is not somewhere a pane can be seen. SwiftUI may release a container
+    /// without dismantling it, and a hand-off to one leaves the pane attached to a view hierarchy
+    /// nothing draws while the window that is still showing the tab shows an empty pane.
+    func testAHostInNoWindowIsNotHandedTheSurface() {
+        let surface = GhosttyTerminalSurface()
+        let representable = PaneSurfaceView(surface: surface)
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 1_200, height: 700))
+        let surviving = representable.makeContainer()
+        // Registered over the same surface and never put in a window — the newest entry in the
+        // stack, and the one place the view must not go.
+        let windowless = representable.makeContainer()
+        let outgoing = representable.makeContainer()
+        root.addSubview(surviving)
+        root.addSubview(outgoing)
+        window = PaneTestChild.window(around: root)
+        XCTAssertNil(windowless.window, "the test did not begin with a host outside every window")
+
+        outgoing.relinquish(surface.view)
+
+        XCTAssertTrue(surface.view.superview === surviving,
+                      "the surface was handed to a host that is in no window")
     }
 
     /// The hand-off is not the user asking for this pane. A pop-out closing while the user is

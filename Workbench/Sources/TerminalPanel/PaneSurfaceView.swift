@@ -180,19 +180,28 @@ final class PaneSurfaceContainer: NSView {
     /// host laid out *before* this teardown saw the view held here and left it alone, correctly,
     /// and there is no second update owed to it. Dropping the view there leaves the pane blank in
     /// the window that still shows it, for as long as nothing else happens to redraw.
+    /// **The stack is left before the guard is asked.** A container is dismantled whether or not it
+    /// still holds the view, and one that lost the view to a newer host earlier is exactly the
+    /// container that returns here — so a forget below the guard left a dismantled host standing in
+    /// the list, to be chosen as the survivor by the next hand-off while the host that really was
+    /// drawing the pane got nothing.
     func relinquish(_ surfaceView: NSView) {
+        Self.forget(self)
         guard surfaceView.superview === self else { return }
         surfaceView.removeFromSuperview()
         owesSurfaceFocus = false
         adoptedSurfaceView = nil
-        Self.forget(self)
         Self.survivingHost(over: surfaceView)?.adopt(surfaceView, takingFocus: false)
     }
 
-    /// The newest container other than this one that is standing over `surfaceView`, if any.
+    /// The newest container other than this one that is standing over `surfaceView` **in a window**.
+    ///
+    /// The window is the whole of what "still standing" means to a person: a container SwiftUI has
+    /// released without dismantling is in none, and handing it the pane puts the surface in a view
+    /// hierarchy nothing draws while the window still showing the tab shows an empty pane.
     private static func survivingHost(over surfaceView: NSView) -> PaneSurfaceContainer? {
         prune()
-        return mounted.last { $0.surfaceView === surfaceView }?.container
+        return mounted.last { $0.surfaceView === surfaceView && $0.container?.window != nil }?.container
     }
 
     private static func record(_ container: PaneSurfaceContainer, over surfaceView: NSView) {
