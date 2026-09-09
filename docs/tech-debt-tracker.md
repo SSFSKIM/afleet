@@ -4059,3 +4059,42 @@ needs more. Nothing above is renumbered.
      either a per-fixture acknowledgement the manifest can carry, or restricting the rule to hits
      that are not inside a value the fixture declares as carried copy. Owner: C1's probe suite.
      Raised by C6.4 at Task 8.
+
+186. **Item 51's fourth arm reads "a frame arrived" where it means "a notification arrived".**
+     `AgentRelayMachine.stoppedBeforeNextRound` (`App/Agents/AgentRelayRegistry.swift`) settles the
+     *stopped before its next tool round* arm on `RegistryEntry.notified && status != .running &&
+     lastFrameAt > relay`. `lastFrameAt` moves for **any** frame naming the task, a `task_progress`
+     and a `background_tasks_changed` listing included, so the ordinary case item 51 is written
+     about — a message sent to a run that was already complete and already notified — reads the arm
+     the first time that run appears in a later listing, and reports *Not delivered* on the strength
+     of a notification that is not new. Nothing the mirror publishes tells a new notification from
+     an old one: there is no instant for the notification and no count of them, and `endedAt` is
+     stamped once and keeps its first value. Closing it needs one field on `RegistryEntry` —
+     `notifiedAt`, or a notification count — which this leaf may not invent; the arm and its
+     limitation are stated in the source. The way it is wrong is the visible direction: a *Not
+     delivered* with a *Retry* on a message that may still be queued, rather than a *Relayed* on one
+     that will never arrive. Owner: FleetKit's registry mirror, then this arm. Raised by C6.4 at fix
+     wave C.
+
+398. **What a delivery note *draws* is assertable; where the row *puts* it is not.**
+     `AgentRelayNote`'s sentence, reply and *Retry* are stored rather than computed inside `body`
+     because `Mirror` does not enter a `@ViewBuilder` — so a test can find the note in a row's tree
+     and build its body, which `AgentRelayTests` now does, but the step between the two is still
+     reflection: that the note is *in* the row's rendered hierarchy, and where, is taken from the
+     view value the body returned rather than from anything rendered. The same gap covers the
+     *Retry* button's placement and the `.red` styling of a *Not delivered* sentence. Closing it
+     means a rendering harness this repository does not have — a snapshot of the row, or a
+     view-inspection dependency — which is a decision above one leaf. Owner: whoever rules on a
+     rendering harness for the timeline's rows. Raised by C6.4 at fix wave C.
+
+399. **A *Retry* pressed after the panel session is gone words its refusal to nobody.**
+     Since fix wave C the resend closure holds the three app-scoped capabilities and the panel only
+     through a weak `report`, so the send itself survives an eviction — but the refusal it may come
+     back with is written to `AgentNodeActions.banner`, and after the eviction there is no such
+     object and no banner on screen. The user presses *Retry* on the main timeline's row, the relay
+     is refused by the lifecycle, and the row goes on showing the arm it showed before with no
+     sentence saying the retry failed. It is bounded — a refused `sendPrompt` opens no record, so
+     nothing is silently reported as sent — but the press reads as ignored. Closing it means a
+     channel-scoped refusal the Y8 note can draw beside the state, which is a new field on the
+     reading rather than a rewording. Owner: C6.4's successor on the relay. Raised by C6.4 at fix
+     wave C.
