@@ -514,7 +514,11 @@ def build(fixtures_root):
 
 def main(argv):
     root = argv[1] if len(argv) > 1 else STAGING_ROOT
-    print("built %s" % build(root))
+    dest = build(root)
+    # A count and never the destination (root §6.3, §11): a generator run states how much it
+    # wrote, and the caller passed the root in, so the path is nothing this line has to tell them.
+    files = sum(len(names) for _, _, names in os.walk(dest))
+    print("built 1 fixture directory, %d file(s)" % files)
     return 0
 
 

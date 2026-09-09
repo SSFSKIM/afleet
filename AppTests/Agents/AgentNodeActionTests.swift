@@ -112,7 +112,10 @@ final class AgentNodeActionTests: XCTestCase {
         let actions = try XCTUnwrap(rig.model.actions)
         XCTAssertTrue(actions.lastBackgrounding == .stale,
                       "a {backgrounded: false} reply was concluded as something other than a stale row")
-        XCTAssertNil(actions.banner, "a success body raised a banner, which belongs to the refusal arm alone")
+        // A boolean and not `XCTAssertNil` (§11): a `RowBanner` carries the engine's own sentence,
+        // and a failing `XCTAssertNil` prints its operand.
+        XCTAssertTrue(actions.banner == nil,
+                      "a success body raised a banner, which belongs to the refusal arm alone")
         XCTAssertFalse(actions.backgroundingDisabled,
                        "a stale row disabled backgrounding for the whole session, which is §6.4's arm")
         _ = rig.model.read

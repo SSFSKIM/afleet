@@ -155,8 +155,8 @@ final class AgentRelayTests: XCTestCase {
         wire.result()
         XCTAssertTrue(wire.state(of: record) == .notDelivered(.noCall),
                       "a turn that closed with no SendMessage call did not settle the no-call arm")
-        XCTAssertEqual(wire.reading(of: record).reply, RelayWire.reply,
-                       "the no-call arm dropped the model's own reply")
+        XCTAssertTrue(wire.reading(of: record).reply == RelayWire.reply,
+                      "the no-call arm dropped the model's own reply")
     }
 
     /// **G4, arm two: the `tool_result` is an error — a refused resume — and the model's reply is
@@ -176,8 +176,8 @@ final class AgentRelayTests: XCTestCase {
 
         XCTAssertTrue(wire.state(of: record) == .notDelivered(.refused),
                       "an error tool result did not settle the refused arm")
-        XCTAssertEqual(wire.reading(of: record).reply, RelayWire.reply,
-                       "the refused arm dropped the model's own reply")
+        XCTAssertTrue(wire.reading(of: record).reply == RelayWire.reply,
+                      "the refused arm dropped the model's own reply")
         XCTAssertNotNil(wire.reading(of: record).retry,
                         "a refused relay offered no retry")
     }
@@ -422,8 +422,11 @@ final class AgentRelayTests: XCTestCase {
                                                                context: InventedItems.context(agents: navigation,
                                                                                               key: wire.key)).content)
 
-        XCTAssertEqual(plain, withRegistry,
-                       "a message with no relay record drew \(withRegistry.count - plain.count) extra string(s)")
+        // A boolean and a count, never the two arrays (§11): the drawn strings carry the message
+        // text and the row's item keys, and a failing `XCTAssertEqual` prints both operands.
+        XCTAssertTrue(plain == withRegistry,
+                      "a message with no relay record drew \(withRegistry.count - plain.count) extra string(s), "
+                      + "and \(withRegistry.filter { !plain.contains($0) }.count) string(s) the plain row does not draw")
     }
 
     /// The node draws the same reading the row does, from the same derivation — item 51 puts the
