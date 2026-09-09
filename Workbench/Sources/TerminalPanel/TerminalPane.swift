@@ -88,6 +88,11 @@ public final class TerminalPane {
     /// the session's coalesced close, from its `tearDown()`, and from `restart(_:)`, and only the
     /// pane sees all three.
     @ObservationIgnored private var teardown: Task<Void, Never>?
+    /// A suspension held open inside the teardown, so the interleavings this pane's callers race
+    /// through — a close arriving while a restart is already inside `close()` — can be stood in
+    /// rather than guessed at. Nothing in the app sets it; it is `internal` because the only
+    /// caller with any business holding a teardown is a test of those callers.
+    @ObservationIgnored var heldTeardown: (@MainActor () async -> Void)?
     @ObservationIgnored private var hasFiredTermination = false
     @ObservationIgnored private var hasReportedExitToSurface = false
     @ObservationIgnored private var observedTermination: PTYTermination?
@@ -188,6 +193,7 @@ public final class TerminalPane {
     }
 
     private func performTeardown() async {
+        await heldTeardown?()
         surface.onInput = nil
         surface.onResize = nil
         let pty = self.pty

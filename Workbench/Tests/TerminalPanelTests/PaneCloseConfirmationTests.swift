@@ -165,6 +165,37 @@ final class PaneCloseConfirmationTests: XCTestCase {
         XCTAssertTrue(session.panes.last === fresh, "the fresh pane took another slot")
     }
 
+    /// A close the user asks for while a restart is suspended in the pane's teardown wins, and the
+    /// restart yields to it.
+    ///
+    /// The restart consulted the standing closes only on the way *in*, so a close begun inside its
+    /// suspension was invisible to it: it dropped the old pane and put a fresh shell in the slot,
+    /// and the close that resumed afterwards could no longer find a pane of its own to remove and
+    /// returned. The user was told their pane had closed while the slot held a running child.
+    func testARestartYieldsToACloseAskedForWhileItWasSuspended() async throws {
+        let (session, _) = try makeSession()
+        let pane = session.openShellPane()
+        let child = try runningChild(of: pane)
+        let gate = PaneTestGate()
+        pane.heldTeardown = { await gate.hold() }
+
+        let restarting = Task { await session.restart(pane) }
+        await gate.awaitEntry()
+        let closing = Task { await session.close(pane) }
+        try await PaneTestChild.waitUntil(seconds: 10, "close-standing") { session.isClosing(pane) }
+        // The interleaving, pinned rather than hoped for: the restart is still inside the teardown
+        // at the moment the user's close is standing on the same pane.
+        XCTAssertTrue(gate.isHolding, "the restart had already resumed before the close was asked for")
+
+        gate.open()
+        let restarted = await restarting.value
+        await closing.value
+
+        XCTAssertNil(restarted, "the restart opened a fresh shell in a slot the user had asked to empty")
+        XCTAssertTrue(session.panes.isEmpty, "panes=\(session.panes.count) once the user's close returned")
+        XCTAssertFalse(PaneTestChild.isRunning(child), "the child of the closed pane is still running")
+    }
+
     func testAPaneWhoseChildHasAlreadyEndedClosesWithoutAsking() async throws {
         let (session, fixture) = try makeSession()
         let pane = session.run(PaneRequest(
