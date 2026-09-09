@@ -258,6 +258,176 @@ final class TimelineListTests: XCTestCase {
         func record() { count += 1 }
     }
 
+    // MARK: - The preview's incarnations (review scalpel-2#1)
+
+    /// A preview that **restarts** is redrawn, not appended to.
+    ///
+    /// C3 clears the preview on the `assistant` frame and lets a later `content_block_start` open a
+    /// fresh one, and a preview with no message id keys as `preview:streaming` either time — so two
+    /// incarnations arrive under one key. Coalescing hides the reset in between, and a continuation
+    /// rule that reads only "same key, no shorter" then splices the second message's tail onto the
+    /// first: "alpha" followed by "bravo!" drew "alpha!". The rule is a prefix, which the two
+    /// incarnations of one message satisfy and two different messages do not.
+    func testARestartedPreviewIsRedrawnRatherThanAppendedTo() {
+        let controller = TimelineTableController()
+        let items = Self.rows(3)
+        controller.apply(TimelineRenderInput(rows: items, preview: Self.preview("alpha")))
+        XCTAssertEqual(controller.previewRow?.tail, "alpha",
+                       "the first incarnation drew \(controller.previewRow?.tail ?? "nothing")")
+
+        // Same key, longer text, and not a continuation of it: a second incarnation.
+        controller.apply(TimelineRenderInput(rows: items, preview: Self.preview("bravo!"),
+                                             changes: [.previewChanged]))
+        XCTAssertEqual(controller.previewRow?.tail, "bravo!",
+                       "a restarted preview drew \(controller.previewRow?.tail ?? "nothing")")
+
+        // The continuation itself still costs a fragment and not a rebuild, which is what §4 is.
+        controller.apply(TimelineRenderInput(rows: items, preview: Self.preview("bravo! and more"),
+                                             changes: [.previewChanged]))
+        XCTAssertEqual(controller.previewRow?.tail, "bravo! and more",
+                       "a continuation drew \(controller.previewRow?.tail ?? "nothing")")
+        XCTAssertEqual(controller.reloadedRows.count, 1,
+                       "a continuation reloaded \(controller.reloadedRows.count) row(s)")
+    }
+
+    // MARK: - Heights that the cache cannot see (review scalpel-3#1)
+
+    /// A narrower table re-measures every row.
+    ///
+    /// The cache is keyed by the row's id alone, and a height is a function of the id **and** the
+    /// width it was measured at. Without an invalidation on width, a window dragged narrow keeps
+    /// drawing every row at the height it had when it was wide, so wrapped text is clipped for the
+    /// life of the channel.
+    func testAWidthChangeInvalidatesEveryCachedHeight() {
+        let controller = TimelineTableController()
+        FrameTimeHarness.hosted(controller.scrollView, size: NSSize(width: 900, height: 400)) { window in
+            controller.setRows((0..<8).map { RenderedRow(key: "doc-\($0)", source: Self.paragraph) })
+            window.layoutIfNeeded()
+            controller.tableView.layoutSubtreeIfNeeded()
+            let wide = Self.totalHeight(of: controller)
+            XCTAssertGreaterThan(controller.tableView.bounds.width, 500,
+                                 "the table is \(Int(controller.tableView.bounds.width)) point(s) wide in a 900-point window, so no width changes here")
+
+            window.setContentSize(NSSize(width: 360, height: 400))
+            window.layoutIfNeeded()
+            controller.tableView.layoutSubtreeIfNeeded()
+            let narrow = Self.totalHeight(of: controller)
+
+            XCTAssertGreaterThan(narrow, wide * 1.2,
+                                 "8 wrapped row(s) measured \(Int(narrow)) point(s) narrow against \(Int(wide)) wide")
+        }
+    }
+
+    /// Content that grows after it is mounted tells the table, and the row grows with it.
+    ///
+    /// A disclosure opening and a card mounting asynchronously both change a row's height with no
+    /// publish behind them, and the only height invalidation this controller had accompanied an
+    /// explicit reload. The hosted row reports its own size, so what a row is allocated follows
+    /// what it draws.
+    func testHostedContentThatGrowsUpdatesItsRowHeight() throws {
+        let controller = TimelineTableController()
+        controller.setRows([RenderedRow(key: "doc-0", source: Self.paragraph)])
+        let before = controller.tableView(controller.tableView, heightOfRow: 0)
+        let host = try XCTUnwrap(controller.tableView(controller.tableView, viewFor: nil, row: 0) as? TimelineRowHostView,
+                                 "the table mounted a row that cannot report its own height")
+
+        host.update(root: AnyView(Color.clear.frame(width: 200, height: 400)), context: nil)
+
+        let after = controller.tableView(controller.tableView, heightOfRow: 0)
+        XCTAssertEqual(after, 400, accuracy: 2,
+                       "hosted content of 400 point(s) is allocated \(Int(after)), from \(Int(before))")
+        XCTAssertEqual(controller.hostedHeightNotes, 1,
+                       "the table was told of \(controller.hostedHeightNotes) height change(s) by its hosted rows")
+    }
+
+    // MARK: - The mounted row across reloads (review sweep#4, scalpel-1#3)
+
+    /// A reload updates the row that is already mounted rather than building a second one.
+    ///
+    /// The disposable state SwiftUI keeps for a row — a card's in-flight guard, a question's draft —
+    /// belongs to the hosting view, so a fresh one per reload silently discards it. A message
+    /// streaming beside a half-typed answer reloads its neighbour thirty times a second.
+    func testAReloadReusesTheRowAlreadyMounted() {
+        let controller = TimelineTableController()
+        let items = Self.rows(3)
+        controller.apply(TimelineRenderInput(rows: items))
+        let first = controller.tableView(controller.tableView, viewFor: nil, row: 1)
+
+        var edited = items
+        edited[1] = Self.row(index: 1, text: "an edited line")
+        controller.apply(TimelineRenderInput(rows: edited, changes: [.updated(edited[1].id)]))
+        let second = controller.tableView(controller.tableView, viewFor: nil, row: 1)
+
+        XCTAssertTrue(first === second, "a reload replaced the mounted row rather than updating it")
+        let other = controller.tableView(controller.tableView, viewFor: nil, row: 2)
+        XCTAssertFalse(first === other, "two rows of the table are one view")
+    }
+
+    /// A context that changed reaches the rows that are already mounted.
+    ///
+    /// The context is a value captured in each hosted root, so a row mounted before the channel
+    /// learnt its cwd — or before its overlay went stale — keeps drawing against the old one until
+    /// something unrelated reloads it.
+    func testAContextChangeReachesMountedRows() throws {
+        let controller = TimelineTableController()
+        let collapse = TimelineCollapseState()
+        let items = Self.rows(3)
+        controller.apply(TimelineRenderInput(rows: items),
+                         context: InventedItems.context(collapse: collapse))
+        let host = try XCTUnwrap(controller.tableView(controller.tableView, viewFor: nil, row: 0) as? TimelineRowHostView,
+                                 "the table mounted a row that does not record the context it drew against")
+        XCTAssertNil(host.renderedContext?.cwd, "the row was mounted against a context that already had a cwd")
+
+        let cwd = URL(fileURLWithPath: "/tmp/afleet-timeline-list/invented-project")
+        controller.apply(TimelineRenderInput(rows: items),
+                         context: InventedItems.context(collapse: collapse, cwd: cwd))
+
+        XCTAssertEqual(host.renderedContext?.cwd, cwd,
+                       "the mounted row still draws against the context it was built with")
+    }
+
+    // MARK: - The anchor across the durable replacement (review scalpel-2#6)
+
+    /// The reader's place survives the moment the streaming message becomes an item.
+    ///
+    /// The anchor is a row key, and the preview's key belongs to no item: when the durable message
+    /// lands the anchored row is gone, and a publish that also inserted items above it then shoves
+    /// the viewport by their whole height. The anchor moves to the item that replaced it.
+    func testTheAnchorFollowsThePreviewToItsDurableItem() throws {
+        let controller = TimelineTableController()
+        try FrameTimeHarness.hosted(controller.scrollView, size: Self.viewport) { window in
+            // A preview taller than the viewport, so the reader can sit at its top edge and still
+            // not be at the document's bottom.
+            let streaming = Self.preview(Self.paragraph + "\n\n" + Self.paragraph)
+            controller.apply(TimelineRenderInput(rows: Self.rows(20, from: 100), preview: streaming))
+            window.layoutIfNeeded()
+            controller.tableView.layoutSubtreeIfNeeded()
+
+            let previewIndex = controller.rows.count - 1
+            Self.scroll(controller, to: controller.tableView.rect(ofRow: previewIndex).minY)
+            XCTAssertFalse(controller.scroll.isPinnedToBottom,
+                           "the viewport reports itself pinned while parked on a preview taller than it")
+            let anchored = try XCTUnwrap(Self.topRowKey(of: controller),
+                                         "no row sits at the viewport's top edge, so there is no anchor")
+            XCTAssertTrue(anchored.hasPrefix("preview:"),
+                          "the row at the top edge is not the preview, so this asserts nothing about it")
+            let before = try XCTUnwrap(Self.offset(ofRowKeyed: anchored, in: controller),
+                                       "the anchored preview has no rectangle before the commit")
+
+            // The turn settles: the preview becomes item 120, and a backfill lands ten items above.
+            let settled = Self.rows(10, from: 0) + Self.rows(20, from: 100) + [Self.row(index: 120)]
+            controller.apply(TimelineRenderInput(rows: settled, preview: nil,
+                                                 changes: [.inserted(settled[settled.count - 1].id)]))
+            window.layoutIfNeeded()
+            controller.tableView.layoutSubtreeIfNeeded()
+
+            let after = try XCTUnwrap(Self.offset(ofRowKeyed: "item-120", in: controller),
+                                      "the durable replacement is not in the table after the commit")
+            XCTAssertEqual(after, before, accuracy: 2,
+                           "the reader's place moved \(Int(abs(after - before))) point(s) when the preview became an item")
+        }
+    }
+
     // MARK: - Fixtures
 
     /// The window every scroll assertion is made in. Short enough that sixty rows overflow it, which
@@ -287,6 +457,19 @@ final class TimelineListTests: XCTestCase {
 
     private static func rows(_ count: Int, from first: Int = 0) -> [TimelineRow] {
         (first..<(first + count)).map { row(index: $0) }
+    }
+
+    /// A paragraph long enough that its height is a function of the width it is measured at, and
+    /// tall enough that it overflows the test's viewport. Invented text, as everything here is.
+    private static let paragraph = String(repeating:
+        "an invented sentence about nothing in particular, long enough to wrap and to wrap again. ",
+        count: 12)
+
+    /// What the table would allocate to every row it holds, asked for the way it asks.
+    private static func totalHeight(of controller: TimelineTableController) -> CGFloat {
+        controller.rows.indices.reduce(into: CGFloat(0)) {
+            $0 += controller.tableView(controller.tableView, heightOfRow: $1)
+        }
     }
 
     private static func preview(_ text: String) -> StreamingPreview {
