@@ -1,6 +1,7 @@
 // TerminalPanel: owned by C7.4 (docs/doperpowers/specs/2026-09-09-c7.4-terminal-panel.md).
 import Foundation
 import Observation
+import PanelHostAPI
 
 /// Which mounted host holds a pane's `NSView`, when the host retains one session per (tab,
 /// channel) and hands it to every renderer of that pair — after a pop-out, two (spec Design §8).
@@ -53,5 +54,53 @@ public final class PaneViewClaim {
 
     public func holds(_ claimant: Claimant) -> Bool {
         claimants.last == claimant
+    }
+}
+
+/// Whether the first host that mounts over a pane is owed the keyboard — and it is owed **once**.
+///
+/// Taking the focus is a property of *why a container exists*, which is the one thing a container
+/// cannot see. A pane a person asked for — the shell pane they opened, the request they ran, the
+/// restart they pressed — is a pane they mean to type into, so the first container mounted over it
+/// takes the keyboard. Every container after that exists for a reason of the window system's own.
+///
+/// The debt is the **pane's**, because a claim outlives containers and a container does not outlive
+/// a pop-out. While a popped-out window holds the claim the main host draws the statement and drops
+/// its container, so when the pop-out closes what SwiftUI builds is a *new* main-window
+/// representable: there is no surviving container to recognise, and a rule written about one let
+/// that new host take the focus out of the composer the user was typing in.
+@MainActor
+public final class PaneFocusDebt {
+
+    private var isOwed: Bool
+
+    private init(isOwed: Bool) { self.isOwed = isOwed }
+
+    /// A pane that exists because a person asked for it.
+    public static func owedOnce() -> PaneFocusDebt { PaneFocusDebt(isOwed: true) }
+
+    /// A pane nobody is owed the keyboard for.
+    public static func settled() -> PaneFocusDebt { PaneFocusDebt(isOwed: false) }
+
+    /// Whether the debt still stands. Diagnostic: it exists so "the first host took it and the
+    /// next one did not" is an assertion rather than a recollection.
+    public var isStanding: Bool { isOwed }
+
+    /// Takes the debt if it stands, and leaves it settled either way.
+    ///
+    /// The surface is what says whether this mount is itself a person asking. It is asked here
+    /// rather than at the call site because "which mounts mean *type here now*" is one rule and
+    /// belongs in one place.
+    public func claim(mountedIn surface: PanelSurface) -> Bool {
+        // A popped-out window issues the debt it is about to pay. Asking for one *is* asking for
+        // this pane: what the person asked for is a window whose whole content is it. Which is a
+        // different thing from the claim merely coming back when that window closes — the main
+        // window's host is rebuilt there by nobody's request, and takes nothing.
+        //
+        // Issued here and nowhere else, so it is one debt per mounted host: a re-render updates a
+        // container and never makes one, and a pop-out opened again is a new host and a new asking.
+        if case .poppedOutWindow = surface { isOwed = true }
+        defer { isOwed = false }
+        return isOwed
     }
 }

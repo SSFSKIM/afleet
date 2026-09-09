@@ -199,6 +199,14 @@ public final class TerminalPanelSession: PanelTabSession {
         }
         let cwd = pane.spawn?.cwd
         await pane.close()
+        // Asked again after the suspension, and this is the whole of the arbitration between the
+        // two. The check on the way in cannot see a close the user asks for *inside* the teardown,
+        // and which of the two resumes first is the runtime's to decide: a restart that resumed
+        // first dropped the pane and put a fresh shell in its slot, so the close resuming after it
+        // could no longer find a pane of its own to remove and returned — telling the user their
+        // pane had closed while the slot held a running child. A restart yields, because a person
+        // who has asked for a pane to go has said the later thing about it.
+        guard closes[ObjectIdentifier(pane)] == nil else { return nil }
         // Resolved after the suspension and never before it: a pane opened or closed while the
         // child was being torn down has moved every position after its own, and the old one now
         // names a neighbour — or nothing at all.
@@ -264,6 +272,12 @@ public final class TerminalPanelSession: PanelTabSession {
         }
         closes[identity] = close
         await close.value
+    }
+
+    /// Whether a close of this pane is standing. Diagnostic: it exists so "the user's close was
+    /// already registered" is an assertion rather than a recollection.
+    func isClosing(_ pane: TerminalPane) -> Bool {
+        closes[ObjectIdentifier(pane)] != nil
     }
 
     private func performClose(_ pane: TerminalPane) async {

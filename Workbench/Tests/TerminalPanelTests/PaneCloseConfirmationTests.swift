@@ -152,10 +152,21 @@ final class PaneCloseConfirmationTests: XCTestCase {
         let second = session.openShellPane()
         XCTAssertEqual(session.selectedIndex, 1, "the pane being restarted did not begin selected")
 
+        let gate = PaneTestGate()
+        second.heldTeardown = { await gate.hold() }
+
         let restarting = Task { await session.restart(second) }
-        await Task.yield()
-        await Task.yield()
+        await gate.awaitEntry()
+        // The rendezvous the two yields only hoped for. A run in which the restart had already
+        // finished by this line passed against the very defect this exists to pin, because the
+        // fresh pane was then selected by the append that made it and no unconditional assignment
+        // was ever reached. The gate makes "the restart has not resumed" a fact of the run.
+        XCTAssertTrue(gate.isHolding, "the restart was not inside the teardown when the user chose")
+        XCTAssertTrue(session.panes.contains { $0 === second },
+                      "the restart had already dropped the pane it is replacing")
+
         session.select(0)
+        gate.open()
         let restarted = await restarting.value
         let fresh = try XCTUnwrap(restarted, "the shell pane did not restart")
 
@@ -163,6 +174,37 @@ final class PaneCloseConfirmationTests: XCTestCase {
                        "selected=\(String(describing: session.selectedIndex)) after a restart the user did not select")
         XCTAssertTrue(session.selectedPane === first, "the restart took the selection the user had moved")
         XCTAssertTrue(session.panes.last === fresh, "the fresh pane took another slot")
+    }
+
+    /// A close the user asks for while a restart is suspended in the pane's teardown wins, and the
+    /// restart yields to it.
+    ///
+    /// The restart consulted the standing closes only on the way *in*, so a close begun inside its
+    /// suspension was invisible to it: it dropped the old pane and put a fresh shell in the slot,
+    /// and the close that resumed afterwards could no longer find a pane of its own to remove and
+    /// returned. The user was told their pane had closed while the slot held a running child.
+    func testARestartYieldsToACloseAskedForWhileItWasSuspended() async throws {
+        let (session, _) = try makeSession()
+        let pane = session.openShellPane()
+        let child = try runningChild(of: pane)
+        let gate = PaneTestGate()
+        pane.heldTeardown = { await gate.hold() }
+
+        let restarting = Task { await session.restart(pane) }
+        await gate.awaitEntry()
+        let closing = Task { await session.close(pane) }
+        try await PaneTestChild.waitUntil(seconds: 10, "close-standing") { session.isClosing(pane) }
+        // The interleaving, pinned rather than hoped for: the restart is still inside the teardown
+        // at the moment the user's close is standing on the same pane.
+        XCTAssertTrue(gate.isHolding, "the restart had already resumed before the close was asked for")
+
+        gate.open()
+        let restarted = await restarting.value
+        await closing.value
+
+        XCTAssertNil(restarted, "the restart opened a fresh shell in a slot the user had asked to empty")
+        XCTAssertTrue(session.panes.isEmpty, "panes=\(session.panes.count) once the user's close returned")
+        XCTAssertFalse(PaneTestChild.isRunning(child), "the child of the closed pane is still running")
     }
 
     func testAPaneWhoseChildHasAlreadyEndedClosesWithoutAsking() async throws {

@@ -1,6 +1,7 @@
 // TerminalPanel: owned by C7.4 (docs/doperpowers/specs/2026-09-09-c7.4-terminal-panel.md).
 import AppKit
 import Observation
+import PanelHostAPI
 import SwiftUI
 import TerminalCore
 
@@ -13,6 +14,10 @@ struct PaneSurfaceHost: View {
 
     let pane: TerminalPane
 
+    /// Which window is drawing this. It reaches the container because it is what says whether the
+    /// container is being built for a person (see ``PaneFocusDebt``).
+    let drawnIn: PanelSurface
+
     /// This host's claim, and the pane it holds it against. `@State` and not the session's,
     /// because it is a fact about *this* mounted view and dies with it.
     @State private var holder = PaneClaimHolder()
@@ -20,7 +25,7 @@ struct PaneSurfaceHost: View {
     var body: some View {
         Group {
             if holder.holdsView(of: pane) {
-                PaneSurfaceView(surface: pane.surface)
+                PaneSurfaceView(surface: pane.surface, focus: pane.focusDebt, drawnIn: drawnIn)
             } else {
                 elsewhere
             }
@@ -124,18 +129,21 @@ final class PaneSurfaceContainer: NSView {
     private(set) var focusHandoffCount = 0
 
     /// Takes the surface view, from whichever container was holding it, **and takes the keyboard
-    /// with it**. This is the adoption that answers a person asking for this pane: SwiftUI makes a
-    /// container for it, and a pane the user asked for is a pane they mean to type into.
+    /// with it**: the adoption that answers a person asking for this pane.
     ///
-    /// The two arms below take the same view and leave the keyboard alone, because neither of them
-    /// is a request. A hand-off and a repair happen while the user is somewhere else entirely — the
+    /// Which adoption that is belongs to the pane rather than to this view — a container cannot see
+    /// why it was built, and after a pop-out closes the main window's host is a container built
+    /// fresh for a claim merely coming back (see ``PaneFocusDebt``).
+    ///
+    /// The other arms take the same view and leave the keyboard alone, because none of them is a
+    /// request. A hand-off and a repair happen while the user is somewhere else entirely — the
     /// composer, most often — and moving the focus there would send the next keystrokes into
     /// whatever the pane is running.
     func adopt(_ surfaceView: NSView) {
         adopt(surfaceView, takingFocus: true)
     }
 
-    private func adopt(_ surfaceView: NSView, takingFocus: Bool) {
+    fileprivate func adopt(_ surfaceView: NSView, takingFocus: Bool) {
         guard surfaceView.superview !== self else { return }
         surfaceView.removeFromSuperview()
         surfaceView.frame = bounds
@@ -154,13 +162,26 @@ final class PaneSurfaceContainer: NSView {
         takeSurfaceFocus()
     }
 
+    /// The other moment a standing debt can be paid, and the one a window that never moves ever
+    /// reaches. A container is laid out again whenever the pane is resized, the split is dragged or
+    /// a status bar appears under it, and by then the responder that refused may well have let go.
+    override func layout() {
+        super.layout()
+        takeSurfaceFocus()
+    }
+
     /// Makes the surface first responder, if one is owed the keyboard and there is a window to ask.
     ///
     /// **The debt is discharged by the grant, never by the attempt.** A window can refuse — the
     /// responder holding the keyboard declines to resign — and it says so in its answer. A request
     /// written off before that answer was read left the pane with no keyboard and nothing owing, so
     /// nothing tried again; keeping it owed means the next layout, or the window arriving, pays it.
-    private func takeSurfaceFocus() {
+    ///
+    /// Which is why every moment that could pay it asks: the window arriving, a layout, and the
+    /// representable being updated. `adoptIfUnheld` is not one of them — it returns at once while
+    /// the surface is attached, so a container refused in a window it then never leaves was never
+    /// asked again at all.
+    func takeSurfaceFocus() {
         guard owesSurfaceFocus, let window, let surfaceView = adoptedSurfaceView,
               surfaceView.superview === self
         else { return }
@@ -235,6 +256,13 @@ struct PaneSurfaceView: NSViewRepresentable {
 
     let surface: GhosttyTerminalSurface
 
+    /// Whether the container this makes is answering a person. Held by the pane, so it survives
+    /// every container the pane's hosts build and drop (see ``PaneFocusDebt``).
+    let focus: PaneFocusDebt
+
+    /// Which window this host is being built for.
+    let drawnIn: PanelSurface
+
     /// The surface, held so the static teardown — which is handed no representable — can name the
     /// view it is being asked to release.
     @MainActor
@@ -250,6 +278,8 @@ struct PaneSurfaceView: NSViewRepresentable {
 
     func updateNSView(_ container: PaneSurfaceContainer, context: Context) {
         container.adoptIfUnheld(surface.view)
+        // An update is the other moment SwiftUI gives a container that is not moving anywhere.
+        container.takeSurfaceFocus()
     }
 
     static func dismantleNSView(_ container: PaneSurfaceContainer, coordinator: Coordinator) {
@@ -258,9 +288,12 @@ struct PaneSurfaceView: NSViewRepresentable {
 
     /// This representable's own container, holding the surface view. Named so that "each host gets
     /// its own" is an assertion rather than a claim about code SwiftUI alone can call.
+    ///
+    /// Whether it takes the keyboard is the pane's answer and not this container's: only the first
+    /// host mounted over a pane is answering the person who asked for it (see ``PaneFocusDebt``).
     func makeContainer() -> PaneSurfaceContainer {
         let container = PaneSurfaceContainer()
-        container.adopt(surface.view)
+        container.adopt(surface.view, takingFocus: focus.claim(mountedIn: drawnIn))
         return container
     }
 }
