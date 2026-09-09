@@ -1802,6 +1802,285 @@ final class FilesPanelSessionTests: XCTestCase {
         XCTAssertEqual(FilesPanelReadout(session: second.session).viewer, .diff)
     }
 
+    // MARK: - 39. the buffer's owner survives another window's model replacement
+
+    /// `replaceModel` reports the **previous** path clean as it swaps the model in, so a `dirty`
+    /// event naming a file that is no longer on screen arrives in the ordinary course of a switch.
+    /// Reading it as "the window the user is in" moved the save target to a window that had just
+    /// been given something else to show, and the next *Save* answered out of that window's buffer.
+    func testACleanReportForTheFileLeftBehindDoesNotMoveTheSaveTarget() async throws {
+        let first = try tree.file("first.swift", "one\n")
+        let second = try tree.file("second.swift", "two\n")
+        let harness = try makeHarness()
+        harness.surface.answersSave = true
+        let poppedOut = RecordingSurface()
+        harness.session.attach(poppedOut)
+
+        await harness.session.openFile(at: first, line: nil)
+        harness.surface.type("edited one\n")
+        harness.surface.deliver(.dirty(path: first.path(percentEncoded: false), isDirty: true))
+        await harness.session.openFile(at: second, line: nil)
+
+        // The popped-out window's own model replacement, reported for the file it left behind.
+        poppedOut.deliver(.dirty(path: first.path(percentEncoded: false), isDirty: false))
+        harness.surface.reset()
+        poppedOut.reset()
+        // Only where the `save` lands is being asked here, so nothing answers it.
+        harness.surface.answersSave = false
+
+        harness.session.save()
+
+        XCTAssertEqual(harness.surface.shapes, [.save],
+                       "the save went to a window the user was never in")
+        XCTAssertEqual(poppedOut.shapes, [])
+    }
+
+    // MARK: - 40. *Reload* retires what the editor was asked
+
+    /// The buffer the user discarded is still on its way back: `save` was sent before *Reload* and
+    /// the bridge answers it afterwards. Refreshing the baseline without retiring that request left
+    /// the reply authorised, and it wrote the discarded edits over the contents just loaded.
+    func testAReplyToASaveSentBeforeReloadDoesNotOverwriteTheReloadedContents() async throws {
+        let file = try tree.file("notes.swift", "on disk\n")
+        let harness = try makeHarness()
+        await harness.session.openFile(at: file, line: nil)
+        harness.surface.type("discarded edits\n")
+        harness.surface.deliver(.dirty(path: file.path(percentEncoded: false), isDirty: true))
+
+        harness.session.save()
+        try "reloaded from disk\n".write(to: file, atomically: true, encoding: .utf8)
+        await harness.session.reload(file)
+
+        harness.surface.deliver(.saveRequested(path: file.path(percentEncoded: false),
+                                               text: "discarded edits\n"))
+
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "reloaded from disk\n",
+                       "a save sent before the reload wrote the buffer the user discarded")
+        XCTAssertEqual(harness.session.selected?.text, "reloaded from disk\n")
+        XCTAssertEqual(harness.session.selected?.isDirty, false)
+    }
+
+    // MARK: - 41. what the user types while a diff resolves
+
+    /// The pair is resolved over several `git` calls and the user goes on typing through them. A
+    /// buffer captured before those calls is the text as it stood before those keystrokes, and
+    /// *Close diff* draws that stale copy back over them.
+    func testEditsMadeWhileTheDiffResolvesSurviveTheDiff() async throws {
+        let repository = try await GitRepository(tree)
+        try await repository.commit("seed", files: ["notes.swift": "committed\n"])
+        try repository.write("notes.swift", "working\n")
+        let harness = try makeHarness(cwd: repository.root, environment: repository.environment)
+        harness.surface.answersSave = true
+        let file = repository.root.appending(path: "notes.swift")
+        await harness.session.openFile(at: file, line: nil)
+
+        let diffing = Task {
+            await harness.session.showDiff(DiffRef(repository: repository.root,
+                                                   path: "notes.swift",
+                                                   base: .workingTreeAgainstHEAD))
+        }
+        // One turn puts the diff inside its `git` calls, which is where the typing happens.
+        await Task.yield()
+        harness.surface.type("typed while git ran\n")
+        harness.surface.deliver(.dirty(path: file.path(percentEncoded: false), isDirty: true))
+        await diffing.value
+        XCTAssertTrue(harness.session.isShowingDiff, "the pair never reached the surface")
+        harness.surface.reset()
+
+        await harness.session.dismissDiff()
+
+        XCTAssertEqual(harness.surface.shapes,
+                       [.open(name: "notes.swift", language: "swift",
+                              text: "typed while git ran\n", line: nil)],
+                       "the diff was captured before the keystrokes and drew over them")
+        XCTAssertEqual(harness.session.selected?.isDirty, true)
+    }
+
+    // MARK: - 42. the cursor after a save
+
+    /// `setText` replaces the model's contents, which puts the caret back at the top of the file.
+    /// The refresh path restores the cursor and the save acknowledgement did not, so saving moved
+    /// the caret out from under the user.
+    func testTheSaveAcknowledgementPutsTheCursorBackWhereTheUserLeftIt() async throws {
+        let file = try tree.file("cursor.swift", "one\ntwo\nthree\n")
+        let harness = try makeHarness()
+        await harness.session.openFile(at: file, line: nil)
+        harness.surface.deliver(.cursor(line: 3, column: 2))
+        harness.surface.type("one\ntwo\nedited\n")
+        harness.surface.deliver(.dirty(path: file.path(percentEncoded: false), isDirty: true))
+        harness.surface.reset()
+
+        harness.session.save()
+        harness.surface.deliver(.saveRequested(path: file.path(percentEncoded: false),
+                                               text: "one\ntwo\nedited\n"))
+
+        XCTAssertEqual(harness.surface.shapes,
+                       [.save, .setText(text: "one\ntwo\nedited\n"),
+                        .gotoLine(line: 3, column: 2)],
+                       "the save left the caret wherever the model replacement put it")
+    }
+
+    // MARK: - 43. an open that waits for its watcher
+
+    /// Opening a file the session has never seen arms a watcher first, and that is a suspension: a
+    /// selection the user made inside it completes before the open does, and the open then drew
+    /// over the file the user had chosen.
+    func testASelectionThatCompletesWhileAnOpenArmsItsWatcherKeepsTheSurface() async throws {
+        let existing = try tree.file("existing.swift", "one\n")
+        let latecomer = try tree.file("latecomer.swift", "two\n")
+        let harness = try makeHarness()
+        await harness.session.openFile(at: existing, line: nil)
+        harness.surface.reset()
+
+        let opening = Task { await harness.session.openFile(at: latecomer, line: nil) }
+        // One turn puts the open inside `beginWatching`, which is where the selection lands.
+        await Task.yield()
+        await harness.session.select(existing)
+        await opening.value
+
+        // The name and never the path: a failed assertion prints both values (§6.3, §11).
+        XCTAssertEqual(harness.session.selected?.name, "existing.swift")
+        XCTAssertEqual(harness.surface.shapes.last,
+                       .open(name: "existing.swift", language: "swift", text: "one\n", line: nil),
+                       "an open suspended on its watcher drew over a newer selection")
+    }
+
+    // MARK: - 44. the markdown toggle over a buffer that was not captured
+
+    /// The toggle moves the file between two surfaces, so it is a presentation like any other:
+    /// flipped before the capture, a capture that fails leaves the readout drawing the Markdown
+    /// viewer over text the session was never given.
+    func testTheMarkdownToggleDoesNotMoveOnABufferTheEditorWouldNotGiveBack() async throws {
+        let file = try tree.file("notes.md", "# heading\n")
+        let harness = try makeHarness(stashTimeout: .milliseconds(50))
+        await harness.session.openFile(at: file, line: nil)
+        await harness.session.setRendersMarkdown(false, for: file)
+        harness.surface.type("# typed\n")
+        harness.surface.deliver(.dirty(path: file.path(percentEncoded: false), isDirty: true))
+        harness.surface.reset()
+
+        // Nobody answers the stash this toggle needs.
+        await harness.session.setRendersMarkdown(true, for: file)
+
+        XCTAssertEqual(harness.session.issue, .editorDidNotAnswer)
+        XCTAssertEqual(harness.session.selected?.rendersMarkdown, false,
+                       "the toggle moved on a buffer the editor never gave back")
+        XCTAssertEqual(FilesPanelReadout(session: harness.session).viewer, .editor)
+        XCTAssertEqual(harness.surface.shapes, [.save],
+                       "something was drawn over the unsaved buffer")
+    }
+
+    // MARK: - 45. presentations while no window is attached
+
+    /// A session outlives its windows and goes on presenting: every external change of an open
+    /// file is another presentation. Queueing the commands meant the queue grew for as long as the
+    /// panel was off screen and the first window to arrive was handed the whole history.
+    func testAWindowAttachingAfterSeveralExternalChangesIsShownOnlyTheLatest() async throws {
+        let file = try tree.file("watched.swift", "one\n")
+        let harness = try makeHarness(watchMode: .poll, pollInterval: .milliseconds(50))
+        await harness.session.openFile(at: file, line: nil)
+        harness.session.detach(harness.surface)
+
+        for text in ["two\n", "three\n", "four\n"] {
+            try text.write(to: file, atomically: true, encoding: .utf8)
+            try await waitUntil("the change reaches the panel") {
+                harness.session.selected?.text == text
+            }
+        }
+
+        let remounted = RecordingSurface()
+        harness.session.attach(remounted)
+
+        XCTAssertEqual(remounted.shapes,
+                       [.open(name: "watched.swift", language: "swift", text: "four\n", line: nil),
+                        .gotoLine(line: 1, column: 1)],
+                       "the window was handed every presentation it had missed")
+    }
+
+    // MARK: - 46. an unanswered write is bounded
+
+    /// Only the stash was bounded, so a `save` the editor never answered stood in front of every
+    /// later reply for as long as the session lived — and stayed an authorisation to write.
+    func testASaveTheEditorNeverAnsweredStopsAuthorisingAWrite() async throws {
+        let file = try tree.file("expiring.swift", "on disk\n")
+        let harness = try makeHarness(stashTimeout: .milliseconds(50))
+        await harness.session.openFile(at: file, line: nil)
+        harness.surface.type("late reply\n")
+        harness.surface.deliver(.dirty(path: file.path(percentEncoded: false), isDirty: true))
+
+        harness.session.save()
+        try await Task.sleep(for: .milliseconds(200))
+        harness.surface.deliver(.saveRequested(path: file.path(percentEncoded: false),
+                                               text: "late reply\n"))
+
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "on disk\n",
+                       "a request the editor never answered was still an authorisation to write")
+    }
+
+    // MARK: - 47. a request belongs to the window it was sent to
+
+    /// A request held its surface weakly, so once that window had gone its request matched *any*
+    /// window's reply: the closed window's expired stash was taken as the answer to a live save
+    /// from the window that was still there, and the save landed nowhere.
+    func testAClosedWindowsExpiredRequestDoesNotEatAnotherWindowsReply() async throws {
+        let first = try tree.file("first.swift", "on disk\n")
+        let second = try tree.file("second.swift", "two\n")
+        let harness = try makeHarness(stashTimeout: .milliseconds(50))
+        await harness.session.openFile(at: first, line: nil)
+        await harness.session.openFile(at: second, line: nil)
+        await harness.session.select(first)
+
+        var poppedOut: RecordingSurface? = RecordingSurface()
+        harness.session.attach(try XCTUnwrap(poppedOut))
+        // The user is typing in the popped-out window, so the stash the switch below needs goes
+        // there — and that window never answers it.
+        poppedOut?.type("edited in the pop-out\n")
+        poppedOut?.deliver(.dirty(path: first.path(percentEncoded: false), isDirty: true))
+        await harness.session.select(second)
+        XCTAssertEqual(harness.session.issue, .editorDidNotAnswer)
+
+        harness.session.detach(try XCTUnwrap(poppedOut))
+        poppedOut = nil
+
+        harness.surface.type("edited in the main window\n")
+        harness.surface.deliver(.dirty(path: first.path(percentEncoded: false), isDirty: true))
+        harness.session.save()
+        harness.surface.deliver(.saveRequested(path: first.path(percentEncoded: false),
+                                               text: "edited in the main window\n"))
+
+        XCTAssertEqual(try String(contentsOf: first, encoding: .utf8),
+                       "edited in the main window\n",
+                       "a closed window's request answered for the window that was still there")
+    }
+
+    /// The same rule for the other half of the round trip. *Reload* can land inside a stash: the
+    /// answer then describes a buffer the user has already discarded, and recording it puts those
+    /// edits back over the contents just loaded.
+    func testAStashAnsweredAfterAReloadDoesNotPutTheDiscardedEditsBack() async throws {
+        let file = try tree.file("notes.swift", "on disk\n")
+        let other = try tree.file("other.swift", "two\n")
+        let harness = try makeHarness(stashTimeout: .seconds(5))
+        await harness.session.openFile(at: file, line: nil)
+        await harness.session.openFile(at: other, line: nil)
+        await harness.session.select(file)
+        harness.surface.type("discarded edits\n")
+        harness.surface.deliver(.dirty(path: file.path(percentEncoded: false), isDirty: true))
+
+        // The switch asks for the buffer; the reload arrives before the editor answers.
+        let switching = Task { await harness.session.select(other) }
+        await Task.yield()
+        try "reloaded from disk\n".write(to: file, atomically: true, encoding: .utf8)
+        await harness.session.reload(file)
+        harness.surface.deliver(.saveRequested(path: file.path(percentEncoded: false),
+                                               text: "discarded edits\n"))
+        await switching.value
+
+        XCTAssertEqual(harness.session.openFiles.first { $0.name == "notes.swift" }?.text,
+                       "reloaded from disk\n",
+                       "a capture of a buffer the reload replaced was recorded over it")
+        XCTAssertEqual(harness.session.openFiles.first { $0.name == "notes.swift" }?.isDirty, false)
+    }
+
     // MARK: - Harness
 
     /// A session and the recorder it drives, held together so a test cannot let the session go by
