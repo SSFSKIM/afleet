@@ -66,6 +66,110 @@ if [[ "${1:-}" == "--count-cache-entries" ]]; then
     exit 0
 fi
 
+# The remote (source-control) dependencies a manifest declares, one identity per line. Read
+# through `swift package dump-package` and never by matching `Package.swift` as text: the
+# manifest is a Swift program whose dependency list is built from values, so a regex over it
+# answers about the source rather than about the package. Local path dependencies are omitted on
+# purpose — they are in the clone and no cache serves them.
+manifest_remote_identities() {
+    local package_path="$1" scratch="$2"
+    swift package dump-package --package-path "$package_path" --scratch-path "$scratch" \
+        | python3 -c '
+import json, sys
+for dependency in json.load(sys.stdin).get("dependencies", []):
+    for entry in dependency.get("sourceControl", []):
+        print(entry["identity"])
+'
+}
+
+# The revision a lockfile pins an identity at; nothing if it pins none.
+pinned_revision() {
+    python3 - "$1" "$2" <<'PY'
+import json, sys
+for pin in json.load(open(sys.argv[1])).get("pins", []):
+    if pin.get("identity") == sys.argv[2]:
+        print(pin.get("state", {}).get("revision", ""))
+        break
+PY
+}
+
+# Which repository caches this run will actually need, and whether each is there.
+#
+# The set is the Workbench manifest's own remote dependencies and their transitive closure — not
+# every pin in `Workbench/Package.resolved`. That lockfile also carries the App floor's pins
+# (HighlightKit, swift-markdown, swift-cmark), which xcodebuild writes into it because the app
+# resolves the local package as a workspace member (tracker 188). Nothing in this proof resolves
+# them, and reporting them as caches the run needs is a diagnostic about the wrong package: it
+# said the run would fail for want of three caches it never touches.
+#
+# The closure is walked through the cache itself, reading each pinned package's manifest at its
+# pinned revision, because a lockfile records pins and not edges. A package that is not cached
+# ends its own branch of the walk — which costs nothing, since the run stops at that package
+# anyway, and it is reported as the finding it is.
+#
+# Prints one line per package; returns 1 if any of them is missing from the cache.
+report_remote_closure() {
+    local workbench="$1" resolved="$2" cache_dir="$3" scratch="$4"
+    local frontier seen="" identity entry revision manifest dependents missing=0
+
+    if ! frontier="$(manifest_remote_identities "$workbench" "$scratch/manifest-scratch")"; then
+        fail "could not read $workbench/Package.swift through swift package dump-package"
+    fi
+    say "   declared by the Workbench manifest: $(printf '%s' "$frontier" | tr '\n' ' ')"
+
+    while [[ -n "$frontier" ]]; do
+        identity="$(printf '%s\n' "$frontier" | head -1)"
+        frontier="$(printf '%s\n' "$frontier" | tail -n +2)"
+        [[ -z "$identity" ]] && continue
+        case " $seen " in *" $identity "*) continue ;; esac
+        seen="$seen $identity"
+
+        # Package.resolved lower-cases the identity; the cache directory keeps the repository's
+        # own spelling, so the match has to be case-insensitive.
+        entry="$(find "$cache_dir" -maxdepth 1 -iname "${identity}-*" 2>/dev/null | head -1)"
+        if [[ -z "$entry" ]]; then
+            say "   $identity: NOT in the SwiftPM repository cache — resolution will need the network"
+            missing=1
+            continue
+        fi
+        say "   $identity: present in the SwiftPM repository cache"
+
+        revision="$(pinned_revision "$resolved" "$identity")"
+        if [[ -z "$revision" ]]; then
+            say "   $identity: no pin in Workbench/Package.resolved, so its own dependencies are not walked"
+            continue
+        fi
+        manifest="$scratch/manifest-$identity"
+        mkdir -p "$manifest"
+        if ! git -C "$entry" show "$revision:Package.swift" > "$manifest/Package.swift" 2>/dev/null; then
+            say "   $identity: the cache holds no manifest at ${revision:0:7}, so its own dependencies are not walked"
+            continue
+        fi
+        if dependents="$(manifest_remote_identities "$manifest" "$manifest/scratch" 2>/dev/null)"; then
+            frontier="$(printf '%s\n%s\n' "$frontier" "$dependents")"
+        else
+            say "   $identity: its manifest at ${revision:0:7} could not be read, so its own dependencies are not walked"
+        fi
+    done
+
+    return "$missing"
+}
+
+# `Tools/verify-offline-build.sh --remote-closure <package-dir> [cache-dir]` prints that report
+# for a package directory and exits, which is how the diagnostic is exercised — against a cold
+# cache directory too — without running the whole proof.
+if [[ "${1:-}" == "--remote-closure" ]]; then
+    closure_scratch="$work_dir/closure"
+    mkdir -p "$closure_scratch"
+    if report_remote_closure "${2:?a package directory is required}" \
+                             "${2}/Package.resolved" \
+                             "${3:-${HOME}/.swiftpm/cache/repositories}" \
+                             "$closure_scratch"; then
+        exit 0
+    fi
+    exit 1
+fi
+
 say "== branch: $branch"
 
 # --- 1. The sandbox actually denies the network -------------------------------------------
@@ -107,18 +211,13 @@ say "   .build and .swiftpm: absent, as a fresh clone requires"
 say
 say "== remote dependencies SwiftPM must resolve with the network denied"
 cache_dir="${HOME}/.swiftpm/cache/repositories"
+closure_scratch="$work_dir/closure"
+mkdir -p "$closure_scratch"
 missing_from_cache=0
-while read -r identity; do
-    [[ -z "$identity" ]] && continue
-    # Package.resolved lower-cases the identity; the cache directory keeps the repository's
-    # own spelling, so the match has to be case-insensitive.
-    if [[ -n "$(find "$cache_dir" -maxdepth 1 -iname "${identity}-*" 2>/dev/null)" ]]; then
-        say "   $identity: present in the SwiftPM repository cache"
-    else
-        say "   $identity: NOT in the SwiftPM repository cache — resolution will need the network"
-        missing_from_cache=1
-    fi
-done < <(sed -n 's/.*"identity" : "\(.*\)".*/\1/p' "$clone/Workbench/Package.resolved")
+if ! report_remote_closure "$clone/Workbench" "$clone/Workbench/Package.resolved" \
+                           "$cache_dir" "$closure_scratch"; then
+    missing_from_cache=1
+fi
 # libghostty-spm ships GhosttyKit as a binary target, so a *second* cache is load-bearing:
 # SwiftPM's artifact cache, which holds the downloaded xcframework zip.
 artifact_cache="${HOME}/.swiftpm/cache/artifacts"
