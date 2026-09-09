@@ -1078,7 +1078,13 @@ C5's tracker entry 71). Amended 2026-09-08 from C6.2's `[parent-impact]` (correc
 warning is what licenses ending busy work. It is not `reap`, whose eligibility gate refuses
 exactly the channels the dialog has just named; implemented through `reap` the confirmed arm
 ends nothing. Busy is the fleet's own fact — `presence` and `liveTaskIDs(of:)` — never a
-surface's local count, so a channel spawned but never viewed is judged like one on screen.
+surface's local count, so a channel spawned but never viewed is judged like one on screen. Amended
+2026-09-09 at C7's recomposition (corrective 354): Quit reads a second, independent fact — how many
+Terminal panes still hold a live child, asked of C7.4's session registry — and either fact alone puts
+the dialog up, channels named by title and panes by count; on a confirmed quit the panes are ended
+through the panel's own teardown, awaited, after the terminations and before `Fleet.shutdown()`, so a
+pane's child is hung up by the path that also reports its exit; the dialog's advice no longer says
+*Open in terminal* keeps a conversation, since a pane inside afleet goes when afleet does.
 
 ### 7.5 Threads
 
@@ -1365,7 +1371,10 @@ the input alone (fixture `notification-hook`). Shortcuts: Cmd+K
 switcher, Esc interrupt, Cmd+Shift+Esc stop everything (confirm), Cmd+Enter send, Cmd+S save the Files tab's editor (added 2026-09-09 at C7.5's merge;
 W4's vocabulary is closed, so the key is the host's), Cmd+1…7
 panel tabs, Cmd+Shift+T new terminal tab, Shift+Tab cycle permission mode, Cmd+Shift+A
-Activity.
+Activity. Esc and Shift+Tab are bound only while the keyboard is outside the panel (amended
+2026-09-09 at C7's recomposition, corrective 350): one fact, published by the drawn panel column and
+each popped-out panel window and read by the composer's shortcut bar, so a full-screen TUI in a pane
+gets its keys; Cmd+Shift+Esc stays bound throughout.
 
 ### 8.8 Agents panel
 
@@ -4769,3 +4778,8 @@ Pending — written at finish.
 - 2026-09-09 C7.7 merged (`3ab455f`; composite Revision Note of the same date). §9.2's diff
   sentence re-worded to the `.diff`-link shape; §17.9's C7 row: all seven leaves merged,
   recomposition due.
+- 2026-09-09 C7 recomposition (composite Revision Note of the same date; `main` `a7cc8e6`): the
+  correctives named there landed on `main`; §8.5's composer shortcuts stand down while the keyboard is
+  in a panel; §7.4's Quit names live panes; W6's host document exists; X7's link origin carries its
+  channel to every target. The human-witness checklist under `docs/doperpowers/checklists/` is the
+  remaining leg of C7's acceptance.
