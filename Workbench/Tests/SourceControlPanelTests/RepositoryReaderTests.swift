@@ -20,36 +20,11 @@ final class RepositoryReaderTests: XCTestCase {
     /// this set is a deliberate edit, never a silent one.
     static let allowedGitVerbs: Set<String> = ["rev-parse", "log", "status", "diff", "show"]
 
-    /// The subcommand of one recorded invocation, as git itself reads it.
-    ///
-    /// `RecordingRunner.Invocation.verb` cannot serve here, and the reason is a finding rather
-    /// than a preference: it takes "the first argument that is not an option", and `git`'s `-c`
-    /// takes a **value** that is not an option either. `WorkingTreeStatus.arguments()` opens with
-    /// `-c diff.renameLimit=1000`, so that helper reads a `status` invocation's verb as
-    /// `diff.renameLimit=1000` — its own documentation says `git -c foo=bar log` is a `log`, and it
-    /// is not. G4's whole assertion is on these verbs, and one read as a configuration assignment
-    /// is a write verb this leaf could hide behind a `-c`. `Support/` is read-only to this task, so
-    /// the correct reading lives here and the fixture's is filed as tech debt.
-    private static func verb(of invocation: RecordingRunner.Invocation) -> String {
-        var index = 0
-        while index < invocation.arguments.count {
-            let argument = invocation.arguments[index]
-            if argument == "-c" || argument == "--config-env" || argument == "--namespace" {
-                index += 2
-                continue
-            }
-            if argument.hasPrefix("-") {
-                index += 1
-                continue
-            }
-            return argument
-        }
-        return ""
-    }
-
-    private static func gitVerbs(_ recorder: RecordingRunner) -> [String] {
-        recorder.invocations(of: .git).map(verb(of:))
-    }
+    // Every recorded `git` subcommand is read through `RecordingRunner.verbs(of:)`, which lives in
+    // `Support/` and not here: G4's assertion is over the *universe* of this leaf's invocations,
+    // and every suite that makes one has to read a verb the same way. A per-suite copy is how two
+    // suites come to disagree about what `git -c anything=x commit` is called.
+    // `RecordingRunnerVerbTests` at the foot of this file asserts that reading directly.
 
     /// Asserts G4's half for one recorder, naming the set and the count it saw.
     ///
@@ -58,7 +33,7 @@ final class RepositoryReaderTests: XCTestCase {
     private func assertOnlyReadVerbs(_ recorder: RecordingRunner,
                                      atLeast minimum: Int,
                                      file: StaticString = #filePath, line: UInt = #line) {
-        let verbs = Self.gitVerbs(recorder)
+        let verbs = recorder.verbs(of: .git)
         XCTAssertGreaterThanOrEqual(
             verbs.count, minimum,
             "recorded \(verbs.count) git invocations, expected at least \(minimum); "
@@ -172,6 +147,55 @@ final class RepositoryReaderTests: XCTestCase {
         assertOnlyReadVerbs(recorder, atLeast: 3)
     }
 
+    /// Every read after `load()` is made against the root `load()` resolved, and not against the
+    /// channel's directory a second time.
+    ///
+    /// The two are the same directory until they are not, and the case is this app's: a `claude`
+    /// session runs `git init` in the very subdirectory the channel was opened at, and from that
+    /// moment the channel's `cwd` resolves to a repository the panel is not showing. A window and
+    /// a file list read against `cwd` would then belong to a different repository from
+    /// `RepositoryState.root` — and `root` is what a `.diff` link carries as
+    /// `DiffRef.repository`, so C7.5's resolver would be handed a repository and a path that were
+    /// never read together.
+    func testEveryReadAfterLoadIsMadeAgainstTheRootLoadResolved() async throws {
+        let tree = try ScratchTree(); defer { tree.remove() }
+        let outer = try await GitRepository(tree, name: "outer")
+        try await outer.commit("the outer repository's commit", files: ["outer.txt": "one\n"])
+        let channel = try outer.directory("nested")
+
+        let recorder = RecordingRunner()
+        let reader = RepositoryReader(cwd: channel, environment: environment(outer),
+                                      runner: recorder)
+        let state = await reader.load()
+        XCTAssertTrue(samePath(state.root, outer.root),
+                      "load() did not resolve the outer repository from the channel's directory")
+        guard let root = state.root else { return XCTFail("load() resolved no root") }
+
+        // The session's `git init`, at exactly the directory the channel was opened at, with a
+        // working-tree change of its own so that reading the wrong repository is visible in the
+        // answer rather than only in the argument vector.
+        let nested = try await GitRepository(tree, name: "outer/nested")
+        try await nested.commit("the nested repository's commit", files: ["nested.txt": "one\n"])
+        try nested.write("nested.txt", "two\n")
+        // And a change in the repository the panel is actually showing.
+        try outer.write("outer.txt", "two\n")
+
+        let workingTree = await reader.workingTreeChanges(root: root)
+        XCTAssertEqual(paths(workingTree), ["outer.txt"],
+                       "the working-tree list came from a repository other than the resolved root")
+        guard case .value(let window) = await reader.page(after: state.commits, root: root,
+                                                          limit: 3) else {
+            return XCTFail("the page did not produce a window")
+        }
+        XCTAssertEqual(window.map(\.subject), ["the outer repository's commit"],
+                       "the window came from a repository other than the resolved root")
+        guard let head = state.status?.headOID else { return XCTFail("load() read no HEAD") }
+        let committed = await reader.changes(in: head, root: root)
+        XCTAssertEqual(paths(committed), ["outer.txt"],
+                       "a commit's file list came from a repository other than the resolved root")
+        assertOnlyReadVerbs(recorder, atLeast: 5)
+    }
+
     // MARK: - 2. the empty state: no repository, and a bare one
 
     func testACwdInNoRepositoryIsTheEmptyStateAndNotAnErrorRow() async throws {
@@ -195,7 +219,7 @@ final class RepositoryReaderTests: XCTestCase {
         XCTAssertNil(state.error, ".notARepository was reported as a panel-local error row")
         XCTAssertTrue(state.commits.isEmpty)
         XCTAssertEqual(state.assignment.rows.count, 0)
-        let uncommitted = await reader.workingTreeChanges()
+        let uncommitted = await reader.workingTreeChanges(root: outside)
         XCTAssertEqual(uncommitted, .notARepository,
                        "a working-tree read in no repository is not the empty state")
         assertOnlyReadVerbs(recorder, atLeast: 1)
@@ -225,6 +249,27 @@ final class RepositoryReaderTests: XCTestCase {
 
     // MARK: - 3. the window is GitLog's, and a page extends it
 
+    /// The one property `LaneAssignment.assign` is documented as depending on: no commit is listed
+    /// before all of its children. Asserted over the window as a whole, because that is the shape
+    /// of the input the assignment is handed, and a window assembled from two reads of a
+    /// repository that changed between them can violate it while every count still agrees.
+    private func assertNoCommitPrecedesItsChild(_ window: [GitCommit], _ label: String,
+                                                file: StaticString = #filePath,
+                                                line: UInt = #line) {
+        var position: [String: Int] = [:]
+        for (index, commit) in window.enumerated() { position[commit.hash] = index }
+        for (index, commit) in window.enumerated() {
+            for parent in commit.parents {
+                guard let parentIndex = position[parent] else { continue }
+                XCTAssertGreaterThan(
+                    parentIndex, index,
+                    "\(label): the window lists a commit at \(index) after its parent at "
+                    + "\(parentIndex); `LaneAssignment` would draw its lanes and edges backwards",
+                    file: file, line: line)
+            }
+        }
+    }
+
     func testASecondPageExtendsTheWindowWithoutDuplicatingOrReorderingACommit() async throws {
         let tree = try ScratchTree(); defer { tree.remove() }
         let repo = try await GitRepository(tree)
@@ -239,7 +284,8 @@ final class RepositoryReaderTests: XCTestCase {
         XCTAssertEqual(state.commits.count, 3,
                        "the first page holds \(state.commits.count) commits, expected 3")
 
-        guard case .value(let second) = await reader.page(after: state.commits, limit: 3) else {
+        guard case .value(let second) = await reader.page(after: state.commits, root: repo.root,
+                                                          limit: 3) else {
             return XCTFail("the second page did not produce a window")
         }
         XCTAssertEqual(second.count, 6,
@@ -249,7 +295,8 @@ final class RepositoryReaderTests: XCTestCase {
         XCTAssertEqual(Array(second.prefix(3)).map(\.hash), state.commits.map(\.hash),
                        "paging reordered the commits already in the window")
 
-        guard case .value(let third) = await reader.page(after: second, limit: 3) else {
+        guard case .value(let third) = await reader.page(after: second, root: repo.root,
+                                                         limit: 3) else {
             return XCTFail("the third page did not produce a window")
         }
         XCTAssertEqual(third.count, 7,
@@ -259,12 +306,72 @@ final class RepositoryReaderTests: XCTestCase {
                        "the last page reordered the commits already in the window")
 
         // A page past the end adds nothing and still does not duplicate.
-        guard case .value(let fourth) = await reader.page(after: third, limit: 3) else {
+        guard case .value(let fourth) = await reader.page(after: third, root: repo.root,
+                                                          limit: 3) else {
             return XCTFail("the page past the end did not produce a window")
         }
         XCTAssertEqual(fourth.map(\.hash), third.map(\.hash),
                        "a page past the end changed the window")
+        for (label, window) in [("second", second), ("third", third), ("fourth", fourth)] {
+            assertNoCommitPrecedesItsChild(window, "the \(label) page")
+        }
         assertOnlyReadVerbs(recorder, atLeast: 5)
+    }
+
+    /// A commit written between the first page and the second, on a line of history the window
+    /// already reaches into.
+    ///
+    /// This is the ordinary case in this app and not a contrived one: a `claude` session commits
+    /// on its own branch while the panel is open. `git log --topo-order --all` is a listing of the
+    /// whole repository as it is *now*, so a new tip re-orders it, and a `--skip` computed against
+    /// the previous listing no longer names the position it named. The fixture below is built so
+    /// that the second listing interleaves the new commit **between** two commits the window
+    /// already holds — `b1` sits between `c6` and `c5` — which is what makes an appended suffix
+    /// carry a child of a commit already in the window and place it below its own parent.
+    func testACommitWrittenBetweenTwoPagesDoesNotProduceAnOutOfOrderWindow() async throws {
+        let tree = try ScratchTree(); defer { tree.remove() }
+        let repo = try await GitRepository(tree)
+        var mainLine: [String] = []
+        for index in 1...7 {
+            mainLine.append(try await repo.commit("commit \(index)",
+                                                  files: ["n\(index).txt": "\(index)\n"]))
+        }
+
+        let recorder = RecordingRunner()
+        let reader = RepositoryReader(cwd: repo.root, environment: environment(repo),
+                                      runner: recorder)
+        let first = await reader.load(limit: 3)
+        XCTAssertEqual(first.commits.count, 3,
+                       "the first page holds \(first.commits.count) commits, expected 3")
+
+        // The session's work, between the two reads: a tip on a branch off the *third* commit of
+        // the window, then a newer tip further up, so the older of the two sorts into the middle
+        // of the second listing rather than to its front.
+        try await repo.branch("session-one", from: mainLine[4])
+        try await repo.checkout("session-one")
+        try await repo.commit("a session's commit", files: ["session.txt": "1\n"])
+        try await repo.branch("session-two", from: mainLine[6])
+        try await repo.checkout("session-two")
+        try await repo.commit("a later commit", files: ["later.txt": "1\n"])
+        try await repo.commit("a later commit again", files: ["later.txt": "2\n"])
+
+        guard case .value(let second) = await reader.page(after: first.commits, root: repo.root,
+                                                          limit: 3) else {
+            return XCTFail("the second page did not produce a window")
+        }
+        XCTAssertEqual(second.count, 6,
+                       "the extended window holds \(second.count) commits, expected 6")
+        XCTAssertEqual(Set(second.map(\.hash)).count, second.count,
+                       "the extended window repeats a commit")
+        assertNoCommitPrecedesItsChild(second, "a page across a concurrent commit")
+
+        // The window is still a listing of *this* repository, and the assignment built over it is
+        // one row per commit — the shape the panel draws from.
+        let assignment = LaneAssignment.assign(commits: second, headOID: nil,
+                                               workingTreeIsDirty: false)
+        XCTAssertEqual(assignment.rows.count, second.count,
+                       "the assignment lost or invented a row")
+        assertOnlyReadVerbs(recorder, atLeast: 3)
     }
 
     // MARK: - 4. a commit's changed files
@@ -276,7 +383,7 @@ final class RepositoryReaderTests: XCTestCase {
         let recorder = RecordingRunner()
         let reader = RepositoryReader(cwd: built.repo.root, environment: environment(built.repo),
                                       runner: recorder)
-        let result = await reader.changes(in: built.merge)
+        let result = await reader.changes(in: built.merge, root: built.repo.root)
 
         XCTAssertEqual(paths(result),
                        [".gitmodules", "a.txt", "added.txt", "bin.dat", "gone.txt",
@@ -311,7 +418,7 @@ final class RepositoryReaderTests: XCTestCase {
         let recorder = RecordingRunner()
         let reader = RepositoryReader(cwd: built.repo.root, environment: environment(built.repo),
                                       runner: recorder)
-        let result = await reader.changes(in: built.root)
+        let result = await reader.changes(in: built.root, root: built.repo.root)
 
         XCTAssertEqual(paths(result), ["a.txt", "bin.dat", "gone.txt", "old-name.txt"],
                        "the root commit does not list its whole tree")
@@ -339,7 +446,7 @@ final class RepositoryReaderTests: XCTestCase {
         let reader = RepositoryReader(cwd: repo.root, environment: environment(repo),
                                       runner: recorder)
         let state = await reader.load()
-        let diff = await reader.workingTreeChanges()
+        let diff = await reader.workingTreeChanges(root: repo.root)
 
         let entries = state.status?.entries ?? []
         XCTAssertEqual(entries.count, 1,
@@ -385,14 +492,15 @@ final class RepositoryReaderTests: XCTestCase {
         XCTAssertNil(state.root)
         XCTAssertTrue(state.commits.isEmpty)
 
-        for result in [await reader.workingTreeChanges(),
-                       await reader.changes(in: "0000000000000000000000000000000000000000")] {
+        for result in [await reader.workingTreeChanges(root: repo.root),
+                       await reader.changes(in: "0000000000000000000000000000000000000000",
+                                            root: repo.root)] {
             guard case .failed(let error) = result else {
                 return XCTFail("a read with no git resolved to something other than a failure")
             }
             XCTAssertEqual(error.tool, .git)
         }
-        guard case .failed = await reader.page(after: [], limit: 3) else {
+        guard case .failed = await reader.page(after: [], root: repo.root, limit: 3) else {
             return XCTFail("paging with no git resolved to something other than a failure")
         }
     }
@@ -411,15 +519,16 @@ final class RepositoryReaderTests: XCTestCase {
         let reader = RepositoryReader(cwd: try built.repo.directory("sub-dir"),
                                       environment: environment(built.repo), runner: recorder)
         let state = await reader.load(limit: 2)
-        _ = await reader.page(after: state.commits, limit: 2)
-        _ = await reader.changes(in: built.merge)
-        _ = await reader.changes(in: built.root)
-        _ = await reader.workingTreeChanges()
+        let root = state.root ?? built.repo.root
+        _ = await reader.page(after: state.commits, root: root, limit: 2)
+        _ = await reader.changes(in: built.merge, root: root)
+        _ = await reader.changes(in: built.root, root: root)
+        _ = await reader.workingTreeChanges(root: root)
         // The failing legs produce argument vectors too, and an unrepresentable write verb has to
         // be unrepresentable on those as well.
-        _ = await reader.changes(in: "0000000000000000000000000000000000000000")
+        _ = await reader.changes(in: "0000000000000000000000000000000000000000", root: root)
 
-        let verbs = Self.gitVerbs(recorder)
+        let verbs = recorder.verbs(of: .git)
         XCTAssertEqual(Set(verbs).subtracting(Self.allowedGitVerbs), [],
                        "the reader produced a git verb outside "
                        + "{rev-parse, log, status, diff, show} over \(verbs.count) invocations")
@@ -434,5 +543,53 @@ final class RepositoryReaderTests: XCTestCase {
                                     + "expected at least 12")
         XCTAssertEqual(recorder.invocations(of: .gh).count, 0,
                        "the repository reader invoked gh")
+    }
+}
+
+/// `RecordingRunner.Invocation.verb` itself, over the option forms git accepts before a
+/// subcommand.
+///
+/// G4's whole argv assertion is read off this one property, so it is asserted directly rather than
+/// only through the readers that happen to use it. Every case below is an option that takes a
+/// **separate value**: a reader that stopped after "the first argument that does not start with a
+/// dash" reads that value as the subcommand, and a `git -c core.pager=cat commit` then presents
+/// itself as a `core.pager=cat` — a verb no allowlist names and no denylist rejects.
+final class RecordingRunnerVerbTests: XCTestCase {
+
+    private func verb(_ arguments: [String]) -> String {
+        RecordingRunner.Invocation(tool: .git, arguments: arguments).verb
+    }
+
+    func testAnOptionThatTakesASeparateValueIsNotReadAsTheVerb() {
+        // The two vectors this target actually produces, and the shape each stands for.
+        XCTAssertEqual(verb(["-c", "diff.renameLimit=1000", "status", "--porcelain=v2"]), "status",
+                       "`WorkingTreeStatus`'s own command line reads as something other than a status")
+        XCTAssertEqual(verb(["-c", "protocol.file.allow=always", "submodule", "add", "--quiet"]),
+                       "submodule",
+                       "a submodule add reads as something other than a submodule")
+
+        for option in ["-c", "--config-env", "--namespace", "-C", "--git-dir", "--work-tree",
+                       "--exec-path"] {
+            XCTAssertEqual(verb([option, "a-value", "log"]), "log",
+                           "\(option) takes a value, and that value was read as the verb")
+            XCTAssertEqual(verb(["-c", "a.b=c", option, "a-value", "--no-pager", "show"]), "show",
+                           "\(option) after another valued option was not skipped with its value")
+        }
+    }
+
+    func testAnOptionWithNoSeparateValueIsStillSkipped() {
+        XCTAssertEqual(verb(["--no-pager", "log", "--oneline"]), "log")
+        XCTAssertEqual(verb(["-c", "a.b=c", "--no-pager", "rev-parse", "--show-toplevel"]),
+                       "rev-parse")
+        // The attached forms take no following value and must not swallow the verb.
+        XCTAssertEqual(verb(["--git-dir=/somewhere", "diff"]), "diff")
+        XCTAssertEqual(verb(["--exec-path=/somewhere", "diff"]), "diff")
+    }
+
+    func testAVectorWithNoVerbIsEmpty() {
+        XCTAssertEqual(verb([]), "")
+        XCTAssertEqual(verb(["--version"]), "")
+        XCTAssertEqual(verb(["-c", "a.b=c"]), "",
+                       "a trailing valued option ran off the end and invented a verb")
     }
 }

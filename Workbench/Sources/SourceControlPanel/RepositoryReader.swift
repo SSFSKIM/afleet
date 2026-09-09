@@ -126,10 +126,17 @@ public enum RepositoryResult<Value: Hashable & Sendable>: Hashable, Sendable {
 /// `WorkingTreeStatus` or `GitDiff`, and the argument vectors those produce are the only ones this
 /// leaf can ever emit — which is what G4's argv assertion is an assertion about.
 ///
-/// `cwd` is the *channel's* directory and is not necessarily a repository root (C7.3's D13). Every
-/// entry point starts from it and lets `SourceControlCore` resolve the root, so a channel opened at
-/// a subdirectory reads the repository it belongs to and recombines git's root-relative paths
+/// `cwd` is the *channel's* directory and is not necessarily a repository root (C7.3's D13).
+/// `load()` starts from it and lets `SourceControlCore` resolve the root, so a channel opened at a
+/// subdirectory reads the repository it belongs to and recombines git's root-relative paths
 /// against the right anchor.
+///
+/// **Every other read takes that resolved root as an argument, and never `cwd` a second time.**
+/// The two name the same repository until they do not: a `claude` session that runs `git init` in
+/// the channel's own directory makes `cwd` resolve somewhere else, and a window or a file list
+/// read from there would be paired with a `RepositoryState.root` that no longer describes it —
+/// `root` is what a `.diff` link carries as `DiffRef.repository`, so C7.5's resolver would be
+/// handed a repository and a path that were never read together.
 public struct RepositoryReader: Sendable {
 
     public let cwd: URL
@@ -186,23 +193,30 @@ public struct RepositoryReader: Sendable {
 
     // MARK: - paging the window
 
-    /// The next `limit` commits after `window`, returned as the **whole extended window**.
+    /// A window `limit` commits longer than `window`, **re-read whole** rather than extended by a
+    /// suffix.
     ///
-    /// `GitLog.commits` is asked with `skip: window.count`, which under `--topo-order` continues
-    /// exactly where the window ended. The de-duplication below is nonetheless kept and is not
-    /// belt-and-braces: a commit written between the two reads shifts every subsequent skip by one
-    /// and re-serves a commit the window already holds, and a graph that drew one commit twice
-    /// would draw its edges twice with it. Order is the order git printed; nothing here re-sorts,
-    /// because the lane assignment downstream is a function of that order.
-    public func page(after window: [GitCommit],
+    /// A suffix at `skip: window.count` is what `--skip` invites, and it is wrong here, because
+    /// `git log --topo-order --all` lists the repository *as it is now* and this app's
+    /// repositories change while the panel is open — a `claude` session commits on its own branch
+    /// between the two reads. A new tip re-orders the listing, so a suffix taken at the old `skip`
+    /// can carry a commit whose child is already in the held window and append it *below* that
+    /// child. `LaneAssignment.assign` depends on exactly one property of its input — that no
+    /// commit is listed before all of its children — and a window assembled that way violates it,
+    /// drawing lanes and edges backwards. A commit that disappeared between the reads (a branch
+    /// deleted, a `gc`) shifts the same `skip` the other way and drops one silently.
+    ///
+    /// One read at the grown limit removes both by construction, and needs no de-duplication: a
+    /// single listing repeats no commit. It costs one more walk of a history git produces in a
+    /// single pass.
+    ///
+    /// `root` is `RepositoryState.root` — the root `load()` resolved, and not `cwd`, which may
+    /// since have become the root of a repository this panel is not showing.
+    public func page(after window: [GitCommit], root: URL,
                      limit: Int = GitLog.defaultLimit) async -> RepositoryResult<[GitCommit]> {
         do {
-            let next = try await GitLog.commits(root: cwd, environment: variables, runner: runner,
-                                                limit: limit, skip: window.count)
-            var seen = Set(window.map(\.hash))
-            var extended = window
-            for commit in next where seen.insert(commit.hash).inserted { extended.append(commit) }
-            return .value(extended)
+            return .value(try await GitLog.commits(root: root, environment: variables,
+                                                   runner: runner, limit: window.count + limit))
         } catch ToolError.notARepository {
             return .notARepository
         } catch {
@@ -217,8 +231,8 @@ public struct RepositoryReader: Sendable {
     /// One invocation, C7.3's `.commitAgainstParent` mapping to `git show --first-parent --root`:
     /// already right for a merge, whose default listing is a combined diff nothing here could
     /// read, and for a root commit, which has no `^` to diff against and lists its whole tree.
-    public func changes(in commitHash: String) async -> RepositoryResult<[FileChange]> {
-        await changes(base: .commitAgainstParent(commitHash))
+    public func changes(in commitHash: String, root: URL) async -> RepositoryResult<[FileChange]> {
+        await changes(base: .commitAgainstParent(commitHash), root: root)
     }
 
     /// What the working tree holds that `HEAD` does not — staged and unstaged together.
@@ -227,13 +241,13 @@ public struct RepositoryReader: Sendable {
     /// v2 reports an index side and a working-tree side, so a path staged and then edited again is
     /// two sides of one entry there and one row here; the status answers "what is where" and this
     /// answers "what has changed", and only this one pairs with a `.diff` link that resolves.
-    public func workingTreeChanges() async -> RepositoryResult<[FileChange]> {
-        await changes(base: .workingTreeAgainstHEAD)
+    public func workingTreeChanges(root: URL) async -> RepositoryResult<[FileChange]> {
+        await changes(base: .workingTreeAgainstHEAD, root: root)
     }
 
-    private func changes(base: DiffRef.Base) async -> RepositoryResult<[FileChange]> {
+    private func changes(base: DiffRef.Base, root: URL) async -> RepositoryResult<[FileChange]> {
         do {
-            return .value(try await GitDiff.changes(root: cwd, base: base, environment: variables,
+            return .value(try await GitDiff.changes(root: root, base: base, environment: variables,
                                                     runner: runner))
         } catch ToolError.notARepository {
             return .notARepository
