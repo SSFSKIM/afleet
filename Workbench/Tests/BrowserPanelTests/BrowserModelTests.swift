@@ -571,6 +571,56 @@ final class BrowserModelTests: XCTestCase {
                        "the flush returned in front of a mutation the gate was still holding")
     }
 
+    /// The flush waits for commits made while it was suspended, and not only for the ones it saw.
+    ///
+    /// This is the store's drain one level up, and it is a **different** defect: a commit made
+    /// while the flush is waiting joins the persistence chain behind its predecessor, so it has not
+    /// submitted anything to the store when the store's own drain looks — nothing pending there,
+    /// nothing in flight there, and a drain that answered from the store alone returns in front of
+    /// it. `QuitGuard` drains exactly once, so what it misses here is what G3 loses at quit.
+    ///
+    /// Two commits are made and not one, for the reason the store's twin of this test records: the
+    /// second is behind the first by the whole of a write and cannot have reached the store
+    /// whichever way the wake-up goes.
+    func testTheFlushWaitsForCommitsMadeWhileItWasSuspended() async throws {
+        let completions = CompletionCounter()
+        let backing = GatedScopedStore(completions: completions)
+        let model = BrowserModel(store: BrowserTabStore(store: backing, sleep: ManualSleeper().sleep),
+                                 factory: BrowserWebViewFactory(),
+                                 openExternally: { _ in
+                                     XCTFail("no test in this file may reach the system opener")
+                                 })
+        await model.restore()
+
+        // One structural commit, whose write is held at the gate.
+        model.openNewTab(url: URL(string: "https://one.example.invalid/")!)
+        let arrived = expectation(description: "the first write reached the store")
+        await backing.expectWriteArrivals(1, arrived)
+        await fulfillment(of: [arrived], timeout: Self.webDeadline)
+
+        // The flush suspends on the chain that commit is on. The count is read in the same breath
+        // as the return, for the reason the store's own drain test gives.
+        let flushed = Task { await model.flush(); return completions.value }
+        for _ in 0..<Self.yields { await Task.yield() }
+
+        // Two more, made underneath it. Each waits for its predecessor before it submits anything,
+        // so neither is pending or in flight at the *store* when the store's drain looks.
+        model.openNewTab(url: URL(string: "https://two.example.invalid/")!)
+        model.openNewTab(url: URL(string: "https://three.example.invalid/")!)
+        for _ in 0..<Self.yields { await Task.yield() }
+
+        await backing.openGate()
+        let atReturn = await flushed.value
+        await model.persistenceSettled()
+
+        XCTAssertEqual(atReturn, 3,
+                       "the flush returned with \(3 - atReturn) commit(s) made while it waited unwritten")
+    }
+
+    /// A bounded number of cooperative yields: enough for a call that does not wait to run to its
+    /// return, and never enough for one that is waiting on a gate the test has not opened.
+    private static let yields = 50
+
     // MARK: Q5's pop-out consequence
 
     /// An `NSView` has one superview, so the web views follow the pop-out and the surface they left

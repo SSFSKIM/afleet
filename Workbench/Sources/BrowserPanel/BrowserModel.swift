@@ -128,6 +128,17 @@ public final class BrowserModel {
     /// would be the panel's truth.
     private var persistChain: Task<Void, Never> = Task {}
 
+    /// How many pieces of work this model has ever enqueued behind either chain: a mutation
+    /// deferred by `gated`, and a commit appended by `commit`. A drain reads it before it suspends
+    /// and again when it wakes, because neither chain it sampled is necessarily the chain it will
+    /// find on the other side of the suspension: see `isQuiescent(since:)`.
+    private var enqueuedWork = 0
+
+    /// How many gated mutations are still waiting to run. It is what keeps the order the user made
+    /// them in across the restoration boundary: while any of them is queued, one made *after* the
+    /// restoration landed has to queue too, or it would overtake them (D59).
+    private var gatedOperationsOutstanding = 0
+
     public init(store: BrowserTabStore,
                 factory: BrowserWebViewFactory,
                 openExternally: @escaping BrowserWebTab.ExternalOpener = BrowserWebTab.systemOpener) {
@@ -419,13 +430,33 @@ public final class BrowserModel {
 
     /// Writes whatever the coalescer is holding, now. The panel calls this when it is going away,
     /// so a title that arrived in the last half-second is not the one thing a relaunch forgets.
+    ///
+    /// **It is a drain and not a sequence of waits**, and it is the store's drain one level up.
+    /// Each wait below is a suspension and this actor is free during them: a mutation deferred at
+    /// the gate, and a commit appended to the persistence chain, can both arrive while this call is
+    /// asleep. A commit that arrives there has *not* reached the store — it waits for its
+    /// predecessor first — so the store's own drain finds nothing pending and nothing in flight and
+    /// returns, and a flush that took that for an answer would return in front of it. `QuitGuard`
+    /// drains exactly once, so what this returns in front of is what G3 loses at quit.
     public func flush() async {
-        // The gate first: a mutation waiting on the restoration has not made its commit yet, so a
-        // flush that waited only on the chain would write the set from before the last thing the
-        // user did (D57).
-        await gateChain?.value
-        await persistChain.value
-        await store.flushPendingEdits()
+        while true {
+            let observed = enqueuedWork
+            // The gate first: a mutation waiting on the restoration has not made its commit yet, so
+            // a flush that waited only on the chain would write the set from before the last thing
+            // the user did (D57).
+            await gateChain?.value
+            await persistChain.value
+            await store.flushPendingEdits()
+            if isQuiescent(since: observed) { return }
+        }
+    }
+
+    /// The condition a drain returns on: nothing has been enqueued since `observed` was read, so
+    /// the two chains this call just waited out are still the whole of them and the store has been
+    /// drained behind them. Anything else means work arrived while it was suspended, and a drain
+    /// that has not seen a piece of work cannot have waited for it.
+    private func isQuiescent(since observed: Int) -> Bool {
+        enqueuedWork == observed
     }
 
     // MARK: The one place a web view is created
@@ -608,6 +639,7 @@ public final class BrowserModel {
     private func commit(_ body: @escaping @Sendable (BrowserTabStore, BrowserTabSet) async -> Void) {
         let set = snapshot()
         let store = store
+        enqueuedWork += 1
         persistChain = Task { [previous = persistChain] in
             await previous.value
             await body(store, set)

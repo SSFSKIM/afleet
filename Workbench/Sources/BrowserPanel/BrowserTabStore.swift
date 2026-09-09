@@ -61,6 +61,11 @@ public actor BrowserTabStore {
     /// Persistence runs in order behind this chain; see `persist`.
     private var writeChain: Task<Void, Never> = Task {}
 
+    /// How many writes have ever been submitted behind `writeChain`. A drain reads it before it
+    /// suspends and again when it wakes, because the chain it sampled is not necessarily the chain
+    /// it will find on the other side of the suspension: see `isQuiescent(since:)`.
+    private var writesSubmitted = 0
+
     private var errorObserver: ErrorObserver?
 
     /// The task an open window is running in. Held so a test can tell the difference between "the
@@ -148,13 +153,14 @@ public actor BrowserTabStore {
     /// Writes whatever a window is holding, now. The panel calls this when it is going away, so a
     /// title typed into the last half-second is not the one thing a relaunch forgets.
     ///
-    /// **It is a drain and not a check**: it returns only when nothing is pending *and* nothing is
-    /// in flight. Both of its waits are suspensions, and this actor is free during them — a commit
-    /// entering there installs a newer snapshot that is in no chain this call is waiting on, so a
-    /// flush that sampled once would return having written the set before it. `QuitGuard` drains
-    /// exactly once, so that snapshot would be the one G3 loses at quit (C5 of fix wave C).
+    /// **It is a drain and not a check**: it returns when this actor is *quiescent*, and not when
+    /// the work it happened to see at the start has finished. Every one of its waits is a
+    /// suspension and this actor is free during them, so what it sampled is not what it will find
+    /// on the other side: a commit entering there can take the pending edit away and submit a
+    /// newer write behind the one being waited on, both at once. `QuitGuard` drains exactly once,
+    /// so anything this call returns in front of is what G3 loses at quit.
     public func flushPendingEdits() async {
-        repeat {
+        while true {
             if let pending = pendingEdit {
                 pendingEdit = nil
                 windowIsOpen = false
@@ -164,8 +170,18 @@ public actor BrowserTabStore {
             // And whatever a window already handed to the store, pending or not. A drain that
             // returned in front of a write in flight would let the app exit mid-write, which is the
             // one thing a drain exists to prevent.
+            let observed = writesSubmitted
             await writeChain.value
-        } while pendingEdit != nil
+            if isQuiescent(since: observed) { return }
+        }
+    }
+
+    /// The condition a drain returns on: nothing is waiting to be written, and nothing has been
+    /// submitted since `observed` was read — so the chain this call just waited out is still the
+    /// whole of the chain. Anything else means work arrived while it was suspended, and a drain
+    /// that has not seen a piece of work cannot have waited for it.
+    private func isQuiescent(since observed: Int) -> Bool {
+        pendingEdit == nil && writesSubmitted == observed
     }
 
     /// Told the error row after every write, so the panel's own copy follows the write rather than
@@ -212,6 +228,7 @@ public actor BrowserTabStore {
             await self.write(set)
         }
         writeChain = task
+        writesSubmitted += 1
         await task.value
     }
 

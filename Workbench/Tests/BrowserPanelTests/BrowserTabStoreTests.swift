@@ -257,6 +257,52 @@ final class BrowserTabStoreTests: XCTestCase {
                        "the flush returned without writing a snapshot installed while it waited")
     }
 
+    /// A write submitted while the flush is waiting for an earlier one is waited for as well.
+    ///
+    /// The pending edit is only half of what a flush can miss. Its other wait is on the chain it
+    /// **sampled**, and this actor is free during it: a structural change entering there takes the
+    /// pending edit away — so the loop's re-check answers "nothing pending" — *and* submits a newer
+    /// write behind the one being waited on. A drain that returned when its sample completed would
+    /// return with that write still at the store, which at quit is the app exiting mid-write.
+    ///
+    /// Two changes are made and not one, because the second is behind the first by the whole of a
+    /// write: whichever of the flush and the first change wakes first when the gate opens, the
+    /// second cannot have reached the store, so this is red for a sampling drain either way.
+    func testAFlushWaitsForAWriteSubmittedWhileItWasWaitingForAnEarlierOne() async throws {
+        let completions = CompletionCounter()
+        let backing = GatedScopedStore(completions: completions)
+        let sleeper = ManualSleeper()
+        let store = BrowserTabStore(store: backing, sleep: sleeper.sleep)
+
+        // A window has already handed its edit to the store, and that write is at the gate.
+        await store.commitEdit(Self.set(["first"], selection: 0))
+        await sleeper.waitForSleep()
+        let arrived = expectation(description: "the coalesced write reached the store")
+        await backing.expectWriteArrivals(1, arrived)
+        await sleeper.advance()
+        await fulfillment(of: [arrived], timeout: Self.deadline)
+
+        // The flush suspends on it with nothing of its own pending. The count is read in the same
+        // breath as the return: an actor hop to ask would be taken after what this is catching.
+        let observed = Task { await store.flushPendingEdits(); return completions.value }
+        for _ in 0..<Self.yields { await Task.yield() }
+
+        let secondSet = Self.set(["second"], selection: 0)
+        let thirdSet = Self.set(["third"], selection: 0)
+        let second = Task { await store.commitStructuralChange(secondSet) }
+        for _ in 0..<Self.yields { await Task.yield() }
+        let third = Task { await store.commitStructuralChange(thirdSet) }
+        for _ in 0..<Self.yields { await Task.yield() }
+
+        await backing.openGate()
+        let atReturn = await observed.value
+        await second.value
+        await third.value
+
+        XCTAssertEqual(atReturn, 3,
+                       "the flush returned with \(3 - atReturn) write(s) it never waited for")
+    }
+
     /// A bounded number of cooperative yields: enough for a call that does not wait to run to its
     /// return, and never enough for one that is waiting on a gate the test has not opened.
     private static let yields = 50
