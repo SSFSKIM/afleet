@@ -111,6 +111,18 @@ final class PaneSurfaceContainer: NSView {
     /// the claimant stack, and the only way an outgoing host can name the host that is still there.
     private static var mounted: [Mounted] = []
 
+    /// Whether the surface this container has taken is still owed the keyboard. A container is
+    /// made and adopts before SwiftUI puts it in a window, so the request outlives the moment.
+    private(set) var owesSurfaceFocus = false
+
+    /// The surface view this container took, so a focus request paid later names that view and not
+    /// whatever happens to be in the hierarchy by then.
+    private weak var adoptedSurfaceView: NSView?
+
+    /// How many times this container has actually handed the keyboard to its surface. Diagnostic:
+    /// it exists so "adopting asks for the focus" is an assertion rather than a recollection.
+    private(set) var focusHandoffCount = 0
+
     /// Takes the surface view, from whichever container was holding it. The newest host is the one
     /// the claim has just been given to, so taking it is what "this host draws the pane" means in
     /// AppKit terms.
@@ -121,6 +133,27 @@ final class PaneSurfaceContainer: NSView {
         surfaceView.autoresizingMask = [.width, .height]
         addSubview(surfaceView)
         Self.record(self, over: surfaceView)
+        // A pane the user asked for is a pane they mean to type into, and the view moving here is
+        // the one moment that fact is knowable: nothing above this sees that the keyboard is still
+        // pointed at whatever it was pointed at before.
+        adoptedSurfaceView = surfaceView
+        owesSurfaceFocus = true
+        takeSurfaceFocus()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        takeSurfaceFocus()
+    }
+
+    /// Makes the surface first responder, if one is owed the keyboard and there is a window to ask.
+    private func takeSurfaceFocus() {
+        guard owesSurfaceFocus, let window, let surfaceView = adoptedSurfaceView,
+              surfaceView.superview === self
+        else { return }
+        owesSurfaceFocus = false
+        focusHandoffCount += 1
+        window.makeFirstResponder(surfaceView)
     }
 
     /// Takes it only while nobody holds it. This is the repair arm: a host that is still mounted
@@ -142,6 +175,8 @@ final class PaneSurfaceContainer: NSView {
     func relinquish(_ surfaceView: NSView) {
         guard surfaceView.superview === self else { return }
         surfaceView.removeFromSuperview()
+        owesSurfaceFocus = false
+        adoptedSurfaceView = nil
         Self.forget(self)
         Self.survivingHost(over: surfaceView)?.adopt(surfaceView)
     }

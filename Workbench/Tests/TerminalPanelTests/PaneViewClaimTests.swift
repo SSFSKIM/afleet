@@ -10,6 +10,13 @@ import XCTest
 /// The claim is model state precisely so this can be asserted without two windows.
 @MainActor
 final class PaneViewClaimTests: XCTestCase {
+    private var window: NSWindow?
+
+    override func tearDown() {
+        window?.orderOut(nil)
+        window = nil
+        super.tearDown()
+    }
 
     // MARK: Group 2 — the claim
 
@@ -177,6 +184,48 @@ final class PaneViewClaimTests: XCTestCase {
 
         XCTAssertTrue(surface.view.superview === incoming,
                       "the outgoing host's teardown removed the view the incoming host holds")
+    }
+
+    /// A pane the user just asked for is a pane they mean to type into. The claim moves and the
+    /// view is attached, but nothing was made first responder — so the keystrokes went on reaching
+    /// whatever held the focus before, the composer, and the new pane sat there looking ready.
+    ///
+    /// The host that takes the surface is the one that asks for the focus, because it is the only
+    /// thing that knows the view has just moved to it.
+    func testAHostThatTakesTheSurfaceTakesTheKeyboardWithIt() {
+        let surface = GhosttyTerminalSurface()
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 1_200, height: 700))
+        // Stands for whatever held the focus when the pane was asked for; in the app it is the
+        // composer, which this target may not import.
+        let elsewhere = NSTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 100))
+        let container = PaneSurfaceContainer(frame: NSRect(x: 0, y: 100, width: 600, height: 400))
+        root.addSubview(elsewhere)
+        root.addSubview(container)
+        window = PaneTestChild.window(around: root)
+        window?.makeFirstResponder(elsewhere)
+        XCTAssertTrue(window?.firstResponder === elsewhere, "the test did not begin with the focus elsewhere")
+
+        container.adopt(surface.view)
+
+        let responder = window?.firstResponder as? NSView
+        XCTAssertFalse(responder === elsewhere, "the keyboard stayed where it was when the pane opened")
+        XCTAssertTrue(responder === surface.view || responder?.isDescendant(of: surface.view) == true,
+                      "the host that took the surface did not make it first responder")
+    }
+
+    /// The same request from a container that is not in a window yet, which is every container
+    /// SwiftUI makes: it still owes the focus, and pays it when the window arrives.
+    func testAHostAdoptingBeforeItHasAWindowStillTakesTheKeyboardWhenOneArrives() {
+        let surface = GhosttyTerminalSurface()
+        let representable = PaneSurfaceView(surface: surface)
+
+        let container = representable.makeContainer()
+        XCTAssertTrue(container.owesSurfaceFocus, "a host that took the surface did not ask for the focus")
+
+        window = PaneTestChild.window(around: container)
+
+        XCTAssertFalse(container.owesSurfaceFocus, "the focus request was never paid once a window existed")
+        XCTAssertEqual(container.focusHandoffCount, 1, "handoffs=\(container.focusHandoffCount)")
     }
 
     /// The reversed ordering, which the repair arm alone does not cover: the surviving host is
