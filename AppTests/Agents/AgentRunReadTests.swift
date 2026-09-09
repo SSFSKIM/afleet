@@ -206,7 +206,14 @@ final class AgentRunReadTests: XCTestCase {
     }
 
     /// The waiting badge's count is the channel's **pending** decisions whose `agent_id` is this
-    /// node's, and a sibling's card is not on this node.
+    /// node's — counted per run, and never a card the user has already answered.
+    ///
+    /// Discriminating on two axes at once, because the one-each corpus this replaced could tell
+    /// neither: the two runs wait on **different** numbers of cards, so a read that counted the
+    /// channel's pending decisions and put the total on every node, or that swapped the two nodes'
+    /// counts, now answers wrongly; and one of the first run's cards is already answered, so a read
+    /// that counted every decision rather than the pending ones over-reports a run that is waiting
+    /// on nothing of the kind.
     func testTheWaitingCountComesFromTheDecisionsAgentID() throws {
         var tree = InventedAgents.tree()
         tree.apply(taskStarted: InventedAgents.taskStarted(taskID: "task_invented0005", toolUseID: "toolu_invented0005",
@@ -217,16 +224,26 @@ final class AgentRunReadTests: XCTestCase {
                    at: InventedAgents.epoch)
         var overlay = Overlay.empty
         overlay.decisions = [
+            // Two pending on the first run, one on the second, and one the user has already
+            // answered — a card that is on neither node's badge and on the channel's total.
             RequestID(rawValue: "req_invented0001"): InventedAgents.decision("req_invented0001", agent: "task_invented0005"),
-            RequestID(rawValue: "req_invented0002"): InventedAgents.decision("req_invented0002", agent: "task_invented0006"),
+            RequestID(rawValue: "req_invented0002"): InventedAgents.decision("req_invented0002", agent: "task_invented0005"),
+            RequestID(rawValue: "req_invented0003"): InventedAgents.decision("req_invented0003", agent: "task_invented0006"),
+            RequestID(rawValue: "req_invented0004"): InventedAgents.decision("req_invented0004", agent: "task_invented0005",
+                                                                             state: .answered(outcome: "allow")),
         ]
 
         let read = AgentRunRead(timeline: ChannelTimeline(overlay: overlay, agents: tree))
 
         let mine = try XCTUnwrap(read.content(of: "task_invented0005"), "the read holds no content for the run")
         let sibling = try XCTUnwrap(read.content(of: "task_invented0006"), "the read holds no content for the sibling")
-        XCTAssertEqual(mine.waitingCount, 1, "the node reports \(mine.waitingCount) waiting decision(s), not 1")
-        XCTAssertEqual(sibling.waitingCount, 1, "the sibling reports \(sibling.waitingCount) waiting decision(s), not 1")
+        XCTAssertEqual(mine.waitingCount, 2,
+                       "the node reports \(mine.waitingCount) waiting decision(s) of the 2 pending on it")
+        XCTAssertEqual(sibling.waitingCount, 1,
+                       "the sibling reports \(sibling.waitingCount) waiting decision(s) of the 1 pending on it")
+        XCTAssertEqual(mine.waitingCount + sibling.waitingCount, 3,
+                       "the 4 card(s) in the channel put \(mine.waitingCount + sibling.waitingCount) on the two "
+                       + "nodes, not the 3 that are still pending")
     }
 }
 
@@ -331,7 +348,8 @@ enum InventedAgents {
                                status: .completed))
     }
 
-    static func decision(_ request: String, agent: String) -> DecisionItem {
+    static func decision(_ request: String, agent: String,
+                         state: DecisionItem.State = .pending) -> DecisionItem {
         DecisionItem(id: ItemID(stream: stream, key: request),
                      timestamp: epoch,
                      provenance: Provenance(stream: stream, agentID: agent, origin: .wire),
@@ -339,7 +357,7 @@ enum InventedAgents {
                      kind: .permission,
                      title: "an invented permission",
                      agentID: agent,
-                     state: .pending,
+                     state: state,
                      payload: .object([:]))
     }
 }
