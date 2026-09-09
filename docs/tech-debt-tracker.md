@@ -2630,3 +2630,50 @@ C6.1's and C6.2's reservations and is expected.
      branch. Same class as 131/146/151/194: a seeding path whose order a busy host can change. Closer:
      the seeding test waits for delivery of the retained report rather than reading once. Owner: C6.2.
      Filed 2026-09-09 at C6.3's merge.
+
+324. **The child spec's §8 says the corpus folds four `isMeta` records; it folds three.** G2's
+     hidden-record clause scans every committed fixture through `RecordReducer` and counts the
+     records the durable projection actually hides: `compact-boundary` one,
+     `session-mirror-relocation` one, `session-mirror-resume` one — three, not the four §8 states
+     (which reads "`session-mirror-resume` 2"). The wire half is as stated: one `isSynthetic`, in
+     `compact-boundary` alone, and no other fixture carries one. Nothing is wrong in the app — the
+     obligation is that a hidden record is never a row, and it is not — but a number in the spec that
+     no fold produces is a floor a future gate could be written against and fail on correct
+     behaviour. Found at C6.1 Task 6, by the gate's first run; the gate now pins three and says
+     where the number came from. Closer: §8's sentence corrected to three at the next spec revision.
+     Owner: the leaf owner, with the Outcomes.
+
+325. **`StreamIngestion.agents` is never nil after `open`, so "a channel opened from its files has
+     no tree" is false as written.** §9 and tracker 187 both say the agent-run tree is *nil* for a
+     file-opened channel — every archived channel and every foreign session — and the C6.1 rows are
+     designed around it. `StreamIngestion.open` builds the `WireReducer` unconditionally, before the
+     tap starts, and `agents` reads `wire?.agents`, so what such a channel has is a **non-nil tree
+     holding no runs**. The behaviour every consumer depends on is unchanged — no node, no run id,
+     no navigation — and G5 measured exactly that live (0 runs). What is wrong is the predicate: a
+     caller writing `agents == nil` to mean "this channel has no tree" is testing something that is
+     never true, and would go on to build a navigable chip. Found at C6.1 Task 6, by G5's first live
+     run, which failed on the nil assertion. Closer: the two documents say "resolves no run" rather
+     than "nil", or `agents` answers nil while the fold has seen no wire event. Owner: C3 for the
+     property, the leaf owner for the sentence.
+
+326. **A row's button cannot be pressed by the test harness once it is inside a `RowFrame`.**
+     `ViewTree.press` recovers a `Button`'s action by reflection, and `RowFrame` stores its content
+     as a `@ViewBuilder @MainActor () -> Body` closure, which reflection cannot enter; the row also
+     reads its capabilities from `@Environment`, which a body evaluated outside a render pass does
+     not carry. So every row this leaf ships whose affordance is inside a `RowFrame` — the agent
+     chip, the cluster disclosure, the thinking disclosure — is asserted through the content its
+     action reads and the capability it calls, and not through a synthesised press. The decision row
+     avoids this by splitting `DecisionRowContent`, which takes the context as a parameter; the
+     chip and the two disclosures have no such split. Found at C6.1 Task 6, writing G2's chip
+     clause. Closer: the same split for the three rows, so a test constructs the body over a context
+     it supplies; or a harness that hosts the row in a real window and clicks it. Owner: C6.1.
+
+327. **G5's chip arm has no subject in the scratch config home.** The gate asserts that a channel
+     opened from its files renders an `Agent` chip and does not navigate, and the assertion is
+     structurally sound — it iterates the history's `Agent` calls and counts the navigable ones —
+     but the session the scratch home offers holds two rows and no `Agent` call at all, so the loop
+     runs zero times and the clause is carried by the tree assertion beside it (0 runs resolved).
+     The treeless arm is therefore witnessed at the tree, not at a chip. Found at C6.1 Task 6, from
+     the gate's own printed counts (agent chips 0). Closer: the scratch home holds a recorded
+     session whose history contains an `Agent` call, which is a fixture-corpus job rather than a
+     code one. Owner: C1 for the recording, C6.1 for adopting it.
