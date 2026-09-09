@@ -3599,6 +3599,20 @@ four whole-branch review rounds.
      has nothing to stop at. Closer: an end instant the file half can defend (the last record of the
      run's own transcript is a *last activity*, not an end), and C4's dormancy as the second witness.
 
+409. **A hatch pane's exit at quit reaches a lifecycle that is already ending.** Tracker 354 put the
+    pane teardown after the termination passes and before the shutdown, which is where a pane in a
+    channel that has just ended should be closed. A `PaneRequest` pane still reports its one
+    `PaneExit` from there — `TerminalPanelSession.tearDown()` owes it whatever the reason for the
+    teardown — so a hatch pane's exit asks C4 to re-adopt a channel the pass has just quit, moments
+    before `shutdown()`. Harmless: the re-adoption changes an in-memory state nobody reads again, a
+    relaunch re-evaluates every channel from the registry, and no state on disk is touched. Filed
+    because the ordering looks wrong on first reading and the next person to move either half should
+    know it was chosen: the alternative — tearing panes down *before* the terminations — closes a
+    pane while its channel is still live, which is the case the ordering exists to avoid. Closer:
+    nothing, unless a future clause makes the exit observable after the shutdown begins, at which
+    point the teardown should suppress the re-adoption report for a quit. Owner: C6.2's `QuitGuard`
+    with C7.4.
+
 ## From C7.7 (Source Control and GitHub panel, `child/c7-scm-panel`)
 
 277. **A linked worktree's or a submodule's history changes outside the watched root.** Design §5
