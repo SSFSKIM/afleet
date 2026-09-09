@@ -276,6 +276,18 @@ final class AppModel: FilesTabHost, SourceControlTabHost {
         }
     }
 
+    /// Registers the composer's `WorkspaceLink.command` target on the app's one link registry —
+    /// C7's acceptance item 3, and the third of tracker 207 that was a link nothing claimed.
+    ///
+    /// A method for the reason `registerBrowserLinkTargets()` is one: it is the production
+    /// registration, so a test that asserts a command link reaches a composer can drive the same
+    /// line the launch does rather than build a target of its own and prove nothing about the app.
+    /// Unguarded, unlike the Browser's pair, because the target is registered against `.thread` and
+    /// the handover this follows has just withdrawn everything that tab held.
+    func registerCommandLinkTarget() async {
+        await panels.links.register(CommandLinkTarget.target(composers: composers))
+    }
+
     // MARK: - The Files panel's link deliveries (C7.5 spec Design §9)
 
     /// What a delivered `.file` or `.diff` opens in: the Files session for the channel the
@@ -505,6 +517,15 @@ final class AppModel: FilesTabHost, SourceControlTabHost {
                 assertionFailure("the handover unregistered .thread before registering over it")
             }
             if wasShowingThread { panels.select(.thread) }
+            // C7's acceptance item 3: a `WorkspaceLink.command` reaches the composer of the channel
+            // it was raised in. **After the handover and not with the Browser's targets**, because
+            // this one is registered against `.thread` and `unregister(.thread)` two lines up drops
+            // every target that tab holds — registered before it, the claim would be withdrawn by
+            // the very call that installs the tab it belongs to. Registering here also makes the
+            // pair self-balancing over *Check again*, which runs this whole block again: the
+            // withdrawal and the registration are the same two lines each time, so no launch leaves
+            // two indistinguishable targets tying on specificity.
+            await registerCommandLinkTarget()
         }
         await startActivity(over: reached)
         // **Last.** Publishing the route is what puts the actionable surfaces on screen — the
