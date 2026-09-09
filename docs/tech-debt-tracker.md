@@ -4111,3 +4111,14 @@ needs more. Nothing above is renumbered.
      that has a substantive reason, re-word item 1 to "set only for fixtures a generator under
      `Tools/probe/synthetic/` builds, each saying so in its README", and read item 10 as the
      item that carries them. Owner: the architect, with C1's fixture rules.
+
+427. **S7's harness streams markdown rows that carry no item, so the item builders' frame cost is
+     unmeasured.** `TimelineFrameTimeSpikeTests` seeds and streams `RenderedRow(key:source:)` values,
+     which `TimelineTableController.root(for:)` sends to `TimelineMarkdownRow` — the markdown
+     pipeline, the table and the scroll correction under thirty-hertz load, which is what S7
+     states. A message row, a decision or task card, an agents outline or a relay note never enters
+     the measured path, so a frame-budget regression in any of them passes this gate. The
+     measurement recorded in the composite is therefore the streaming budget, not the finished
+     surface's. Closer: a second workload that streams through the item builders with the
+     `nested-depth-2` and `dialog-*` recordings' rows, reported beside the first. Owner: C6.1's
+     successor on the renderer. Raised at C6's recomposition review, 2026-09-10.
