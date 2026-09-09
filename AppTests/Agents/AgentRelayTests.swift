@@ -182,6 +182,52 @@ final class AgentRelayTests: XCTestCase {
                         "a refused relay offered no retry")
     }
 
+    /// **G4, arm two's other half: a refused resume carries no `is_error`, and is still not
+    /// delivered.**
+    ///
+    /// The pinned bundle's `SendMessage` returns `{success, message}` and the engine serialises that
+    /// object into one text block of an **ordinary** `tool_result`. `is_error` is reserved for the
+    /// tool's validate-input refusals; the four resume refusals parity §18.25.4 lists — a run the
+    /// user stopped, a missing transcript, forked-skill scoping, a worktree gone — arrive as results
+    /// the engine never flags.
+    ///
+    /// Both halves run over one timeline, in this order, because the discrimination is the whole
+    /// point: two results identical in every field a flag-reading machine looks at, one of which is
+    /// a delivery in progress and the other of which is a message that will never arrive. A machine
+    /// reading only the flag passes the first assertion and fails here — and in production says
+    /// *Relayed* for ever about an agent that was stopped, which is the reassuring direction of the
+    /// silent failure item 51 exists to end.
+    func testARefusedResumeCarriesNoErrorFlagAndIsStillNotDelivered() {
+        var wire = RelayWire()
+        wire.open()
+        let first = wire.record()
+        wire.sendMessageCall(to: RelayWire.target)
+        wire.sendMessageResult(success: true)
+        XCTAssertTrue(wire.state(of: first) == .relayed,
+                      "a result whose body says the tool succeeded did not settle relayed")
+
+        let second = wire.record(promptUUID: RelayWire.secondPromptUUID)
+        wire.sendMessageCall(to: RelayWire.target, id: RelayWire.secondSendCall)
+        wire.sendMessageResult(id: RelayWire.secondSendCall, success: false)
+        XCTAssertTrue(wire.state(of: second) == .notDelivered(.refused),
+                      "a refused resume with no error flag was read as relayed")
+        XCTAssertNotNil(wire.reading(of: second).retry,
+                        "a refused resume offered no retry")
+    }
+
+    /// A result body the tool did not write answers nothing: an unreadable body is not evidence of a
+    /// refusal, and reading it as one would put *Not delivered* on a relay that went through.
+    func testAResultBodyThatIsNotTheToolsObjectDoesNotSettleRefused() {
+        var wire = RelayWire()
+        wire.open()
+        let record = wire.record()
+        wire.sendMessageCall(to: RelayWire.target)
+        wire.toolResult(isError: false)
+
+        XCTAssertTrue(wire.state(of: record) == .relayed,
+                      "a non-error result whose body is not the tool's own object was read as a refusal")
+    }
+
     /// **G4, arm four: the target's `task_notification` arrives after *Relayed* with no further tool
     /// round.**
     ///
@@ -533,6 +579,26 @@ struct RelayWire {
                                                 : "an invented queued-for-next-round sentence")])])])])
     }
 
+    /// The `tool_result` as `SendMessage` itself answers: **one text block carrying the tool's own
+    /// `{success, message}` object, and no `is_error` key at all.**
+    ///
+    /// The engine flags a `SendMessage` result only for its validate-input refusals — an empty
+    /// message, a malformed recipient. Every route outcome, including a refused resume, comes back
+    /// as an ordinary result whose body states it. `toolResult(isError:)` above is the other shape
+    /// and both are real; this is the one the four resume refusals arrive in.
+    mutating func sendMessageResult(id: String = RelayWire.sendCall, success: Bool) {
+        let body = success
+            ? #"{"success":true,"message":"an invented queued-for-next-round sentence"}"#
+            : #"{"success":false,"message":"an invented sentence refusing to resume a stopped agent"}"#
+        push(["type": .string("user"), "uuid": .string("daaadddd-\(tick)111-4111-8111-dddddddddddd"),
+              "session_id": .string(Self.session.description),
+              "message": .object(["role": .string("user"),
+                                  "content": .array([
+                                    .object(["type": .string("tool_result"), "tool_use_id": .string(id),
+                                             "content": .array([.object(["type": .string("text"),
+                                                                         "text": .string(body)])])])])])])
+    }
+
     /// The model speaking in the turn the relay was asked for.
     mutating func assistantText(_ text: String) {
         push(["type": .string("assistant"), "uuid": .string("eeeeeeee-\(tick)111-4111-8111-eeeeeeeeeeee"),
@@ -712,5 +778,138 @@ actor PromptDouble: LifecycleAPI {
 
     private nonisolated func unreachable(_ member: String) -> Never {
         fatalError("PromptDouble.\(member) is not part of the relay's surface")
+    }
+}
+
+// MARK: - The fixture replay (G4's fixture half)
+
+/// C6.4 Task 8: item 51's five arms replayed end to end out of one recording.
+///
+/// **What this adds over the arms above.** Those assert the machine over frame sequences a test
+/// wrote; this asserts the same five conclusions over a *recording* — one session, six turns, the
+/// five arms in order — so the claim moves from "afleet reads these sequences correctly" to "these
+/// sequences are a session, and afleet reads it".
+///
+/// **It skips until the recording is signed, and starts asserting by itself the moment it is.**
+/// A fixture enters the repository only when a person other than its author has walked
+/// `Fixtures/REVIEW.md` and signed it, and `make verify-fixtures` refuses an unsigned directory —
+/// so the recording is staged outside the tree until then. This suite is committed now, green now,
+/// and needs no edit when the signature arrives. The skip's sentence is fixed and names no path,
+/// no session and no slug (§11).
+@MainActor
+final class AgentRelayFixtureTests: XCTestCase {
+
+    static let fixture = "send-message-delivery"
+
+    /// The recording's own invented identifiers. **Written here rather than derived from the
+    /// frames**: deriving the target run and the five messages from the recording would make the
+    /// assertion agree with whatever the recording happens to say, which is the one thing a replay
+    /// must not do. The generator under `Tools/probe/synthetic/` authored both halves and these are
+    /// its values — invented, of the engine's `^a[0-9a-f]{16}$` agent-id shape, nobody's own (§11).
+    static let target: AgentRunID = "a1111111111111111"
+    static let messages = ["an invented errand for the first arm",
+                           "an invented errand for the second arm",
+                           "an invented errand for the third arm",
+                           "an invented errand for the fourth arm",
+                           "an invented errand for the fifth arm"]
+
+    /// **Each of the five arms, from the recording, in one pass.**
+    ///
+    /// The five records are opened against the five prompt uuids the recording carries, in the order
+    /// the human turns appear, and every arm's conclusion is asserted over the finished timeline —
+    /// which is stricter than asserting each as it arrives, because a machine that settled an arm
+    /// early and then let a later turn's frames move it would pass a turn-by-turn reading.
+    func testTheFiveArmsReplayToTheirFiveStates() throws {
+        let replay = try Replay.open(Self.fixture)
+
+        XCTAssertEqual(replay.promptUUIDs.count, 6,
+                       "the recording carries \(replay.promptUUIDs.count) human turn(s), not the 6 the arms need")
+        XCTAssertEqual(replay.timeline.agents?.nodes.count, 2,
+                       "the recording started \(replay.timeline.agents?.nodes.count ?? 0) run(s), not 2")
+
+        // The first human turn starts the two runs; the five that follow are the arms.
+        let records = (0..<5).map { arm in
+            replay.relay.open(promptUUID: replay.promptUUIDs[arm + 1], target: Self.target,
+                              textDigest: AgentRelayDigest.of(Self.messages[arm]), in: replay.key,
+                              at: Replay.epoch.addingTimeInterval(TimeInterval(arm)), resend: { _ in })
+        }
+        let expected: [AgentRelayState] = [.delivered,
+                                           .notDelivered(.noCall),
+                                           .notDelivered(.wrongTarget),
+                                           .notDelivered(.refused),
+                                           .notDelivered(.stoppedBeforeNextRound)]
+        let outcomes = replay.relay.outcomes(in: replay.key, of: replay.timeline)
+        for (arm, record) in records.enumerated() {
+            let state = outcomes[record.id]?.state
+            XCTAssertTrue(state == expected[arm],
+                          "arm \(arm + 1) of 5 replayed to \(String(describing: state)) and not "
+                          + "\(String(describing: expected[arm])); the state names carry no id, text or path")
+        }
+    }
+
+    /// The arm the recording exists to discriminate: its fourth turn's `tool_result` carries **no**
+    /// error flag, and the arm is still not delivered.
+    ///
+    /// Asserted against the recording's own bytes rather than against the reading, so a recording
+    /// re-made with an `is_error` on that result would fail here instead of quietly turning the arm
+    /// above into a test of the flag.
+    func testTheRefusedArmsResultCarriesNoErrorFlag() throws {
+        let replay = try Replay.open(Self.fixture)
+        let refusals = replay.timeline.items.compactMap { item -> ToolCallItem? in
+            guard case .toolCall(let call) = item, call.name == "SendMessage" else { return nil }
+            return call
+        }
+        XCTAssertEqual(refusals.count, 4, "the recording carries \(refusals.count) SendMessage call(s), not 4")
+        XCTAssertTrue(refusals.allSatisfy { $0.isError != true },
+                      "the recording flags a SendMessage result as an error; every route it shows is an ordinary result")
+    }
+
+    // MARK: - The replay
+
+    /// One recording, folded by C3's own reducer, with the relay registry beside it.
+    ///
+    /// The host signal each turn needs is raised here and not in the recording: `promptSent` is
+    /// afleet's own act — the recording is the engine's half of the conversation — and it is what
+    /// the reducer attributes a turn's `result` to. Raising it before each human turn's echo is
+    /// exactly what the send path does.
+    @MainActor
+    struct Replay {
+
+        static let configHome = URL(fileURLWithPath: "/invented/replay-config-home")
+        static let epoch = Date(timeIntervalSince1970: 1_800_000_000)
+
+        let key: ChannelKey
+        let relay = AgentRelayRegistry()
+        let promptUUIDs: [String]
+        let timeline: ChannelTimeline
+
+        static func open(_ fixture: String) throws -> Replay {
+            guard FileManager.default.fileExists(atPath: FixtureRunner.directory(fixture).path) else {
+                throw XCTSkip("the synthetic delivery recording is not in the tree; it enters when its review is signed")
+            }
+            guard let session = SessionID("66666666-6666-4666-8666-666666666666") else {
+                throw AgentGateBail("an invented session id did not parse")
+            }
+            var reducer = WireReducer(stream: LogicalStream(configHome: configHome, sessionID: session, name: .main),
+                                      slug: "an-invented-slug")
+            var uuids: [String] = []
+            var tick = 0
+            func stamp() -> Date { tick += 1; return epoch.addingTimeInterval(TimeInterval(tick)) }
+            for line in try FixtureRunner.outboundLines(fixture) {
+                let object = try JSONSerialization.jsonObject(with: line) as? [String: Any] ?? [:]
+                if object["type"] as? String == "user",
+                   (object["origin"] as? [String: Any])?["kind"] as? String == "human",
+                   let uuid = object["uuid"] as? String {
+                    uuids.append(uuid)
+                    _ = reducer.apply(.promptSent(uuid: uuid, at: stamp()), at: stamp())
+                }
+                _ = reducer.apply(.frame(FrameDecoder.decode(line: line), .first), at: stamp())
+            }
+            return Replay(key: ChannelKey(configHome: configHome, session: session),
+                          promptUUIDs: uuids,
+                          timeline: ChannelTimeline(durable: reducer.durable, overlay: reducer.overlay,
+                                                    preview: reducer.preview, agents: reducer.agents,
+                                                    registry: reducer.registry))
+        }
     }
 }

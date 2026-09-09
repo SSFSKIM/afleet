@@ -198,10 +198,45 @@ enum AgentRelayMachine {
     private static func verdict(of call: ToolCallItem, for record: AgentRelayRecord) -> CallVerdict {
         guard case .sendMessage(let input) = call.input, input.to == record.target else { return .wrongTarget }
         if call.isError == true || call.status == .failed || call.status == .denied { return .refused }
+        // **The flag is not the whole refusal, and this is the arm that would get it wrong.**
+        // `SendMessage` answers `{success, message}` and the engine serialises that object into one
+        // text block of an ordinary `tool_result`. A *refused resume* — a run the user stopped, a
+        // transcript that is gone, a worktree that went away — comes back `success: false` in a
+        // result the engine never flags, because `is_error` is reserved for the tool's
+        // validate-input refusals (an empty message, a malformed recipient). Reading only the flag
+        // reports a message as relayed to an agent that will never take it: the silent failure item
+        // 51 exists to make visible, in its quietest direction, because the surface is reassuring.
+        if refusedInBody(call.result) { return .refused }
         // A call with no result yet is a call whose outcome is unknown, and the engine's success
         // string is what *Relayed* is concluded from. `.completed` is the builder's reading of the
         // `tool_result` having arrived.
         return call.status == .completed ? .relayed : .running
+    }
+
+    /// Whether the `tool_result`'s own body says the tool declined.
+    ///
+    /// Read as JSON out of the result's text, because that is the shape the engine writes and the
+    /// only place this outcome is stated. A body that is not the tool's own object — a plain
+    /// sentence, a shape a later release changes — answers nothing here rather than answering
+    /// "refused": an unreadable body is not evidence of a refusal, and treating it as one would put
+    /// *Not delivered* on a relay that went through.
+    private static func refusedInBody(_ result: JSONValue?) -> Bool {
+        guard let result else { return false }
+        for text in resultTexts(of: result) {
+            guard let data = text.data(using: .utf8),
+                  let body = try? JSONDecoder().decode(JSONValue.self, from: data),
+                  let success = body["success"]?.boolValue else { continue }
+            if !success { return true }
+        }
+        return false
+    }
+
+    /// The text of a `tool_result` body, whichever of its two shapes the engine wrote: a bare
+    /// string, or the array of content blocks it uses when the tool returns an object.
+    private static func resultTexts(of result: JSONValue) -> [String] {
+        if let text = result.stringValue { return [text] }
+        guard let blocks = result.arrayValue else { return [] }
+        return blocks.compactMap { $0["text"]?.stringValue ?? $0.stringValue }
     }
 
     /// The delivery frame, or nil: an item **of the target run** after the relay whose text carries
