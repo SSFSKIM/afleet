@@ -2734,3 +2734,64 @@ C6.1's and C6.2's reservations and is expected.
      C6.1's review fix wave. Closer: one measurement path, which means measuring through the row's
      own host and having no second one — reachable only once every row is mounted before it is
      measured, which a virtualised table does not do. Owner: C6.1.
+
+**Merge review, confirming round (2026-09-09): entries 333–335 and 375–379 file what the round found
+and the architect left standing.** The round's other twelve findings were fixed by waves D–G before
+the merge; one (asynchronous highlighting never redrawing the row) is already 330.
+
+333. **The anchor's transfer from the preview to its durable item needs the preview gone and a new
+    key appended in one publish, and two ordinary sequences deny it.** The reducer clears the
+    preview per assistant block, so the next `content_block_start` can reopen one before the item is
+    published; and `ItemBuilder.addAssistant` merges a matching `message.id` into an existing item,
+    so no key is new. Either way the bottom-pinned viewport keeps its old row and the reader sees a
+    jump. The fix reconciles anchors by message identity instead of by key novelty
+    (`TimelineTableController`, the anchor transfer). Round 2 scalpel-1#2.
+
+334. **A changed task's cached height is dropped, and the fresh measurement can be the card's
+    placeholder, not the card.** `applyItems` removes the height; `height(of:)` measures a fresh host
+    whose `TaskCardSeam.card` is nil until its task runs, while the retained on-screen card keeps its
+    identity and `remeasure` suppresses an unchanged full height already `reported`. The smaller
+    fallback can stay cached and clip the card. The fix re-reports a mounted host's height after any
+    invalidation of its key. Round 2 scalpel-1#3.
+
+335. **Every hosting view the table has ever created is retained until its key leaves the history.**
+    `pruneHosts` removes keys absent from the items, never rows that left the viewport; each
+    neighbourhood change then updates and synchronously remeasures every retained host. Memory and
+    per-publish work grow with the rows a reader has visited, which on a long session undoes the
+    virtualisation the table exists for. A viewport-exit eviction with a small keep-alive margin is
+    the fix; the S7 measurement should be repeated against it. Round 2 scalpel-2#1 (and the sweep).
+
+375. **Task controls are offered on the mode, not on a live owned process.** `ChannelRow
+    .offersOwnedActions` is `mode == .ownedCandidate`, and the context always carries the workspace
+    lifecycle, so an archived or foreign-live owned-candidate transcript can build a running task
+    card that offers *Stop*; the supervisor then rejects the action as `notOwned`, so nothing is
+    stopped — the control is a dead button, not a wrong one. Gate on the channel's readiness being
+    `.owned` as well. Round 2 scalpel-3#3.
+
+376. **The syntax-highlighting preference is a process-wide flag.** Each controller's `apply` writes
+    `CodeHighlighter.shared.enabled`; `MarkdownBody` renders through the singleton without reading
+    its own context's preference, and `MarkdownText` caches by source alone. Two channels whose
+    `get_settings` readbacks disagree can render, and cache, each other's styling while their
+    controllers interleave. Carry the preference on the render context into the pipeline and key
+    the cache by it. Round 2 scalpel-4#1.
+
+377. **The streaming split's fence test is a parity count of lines beginning with three backticks.**
+    Tilde fences, indented fences and fences of unequal length are not recognised, so a preview can
+    settle inside an open block and the text after it is parsed as markdown (`**literal**` becomes
+    emphasis) and frozen that way. `finalise` at completion does not revisit it. Match the opening
+    delimiter (character and length, per CommonMark) when deciding whether a fence is open. Round 2
+    scalpel-4#2.
+
+378. **A permission-mode status reported before the timeline's first subscription is lost.**
+    `ChannelSupervisor.events` is a future-only stream; `Fleet.engineReports` retains the handshake
+    and `system/init` but not the latest status, and `SettingsReadback` takes the mode from the
+    handshake alone. The header shows the launch mode until the next change, which on a quiet channel
+    is never. The retained latest status belongs beside the handshake in X5's `EngineReports` (C4's
+    surface); the timeline then reads it at subscription. Round 2 scalpel-5#3; owner C4/X5, reader
+    here.
+
+379. **A settings readback and the handshake it is paired with are fetched without an epoch.**
+    `ReadbackPoller.settings` awaits `send` and then `engineReports` as two operations; a restart
+    between them pairs the old process's settings with the replacement's handshake, and
+    `refreshReadbacks` publishes the pair unchecked. Have `engineReports` carry the epoch and drop a
+    pair whose halves disagree. Round 2 scalpel-5#4.
