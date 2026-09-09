@@ -4111,3 +4111,74 @@ needs more. Nothing above is renumbered.
      that has a substantive reason, re-word item 1 to "set only for fixtures a generator under
      `Tools/probe/synthetic/` builds, each saying so in its README", and read item 10 as the
      item that carries them. Owner: the architect, with C1's fixture rules.
+
+## From corrective/c6-recomp-agents, 2026-09-10
+
+435. **A relay's *conclusion* survives a rebuild only if something read it; its *correlation* always
+     does.** The registry keeps a terminal outcome once it has derived one, and it derives one only
+     when a surface asks — a message row on the channel column, or a node in the Agents tab. A relay
+     sent on a channel the reader then leaves, whose turn closes with nobody drawing either, has no
+     conclusion stored when *Check again* rebuilds the timeline from the files, and the rebuilt
+     timeline carries no turn boundary (§7.3: the turn summary is folded from `result`, which is
+     wire-only). That record then reads *Pending* for good. What it can no longer do is take a later
+     send's call — a younger record's own prompt echo is a transcript record and bounds the older
+     record's scan — so item 51's one-to-one correlation holds either way and the loss is a sentence
+     rather than a wrong one. Closing it means advancing the registry when a channel *publishes*
+     rather than when a surface asks, which is a second consumer of the publish path and a decision
+     above this corrective. Owner: whoever rules on a publish-time seam for app-scoped derivations.
+     Raised by the recomposition corrective's review round.
+
+436. **The relay derivation is O(records × items) per body evaluation.** `reading(of:)` calls
+     `outcomes(in:of:)`, which advances every record of the channel over the whole timeline, and the
+     message row calls it once per relayed message drawn. It was one pass before this corrective and
+     is one pass plus a bounded delivery re-scan per settled arm after it. Nothing measures it and no
+     channel in the corpus has enough relays for it to show; the shape is what is filed, not a
+     symptom. Closing it means caching the advance per (channel, timeline identity), which needs the
+     timeline to carry an identity the registry can compare. Owner: this leaf's successor on the
+     relay. Raised by the recomposition corrective's review round.
+
+437. **`AgentNodeActions` now holds two ways to reach the fleet, and only one of them follows the
+     app.** The session's own X5 requests — *Stop*, *Move to background*, *Stop everything*,
+     *Background all* — use the lifecycle the panel session was built over, which is right because
+     the host releases that session when the workspace is replaced; the send uses the app's
+     `LifecycleReach`, because a *Retry* outlives the session. Two seams in one object is a thing a
+     later author can pick the wrong one of, and nothing mechanical says which is which beyond the
+     comment on the field. Closing it means resolving every action through the reach and answering
+     for the nil case in each, which changes four call sites and their refusal wording. Owner: this
+     leaf's successor. Raised by the recomposition corrective's review round.
+
+438. **A *Retry* refused because there is no workspace is worded `notOwned`.** `LifecycleError.notOwned`
+     is the fleet's own answer for a channel it holds no supervisor for, and the send now raises it
+     itself when the app has no workspace at all — a launch that has not reached one, or one being
+     replaced. The two are close enough that the sentence is not wrong, and coarse enough that a user
+     who pressed *Retry* during a *Check again* is told the app does not own the channel rather than
+     that the workspace is being rebuilt. It compounds tracker 399, which records that after an
+     eviction the refusal reaches no banner at all. Owner: this leaf's successor on the relay,
+     together with 399. Raised by the recomposition corrective's review round.
+
+439. **`AgentRunTree.insert` rebuilds every node's children.** One pass over the session's runs per
+     node created, so building a tree of n runs is O(n²) in the number of *runs* — tens, on the
+     widest session the corpus holds, and the pass is an array append per node. The alternative is to
+     attach only the children whose `parent` names the new node, which needs an index from parent id
+     to waiting children that nothing else would use. Filed as the shape rather than as a measured
+     cost. Owner: C3's successor on the tree. Raised by the recomposition corrective's review round.
+
+440. **`processReplaced` is reached only through an event of the new process.** `StreamIngestion`
+     folds it when an event's epoch exceeds the greatest it has seen, which is the one place the
+     actor can observe a replacement — so a process replaced by a spawn that then produces no event
+     at all leaves the previous process's live half in place until its first frame arrives. It is
+     bounded: the handshake, `system/init` and the first `result` all carry the epoch, so the window
+     is the spawn itself, and the `.exited` path has already applied the same process-gone reading in
+     every ordinary replacement. Closing it means the supervisor telling the ingestion it respawned,
+     which is a lifecycle signal this actor does not take. Owner: C4's lifecycle, with C3's fold.
+     Raised by the recomposition corrective's review round.
+
+441. **The scroll correction's fallback reads the row order and not the neighbourhood.**
+     `nearestSurvivor(above:in:)` walks backwards through the keys the publish replaced until it
+     finds one the table still holds, which is linear in the distance to the nearest survivor and
+     runs on the publish that retracted the anchor. A retraction that removed a long run of
+     consecutive rows above the viewport walks all of them. It is bounded by the table and happens
+     only on the publish that evicted the anchored row, which is why it is filed rather than fixed;
+     closing it means the renderer publishing the previous row's key per row, which is a field on the
+     render input. Owner: C6.1's successor on the table. Raised by the recomposition corrective's
+     review round.

@@ -189,6 +189,85 @@ final class AgentRelayTests: XCTestCase {
                       "the newer record did not claim its own call and delivery after the rebuild")
     }
 
+    /// **The one-to-one contract holds across a rebuild even for a record nobody read.**
+    ///
+    /// Settlement is memory, and memory is only written when something asks: a relay sent on a
+    /// channel the reader then leaves, whose turn closes with nobody drawing its row, has no
+    /// conclusion stored when *Check again* rebuilds the timeline. The correlation must not depend
+    /// on that. A younger record's own prompt echo is in the transcript and survives the rebuild, so
+    /// a call that lies after it and carries the younger record's message is the younger record's.
+    ///
+    /// The older record reads *Pending* here rather than *Not delivered* — its turn boundary is
+    /// genuinely gone and pending is the honest answer — and what this asserts is that it did not
+    /// take the younger send's call, which is what item 51's one-to-one correlation is.
+    func testAnUnreadRecordStillDoesNotClaimALaterSendsCallAfterARebuild() {
+        var wire = RelayWire()
+        wire.open()
+        let older = wire.record()
+        wire.assistantText(RelayWire.reply)
+        wire.result()                                     // the turn closes, and nothing reads it
+
+        let newer = wire.record(promptUUID: RelayWire.secondPromptUUID)
+        wire.sendMessageCall(to: RelayWire.target, id: RelayWire.secondSendCall)
+        wire.sendMessageResult(id: RelayWire.secondSendCall, success: true)
+        wire.forwarded(RelayWire.message)
+
+        // The first reading of either record is taken against the rebuilt timeline: no conclusion
+        // was ever stored, so this is the derivation alone.
+        let rebuilt = wire.rebuiltFromFiles
+        XCTAssertTrue(wire.state(of: newer, in: rebuilt) == .delivered,
+                      "the younger send did not claim its own call and delivery")
+        XCTAssertTrue(wire.state(of: older, in: rebuilt) == .pending,
+                      "an unread older record took the younger send's call once the turn boundary was gone")
+    }
+
+    /// **A settled *Not delivered* still yields to the message arriving.**
+    ///
+    /// The fourth arm is the provisional one: it concludes that a run stopped without taking the
+    /// message, and the message can still turn up in that run's own transcript afterwards. A
+    /// settlement that froze it would leave *Not delivered* and a *Retry* on a message that had
+    /// arrived, and the retry would send it twice.
+    func testASettledNotDeliveredYieldsToTheMessageArriving() {
+        var wire = RelayWire()
+        wire.open()
+        let record = wire.record()
+        wire.sendMessageCall(to: RelayWire.target)
+        wire.sendMessageResult(success: true)
+        wire.assistantText(RelayWire.reply)
+        wire.result()                                     // the turn closes: the arm below settles
+        wire.taskNotification()
+        XCTAssertTrue(wire.state(of: record) == .notDelivered(.stoppedBeforeNextRound),
+                      "the fourth arm did not settle, so the correction below proves nothing")
+
+        wire.forwarded(RelayWire.message)
+        XCTAssertTrue(wire.state(of: record) == .delivered,
+                      "the message arrived in the run's own transcript and the record kept its refusal")
+    }
+
+    /// **The fourth arm survives the process that filled the mirror.**
+    ///
+    /// It is read off `RegistryEntry`, and the mirror is emptied when the process exits, because
+    /// only a live process can fill it. The run's own node is the evidence that is left: a run the
+    /// exit ended after the relay took no round after it, which is the same conclusion by the same
+    /// rule. Without the fallback the record reads *Relayed* for ever about a message that will
+    /// never arrive — the reassuring direction item 51 exists to end.
+    func testTheFourthArmIsStillReadWhenTheProcessThatFilledTheMirrorIsGone() {
+        var wire = RelayWire()
+        wire.open()
+        let record = wire.record()
+        wire.sendMessageCall(to: RelayWire.target)
+        wire.sendMessageResult(success: true)
+        XCTAssertTrue(wire.state(of: record) == .relayed,
+                      "the call did not settle relayed, so the arm below is reached from another state")
+
+        wire.processExited()
+        XCTAssertEqual(wire.timeline.registry.entries.count, 0,
+                       "the exit left \(wire.timeline.registry.entries.count) mirror row(s), so the fallback "
+                       + "below is never reached")
+        XCTAssertTrue(wire.state(of: record) == .notDelivered(.stoppedBeforeNextRound),
+                      "a run the process exit ended after the relay was not read as having stopped")
+    }
+
     // MARK: - The four Not delivered arms
 
     /// **G4, arm one: the turn ends with no `SendMessage` call.**
@@ -779,7 +858,12 @@ final class AgentRelayTests: XCTestCase {
     /// Bounded polling, the shape the other suites here use: a press starts a `Task`, and a test that
     /// waited a duration would be asserting about the scheduler.
     static func settle(until condition: @MainActor () async -> Bool) async -> Bool {
-        for _ in 0..<200 {
+        // The budget is a **hang guard and not a measurement**: every press this waits on is
+        // fulfilled by the work it starts, so the loop returns on the first satisfied poll and the
+        // ceiling only decides how long a genuinely broken press takes to fail. It is generous
+        // because a suite running under load schedules an unstructured task late, and a wait that
+        // expired for that reason would fail for the scheduler rather than for the assertion.
+        for _ in 0..<3_000 {
             if await condition() { return true }
             await Task.yield()
             try? await Task.sleep(nanoseconds: 2_000_000)
@@ -978,6 +1062,12 @@ struct RelayWire {
         push(["type": .string("user"), "uuid": .string("bcbcbcbc-\(tick)111-4111-8111-bcbcbcbcbcbc"),
               "session_id": .string(Self.session.description),
               "message": .object(["role": .string("user"), "content": .string(text)])])
+    }
+
+    /// The channel's process exits. Every run still reading running ends with it and the registry
+    /// mirror goes empty, because only a live process fills it.
+    mutating func processExited() {
+        _ = reducer.apply(.exited(.code(0, stderrTail: ""), .first), at: stamp())
     }
 
     /// The run's `task_notification` — what hands the result back and what the fourth arm reads.

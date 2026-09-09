@@ -386,14 +386,22 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
         }
         if appended > 0 { scroll.unseenCount += appended }
         guard let anchor else { return }
-        // The anchored row itself, or — where this publish retracted it — the nearest row above it
-        // that survived. Giving up instead is the same failure the correction exists to prevent:
-        // the viewport keeps its raw offset while the document above it gets shorter, so the
-        // reader's place jumps by the whole height of what left.
-        guard let index = index(ofKey: anchor.key) ?? nearestSurvivor(above: anchor.key, in: previousKeys)
-        else { return }
-        let target = tableView.rect(ofRow: index).minY - anchor.offset
-        scrollTo(y: target)
+        if let index = index(ofKey: anchor.key) {
+            scrollTo(y: tableView.rect(ofRow: index).minY - anchor.offset)
+            return
+        }
+        // This publish retracted the anchored row: the correction falls back to the nearest row
+        // above it that survived. Giving up instead is the same failure the correction exists to
+        // prevent — the viewport keeps its raw offset while the document above it gets shorter, so
+        // the reader's place jumps by the whole height of what left.
+        guard let index = nearestSurvivor(above: anchor.key, in: previousKeys) else { return }
+        let rect = tableView.rect(ofRow: index)
+        // **The offset is clamped to the survivor's own height.** It was measured *inside* the row
+        // that is gone, and a reader parked deep in a long message carries a large one; onto a short
+        // predecessor it would scroll past that row entirely and land the reader in rows they were
+        // never looking at. Clamped, the furthest it can go is the survivor's bottom edge — which is
+        // exactly where the retracted content began.
+        scrollTo(y: rect.minY - max(anchor.offset, -rect.height))
     }
 
     /// The row this publish kept that stood nearest above the anchor in the order before it — the
