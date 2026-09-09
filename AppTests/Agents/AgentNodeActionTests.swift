@@ -75,6 +75,8 @@ final class AgentNodeActionTests: XCTestCase {
         XCTAssertEqual(sent.count, 1, "one press sent \(sent.count) control request(s)")
         XCTAssertTrue(sent.first == AnyControlRequest(BackgroundTasks(toolUseID: Rig.toolUseID)),
                       "Move to Background sent a request that is not background_tasks naming this run's tool use")
+        let onTheNodesChannel = await rig.lifecycle.channels.allSatisfy { $0 == rig.key }
+        XCTAssertTrue(onTheNodesChannel, "the request went out on a channel other than the node's")
     }
 
     /// The offer follows the mirror and nothing else: a run the mirror never saw is not offered the
@@ -190,6 +192,11 @@ final class AgentNodeActionTests: XCTestCase {
         if case .stopEverything = actions.first { } else { XCTFail("the affirmative performed something else") }
         let sent = await rig.lifecycle.sent.count
         XCTAssertEqual(sent, 0, "Stop everything took X5's send route \(sent) time(s) instead of perform")
+        // G3's "on the node's channel", which the action route needs as much as the send route does:
+        // ending every task in **another** session is the same button with the same recording and a
+        // different victim.
+        let onTheTreesChannel = await rig.lifecycle.channels.allSatisfy { $0 == rig.key }
+        XCTAssertTrue(onTheTreesChannel, "the action was performed on a channel other than the tree's")
     }
 
     /// The same shape for *Background all* — and its copy must not imply that anything stops, which
@@ -209,6 +216,8 @@ final class AgentNodeActionTests: XCTestCase {
         let actions = await rig.lifecycle.actions
         XCTAssertEqual(actions.count, 1, "the affirmative performed \(actions.count) action(s)")
         if case .backgroundAll = actions.first { } else { XCTFail("the affirmative performed something else") }
+        let onTheTreesChannel = await rig.lifecycle.channels.allSatisfy { $0 == rig.key }
+        XCTAssertTrue(onTheTreesChannel, "the action was performed on a channel other than the tree's")
         let message = AgentTreeConfirm.backgroundAll.message
         XCTAssertTrue(message == ComposerConfirmation.backgroundAll.message,
                       "the panel writes its own Background all copy instead of reusing C6.2's")
