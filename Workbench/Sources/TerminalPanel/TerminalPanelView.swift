@@ -16,7 +16,11 @@ struct TerminalPanelView: View {
             PaneBar(session: session)
             Divider()
             if let pane = session.selectedPane {
+                // Identified by the pane itself. Without it a selection change reuses the previous
+                // pane's subtree — and its host's `@State` claim, which belongs to a stack the pane
+                // now on screen knows nothing about (spec Design §8).
                 PaneView(session: session, pane: pane)
+                    .id(ObjectIdentifier(pane))
             } else {
                 noPanes
             }
