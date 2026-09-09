@@ -35,6 +35,9 @@ struct DecisionCardView: View {
     /// Where the refusal dialog's *Edit the prompt* puts the prompt back (contract Y6's fourth
     /// site). A host with no composer passes none, and the answer still goes out.
     let composer: (any ComposerSite)?
+    /// The channel's agent-run tree, for item 52's label on a card raised inside a subagent. A host
+    /// that holds no tree passes none.
+    let agents: AgentRunTree?
     /// An override of the `system/model_consent_fallback` frame the card already carries, for a host
     /// that holds one the fold has not attached.
     ///
@@ -53,6 +56,7 @@ struct DecisionCardView: View {
          answering: DecisionAnswering,
          retraction: RetractionRegistry? = nil,
          composer: (any ComposerSite)? = nil,
+         agents: AgentRunTree? = nil,
          consentFallback: ModelConsentFallback? = nil) {
         self.card = card
         self.presentation = presentation
@@ -62,6 +66,7 @@ struct DecisionCardView: View {
         self.answering = answering
         self.retraction = retraction
         self.composer = composer
+        self.agents = agents
         self.consentFallback = consentFallback
     }
 
@@ -88,7 +93,8 @@ struct DecisionCardView: View {
                                presentation: presentation,
                                channel: channel,
                                isActive: isActive,
-                               answering: answering)
+                               answering: answering,
+                               agents: agents)
         case .question(let tool):
             QuestionCardView(card: card, tool: tool, presentation: presentation,
                              channel: channel, answering: answering)

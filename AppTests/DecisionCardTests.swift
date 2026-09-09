@@ -77,11 +77,19 @@ final class DecisionCardTests: XCTestCase {
             .appending(path: "afleet-c6-3-cards-unwritten"))
     }
 
-    private func card(_ fixture: String, id: String, overrides: [String: Any] = [:]) throws -> DecisionCard {
+    private static var stream: LogicalStream {
+        LogicalStream(configHome: channel.configHome, sessionID: channel.session, name: .main)
+    }
+
+    /// The item C3's reducer would have opened for a recorded ask, re-keyed to an invented id.
+    private func item(_ fixture: String, id: String, overrides: [String: Any] = [:]) throws -> DecisionItem {
         let request = try FixtureRunner.request(fixture, subtype: "can_use_tool", id: id, overrides: overrides)
-        let item = try XCTUnwrap(DecisionItem(surfacing: request, in: Self.channel),
-                                 "the surfacing initialiser opened no item for a recorded ask")
-        return DecisionCard(item)
+        return try XCTUnwrap(DecisionItem(surfacing: request, in: Self.channel),
+                             "the surfacing initialiser opened no item for a recorded ask")
+    }
+
+    private func card(_ fixture: String, id: String, overrides: [String: Any] = [:]) throws -> DecisionCard {
+        DecisionCard(try item(fixture, id: id, overrides: overrides))
     }
 
     private func tool(of card: DecisionCard) throws -> CanUseToolRequest {
@@ -120,6 +128,65 @@ final class DecisionCardTests: XCTestCase {
     private func press(_ label: String, in body: Any) throws {
         let button = try XCTUnwrap(ViewTree.button(label, in: body), "the card offered no \(label) button")
         XCTAssertTrue(ViewTree.press(button), "the \(label) button carried no action")
+    }
+
+    // MARK: - Item 52's label
+
+    /// Item 52: "the permission card is labelled `Explore` with the run's description".
+    ///
+    /// The run tree reaches every row through `TimelineRenderContext.neighbourhood.agents`, and the
+    /// Agents tab already formats this sentence for the same ask on the same run — so the two
+    /// surfaces share one formatter and the main timeline's card stops saying only that the ask came
+    /// from somewhere.
+    ///
+    /// Over `nested-depth-2`'s own tree, folded by C3, with a recorded `can_use_tool` re-keyed onto
+    /// one of that recording's agent ids. Both directions: the generic sentence must be gone where a
+    /// node exists, and must be exactly what is drawn where none does — a card labelled from a tree
+    /// that does not hold the run would name the wrong work.
+    func testASubagentPermissionCardIsLabelledFromTheRunTree() async throws {
+        var reducer = WireReducer(stream: Self.stream, slug: "invented-slug")
+        for event in try FixtureRunner.events("nested-depth-2") { _ = reducer.apply(event) }
+        let tree = reducer.agents
+        let run = try XCTUnwrap(tree.nodes.values.first { $0.agentType?.isEmpty == false && !$0.description.isEmpty },
+                                "the recording's tree holds \(tree.nodes.count) node(s) and none names both a type and an errand")
+
+        let labelled = try item("permission-allow", id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa5",
+                                overrides: ["agent_id": run.id])
+        let expected = AgentNodeDecisions.label(agentType: run.agentType, description: run.description)
+        let drawn = try Self.rowCardTexts(labelled, tree: tree)
+        XCTAssertTrue(drawn.contains(expected),
+                      "the row's card is not labelled from the \(tree.nodes.count)-node run tree")
+        XCTAssertFalse(drawn.contains(PermissionCardView.unattributedSubagentLabel),
+                       "the card labelled from a known run still says only that the ask came from a subagent")
+
+        // An id the tree does not hold: the standing sentence, and nothing invented.
+        let unknown = try item("permission-allow", id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa6",
+                               overrides: ["agent_id": "invented-run-nobody-started"])
+        let unknownDrawn = try Self.rowCardTexts(unknown, tree: tree)
+        XCTAssertTrue(unknownDrawn.contains(PermissionCardView.unattributedSubagentLabel),
+                      "a card for a run the tree does not hold does not fall back to the standing sentence")
+        XCTAssertFalse(unknownDrawn.contains(expected),
+                       "a card for a run the tree does not hold borrowed another run's name")
+    }
+
+    /// What the timeline's own decision row draws for a card, with the channel's run tree in the
+    /// neighbourhood the row reads. The descent is spelled out because reflection does not evaluate
+    /// a stored view's `body`.
+    @MainActor
+    private static func rowCardTexts(_ item: DecisionItem, tree: AgentRunTree) throws -> [String] {
+        let lifecycle = LifecycleDouble()
+        let answering = DecisionAnswering(lifecycle: lifecycle)
+        let context = InventedItems.context(neighbourhood: TimelineNeighbourhood(agents: tree),
+                                            lifecycle: lifecycle,
+                                            key: channel)
+        let row = DecisionRowContent(row: TimelineRow(.decision(item)),
+                                     context: context,
+                                     answering: answering)
+        let hosted = try XCTUnwrap(ViewTree.values(of: DecisionCardView.self, in: row.body).first,
+                                   "the decision row hosted no card component")
+        let permission = try XCTUnwrap(CardTree.permissionBody(in: hosted.body),
+                                       "the hosted card drew no permission card")
+        return CardTree.texts(in: permission)
     }
 
     // MARK: - The answers the card emits

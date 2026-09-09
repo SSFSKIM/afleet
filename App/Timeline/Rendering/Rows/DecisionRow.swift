@@ -84,7 +84,8 @@ struct DecisionRowContent: View {
                              isStale: context.isOverlayStale,
                              answering: answering,
                              retraction: context.retraction,
-                             composer: context.composer)
+                             composer: context.composer,
+                             agents: context.neighbourhood.agents)
             if let link = Self.linkedPath(of: card) {
                 FileLinkLabel(path: link.path, line: link.line, context: context)
             }
