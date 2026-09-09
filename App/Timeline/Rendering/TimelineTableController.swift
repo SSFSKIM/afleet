@@ -546,13 +546,24 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
     /// The only invalidation this table had accompanied a reload it issued itself, so a disclosure
     /// opening, a card mounting asynchronously and anything else that changes a row's size without a
     /// publish behind it was drawn into the height the row had before.
+    ///
+    /// **The growth moves the document, so it settles the scroll exactly as a publish does.** A row
+    /// that grows adds its whole difference to the table's height with no publish behind it: a
+    /// viewport pinned to the bottom keeps its old offset and is no longer at the bottom — and once
+    /// it is not, every later publish holds it where the growth left it instead of following the
+    /// stream. The anchor is taken before the height moves and settled after it, the two calls
+    /// `apply` makes around its own commit, so an unpinned reader keeps the row they were on too.
     func hostedRow(_ key: String, measured height: CGFloat) {
         let height = max(Self.emptyRowHeight, ceil(height))
         guard abs((heights[key] ?? -1) - height) > 1 else { return }
+        let anchor = anchorAtViewportTop()
         heights[key] = height
         hostedHeightNotes += 1
         guard let index = rows.firstIndex(where: { $0.key == key }) else { return }
         tableView.noteHeightOfRows(withIndexesChanged: IndexSet(integer: index))
+        // Nothing was appended: growth is not arrival, and a row growing out of sight is not an
+        // unseen message.
+        settleScroll(anchor: anchor, appended: 0)
     }
 
     /// The viewport's width changed: the table follows it, and the heights follow the table.

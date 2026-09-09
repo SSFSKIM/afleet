@@ -388,6 +388,62 @@ final class TimelineListTests: XCTestCase {
                        "the table was told of \(controller.hostedHeightNotes) height change(s) by its hosted rows")
     }
 
+    // MARK: - The scroll after a hosted row grew (review scalpel-1#1)
+
+    /// A card that grows after it is mounted leaves a pinned reader at the bottom.
+    ///
+    /// The document grows with no publish behind it, so nothing takes the anchor and nothing settles
+    /// the scroll: a viewport pinned to the bottom keeps its old offset, is no longer at the bottom,
+    /// and every later publish then holds it where the growth left it. Growth away from the bottom
+    /// is the same fault seen from the other side — the row the reader is on is shoved down by the
+    /// whole height of what grew above it.
+    func testHostedGrowthKeepsAPinnedViewportAtTheBottom() throws {
+        let controller = TimelineTableController()
+        try FrameTimeHarness.hosted(controller.scrollView, size: Self.viewport) { window in
+            Self.commit(Self.rows(60), to: controller, in: window)
+            XCTAssertGreaterThan(controller.tableView.bounds.height, Self.viewport.height,
+                                 "the table is no taller than its viewport, so nothing here could scroll")
+            XCTAssertTrue(controller.isAtBottom, "a first render did not land at the bottom")
+
+            // The last row's card finishes mounting and is 400 points tall.
+            let last = controller.rows.count - 1
+            let host = try XCTUnwrap(controller.tableView(controller.tableView, viewFor: nil, row: last) as? TimelineRowHostView,
+                                     "the table mounted a row that cannot report its own height")
+            host.update(root: AnyView(Color.clear.frame(width: 200, height: 400)), context: nil)
+            window.layoutIfNeeded()
+
+            XCTAssertTrue(controller.isAtBottom,
+                          "a row that grew by 400 point(s) left a pinned viewport \(Int(controller.tableView.bounds.height - controller.scrollView.contentView.documentVisibleRect.maxY)) point(s) short of the bottom")
+        }
+    }
+
+    /// The same growth, away from the bottom: the reader's row does not move.
+    func testHostedGrowthAboveTheViewportHoldsTheAnchoredRow() throws {
+        let controller = TimelineTableController()
+        try FrameTimeHarness.hosted(controller.scrollView, size: Self.viewport) { window in
+            Self.commit(Self.rows(60), to: controller, in: window)
+            Self.scroll(controller, to: controller.tableView.bounds.height / 2)
+            XCTAssertFalse(controller.scroll.isPinnedToBottom,
+                           "the viewport still reports itself pinned after scrolling into the middle")
+
+            let anchor = try XCTUnwrap(Self.topRowKey(of: controller),
+                                       "no row was found at the viewport's top edge, so there is no anchor to hold")
+            let before = try XCTUnwrap(Self.offset(ofRowKeyed: anchor, in: controller),
+                                       "the anchored row has no rectangle before the growth")
+
+            // The first row's card mounts, 400 points tall, far above where the reader is sitting.
+            let host = try XCTUnwrap(controller.tableView(controller.tableView, viewFor: nil, row: 0) as? TimelineRowHostView,
+                                     "the table mounted a row that cannot report its own height")
+            host.update(root: AnyView(Color.clear.frame(width: 200, height: 400)), context: nil)
+            window.layoutIfNeeded()
+
+            let after = try XCTUnwrap(Self.offset(ofRowKeyed: anchor, in: controller),
+                                      "the anchored row is not in the table after the growth")
+            XCTAssertEqual(after, before, accuracy: 2,
+                           "the anchored row moved \(Int(abs(after - before))) point(s) when a row above it grew")
+        }
+    }
+
     // MARK: - The mounted row across reloads (review sweep#4, scalpel-1#3)
 
     /// A reload updates the row that is already mounted rather than building a second one.
