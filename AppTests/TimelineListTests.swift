@@ -388,6 +388,36 @@ final class TimelineListTests: XCTestCase {
                        "the table was told of \(controller.hostedHeightNotes) height change(s) by its hosted rows")
     }
 
+    // MARK: - Reaching a row by index (review scalpel-2#2)
+
+    /// The indexed accessors answer exactly what the list of rows answers, with and without a
+    /// preview, at both ends and in the middle.
+    ///
+    /// The list is the whole history concatenated afresh on every access, and the table asks for a
+    /// row per visible row per layout — `heightOfRow` asked for it before it even consulted its
+    /// height cache. So the arithmetic replaces it on the hot paths, and this is what says the two
+    /// agree: an off-by-one at the preview's index would draw the last message into the preview's
+    /// row, and a preview the index cannot find would lose the reader's anchor on every delta.
+    func testIndexedRowAccessAgreesWithTheList() {
+        let controller = TimelineTableController()
+        for preview in [nil, Self.preview("a streaming line")] as [StreamingPreview?] {
+            controller.apply(TimelineRenderInput(rows: Self.rows(5), preview: preview))
+            let list = controller.rows
+            XCTAssertEqual(controller.rowCount, list.count,
+                           "the table counts \(controller.rowCount) row(s) against a list of \(list.count)")
+            for index in list.indices {
+                XCTAssertEqual(controller.row(at: index)?.key, list[index].key,
+                               "row \(index) of \(list.count) is a different row read by index")
+                XCTAssertEqual(controller.index(ofKey: list[index].key), index,
+                               "the key at row \(index) of \(list.count) is found at another index")
+            }
+            XCTAssertNil(controller.row(at: -1), "the table answered a row for index -1")
+            XCTAssertNil(controller.row(at: list.count), "the table answered a row one past its last")
+            XCTAssertNil(controller.index(ofKey: "item-nothing-here"),
+                         "the table found an index for a key it does not hold")
+        }
+    }
+
     // MARK: - The scroll after a hosted row grew (review scalpel-1#1)
 
     /// A card that grows after it is mounted leaves a pinned reader at the bottom.
