@@ -196,8 +196,28 @@ final class AgentTreeGateTests: XCTestCase {
                       "the disagreeing source's own answer was not kept as it gave it")
         var timeline = rig.model.timeline
         timeline.agents = tree
-        XCTAssertEqual(AgentTreeView.visibleRows(read: AgentRunRead(timeline: timeline), collapsed: [root]).count, 1,
+        let contested = AgentRunRead(timeline: timeline)
+        XCTAssertEqual(AgentTreeView.visibleRows(read: contested, collapsed: [root]).count, 1,
                        "the nested run left the branch it was drawn under")
+
+        // **And the disagreement is drawn** (child spec D1): a node whose sources disagree does not
+        // render identically to one nothing contested. Asserted in the read and on the row, because
+        // a fact recorded in the model and drawn nowhere leaves the user looking at a parent two
+        // sources named differently with no sign that either did.
+        let content = try XCTUnwrap(contested.content(of: child), "the contested run left the read")
+        XCTAssertTrue(content.parentDisputed, "the node whose two sources disagree does not carry the disagreement")
+        let drawn = ViewTree.values(of: String.self,
+                                    in: AgentNodeRow(content: content, isSelected: false, disclosure: .leaf,
+                                                     toggle: {}, select: {}).body)
+        XCTAssertEqual(drawn.filter { $0 == AgentNodeRow.disputedParent }.count, 1,
+                       "the contested run draws the disagreement \(drawn.filter { $0 == AgentNodeRow.disputedParent }.count) "
+                       + "time(s), not once")
+        // And an uncontested run draws nothing of the sort, so the clause above is about the
+        // disagreement rather than about a sentence every row carries.
+        let uncontested = try XCTUnwrap(contested.content(of: root), "the root left the read")
+        XCTAssertFalse(uncontested.parentDisputed, "a run no source contested carries a disagreement")
+        XCTAssertTrue(AgentNodeRow.parentNotice(uncontested) == nil,
+                      "a run no source contested draws a disagreement")
     }
 
     /// A second `task_started` for an id the tree already holds is **one** node that ran twice —

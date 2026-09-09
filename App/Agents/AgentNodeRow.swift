@@ -52,6 +52,13 @@ struct AgentNodeRow: View {
                     if content.waitingCount > 0 {
                         Text("\(content.waitingCount) waiting")
                     }
+                    // The run is drawn under the parent the tree holds — first-source-wins is C3's
+                    // and a surface does not overturn it — and the disagreement is drawn beside it
+                    // rather than hidden (child spec D1). It names neither parent: the run is where
+                    // the user is looking and the sentence is a report (§11).
+                    if let disputed = Self.parentNotice(content) {
+                        Text(disputed).foregroundStyle(.secondary)
+                    }
                     ElapsedTicker(origin: content.elapsedOrigin, endedAt: content.endedAt)
                         .foregroundStyle(.secondary)
                 }
@@ -94,6 +101,15 @@ struct AgentNodeRow: View {
         if let type = content.agentType, !type.isEmpty { return type }
         return content.description
     }
+
+    /// What a node says when its parent sources disagreed, or nil when they did not (child spec
+    /// D1). Static and pure, so the disagreement a node draws is assertable without a render pass.
+    static func parentNotice(_ content: AgentNodeContent) -> String? {
+        content.parentDisputed ? disputedParent : nil
+    }
+
+    /// The sentence itself. One string, so this row and a test name the same one.
+    static let disputedParent = "Parent disputed"
 
     /// Parked before completed, and a word for each of C3's four statuses. Static and pure, so the
     /// sentence a node draws is assertable without a render pass.

@@ -51,7 +51,21 @@ struct AgentNodeContent: Hashable, Sendable, Identifiable {
     /// which is what makes the action absent rather than refused.
     let backgroundToolUseID: String?
 
-    init(node: AgentRunNode, entry: RegistryEntry?, isParked: Bool, waitingCount: Int) {
+    /// Two of C3's parent sources named **different** parents for this run (child spec D1).
+    ///
+    /// `link` is first-source-wins and D1 rules that a surface does not overturn it: the node keeps
+    /// the parent the tree holds. What the ruling also says is that the disagreement is *visible*
+    /// rather than hidden — a node whose sources disagree must not draw identically to one nothing
+    /// contested, or a fold that silently took the later answer and a fold that silently dropped it
+    /// look the same on screen.
+    ///
+    /// **A boolean and not the tree's `conflicts` sentence** (§11): that sentence names two task ids
+    /// and a source, and this value reaches a drawn row. The run is already drawn, so what is added
+    /// here is the fact and nothing else.
+    let parentDisputed: Bool
+
+    init(node: AgentRunNode, entry: RegistryEntry?, isParked: Bool, waitingCount: Int,
+         parentDisputed: Bool = false) {
         self.id = node.id
         self.agentType = node.agentType.map(TextSanitiser.sanitise)
         self.description = TextSanitiser.sanitise(node.description)
@@ -67,5 +81,6 @@ struct AgentNodeContent: Hashable, Sendable, Identifiable {
         self.isParked = isParked
         self.waitingCount = waitingCount
         self.backgroundToolUseID = TaskCardModel.isEligible(entry) ? entry?.toolUseID : nil
+        self.parentDisputed = parentDisputed
     }
 }

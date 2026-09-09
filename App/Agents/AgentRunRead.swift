@@ -66,10 +66,15 @@ struct AgentRunRead: Hashable, Sendable {
         // around it never saw.
         let mirror = timeline.registry
         for (id, node) in tree.nodes {
+            // Whether this run's sources disagreed about its parent, read off the answers each
+            // source gave rather than off `conflicts` — that value is a list of sentences naming two
+            // task ids apiece (§11), and what the node needs is the fact.
+            let answers = tree.parentAnswers[id] ?? [:]
             contents[id] = AgentNodeContent(node: node,
                                             entry: mirror.entries[id],
                                             isParked: tree.isParked(id),
-                                            waitingCount: waiting[id] ?? 0)
+                                            waitingCount: waiting[id] ?? 0,
+                                            parentDisputed: Set(answers.values).count > 1)
             childIDs[id] = tree.children(of: id)
             parentIDs[id] = node.parent
         }
