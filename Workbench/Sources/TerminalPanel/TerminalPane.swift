@@ -146,7 +146,11 @@ public final class TerminalPane {
     public func continueStopped() async {
         guard case .stopped = state, let pty else { return }
         let group = (try? await pty.foregroundProcessGroup()) ?? pty.processIdentifier
-        guard group > 1 else { return }
+        // Re-checked after the suspension, because the pane can end inside it: the read loop sets
+        // `.exited`, or a close clears the pty. Resuming from there would signal a group this pane
+        // no longer owns — and whose number the kernel is free to have given away — and write
+        // `.running` over a termination that was already observed.
+        guard case .stopped = state, self.pty === pty, group > 1 else { return }
         _ = Darwin.kill(-group, SIGCONT)
         state = .running(pty.processIdentifier)
     }

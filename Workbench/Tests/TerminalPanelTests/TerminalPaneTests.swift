@@ -204,4 +204,50 @@ final class TerminalPaneTests: XCTestCase {
         }
         await pane.close()
     }
+
+    /// `continueStopped()` crosses to the pty actor to ask which group holds the terminal, and the
+    /// pane can end inside that one suspension: the read loop sets `.exited`, or a close clears the
+    /// pty out from under it. Resuming from there signals a group the pane no longer owns and
+    /// writes `.running` over a termination that was already observed — the pane would report
+    /// itself alive after its child had gone.
+    ///
+    /// The close is started while the ask is in flight, which is the interleaving in question. If
+    /// the scheduler resolves the ask first the case simply passes; it can never fail for a pane
+    /// that revalidates.
+    func testContinueDoesNotResumeAPaneClosedWhileItAskedForTheForegroundGroup() async throws {
+        let directory = try PaneTestChild.temporaryDirectory()
+        defer { PaneTestChild.remove(directory) }
+        let pane = try await attachedPane()
+        // The child stops itself; nothing outside the pane signals a process (§7.8, X9).
+        let script = PaneTestChild.selfTerminating(after: 30, """
+        printf 'afleet-before-stop\\n'
+        kill -STOP $$
+        printf 'afleet-after-continue\\n'
+        IFS= read -r hold
+        """)
+        pane.start(request(
+            executable: URL(filePath: "/bin/sh"),
+            arguments: ["-c", script],
+            cwd: directory,
+            environment: ["PATH": "/usr/bin:/bin"]
+        ))
+        guard case let .running(pid) = pane.state, let child = PaneTestChild.identity(ofChild: pid) else {
+            XCTFail("state=\(pane.state) expected=running")
+            return
+        }
+        try await PaneTestChild.waitUntil(seconds: 15, "stopped") {
+            pane.state == .stopped(signal: SIGSTOP)
+        }
+
+        let resuming = Task { await pane.continueStopped() }
+        let closing = Task { await pane.close() }
+        await resuming.value
+        await closing.value
+
+        if case .running = pane.state {
+            XCTFail("state=\(pane.state) after-close")
+        }
+        XCTAssertFalse(pane.hasLiveChild, "the pane reports a live child after its close returned")
+        XCTAssertFalse(PaneTestChild.isRunning(child), "child=still-running-after-close")
+    }
 }
