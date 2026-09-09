@@ -152,11 +152,17 @@ public actor StreamIngestion {
     public var overlay: Overlay { wire?.overlay ?? .empty }
     public var preview: StreamingPreview? { wire?.preview }
     /// The channel's agent-run tree, the Agents tab's model and the source of the timeline's agent rows. Nil before
-    /// `open` builds the reducer, and nil for good on a file-only channel: no wire means no fold, so no tree.
+    /// `open` builds the reducer, and non-nil after it for **every** channel kind: a channel with no wire is fed from
+    /// the `.meta.json` sidecars beside its transcript (`loadMetadata`), so a foreign or archived session opened from
+    /// its files has the same tree the same corpus produces live.
     public var agents: AgentRunTree? { wire?.agents }
+    /// The channel's background-task registry mirror, folded from the tap's task frames. Empty before `open` builds
+    /// the reducer and empty for good on a channel with no wire — the fold is the only thing that fills it.
+    public var registry: RegistryMirror { wire?.registry ?? RegistryMirror() }
     /// One consistent read of both halves, for the app that renders them together.
     public var timeline: ChannelTimeline {
-        ChannelTimeline(durable: projectionCache, overlay: overlay, preview: preview, agents: agents)
+        ChannelTimeline(durable: projectionCache, overlay: overlay, preview: preview, agents: agents,
+                        registry: registry)
     }
     public var state: State { stateValue }
     public var offsets: [LogicalStream: Int] { streams.mapValues(\.offset) }
@@ -356,7 +362,10 @@ public actor StreamIngestion {
                 streams[stream] = st
                 try readWhole(into: stream)
             case .agentMetadata:
-                loadMetadata(at: url, into: stream)
+                // The tree changes the sidecars produce ride the first effect after the alignment, with the rest of
+                // the live half the open window collected: publishing here would diff a projection the read has not
+                // finished building (see `bufferedLiveChanges`).
+                bufferedLiveChanges += loadMetadata(at: url, into: stream)
             case .mainTranscript:
                 continue
             }
@@ -367,14 +376,25 @@ public actor StreamIngestion {
     /// `"type": "agent_metadata"` added — so the key is supplied here and the two decode to one record. The stream's
     /// transcript path is the sidecar's with the suffix swapped, so a sidecar that arrives first still names where the
     /// transcript will be.
-    private func loadMetadata(at url: URL, into stream: LogicalStream) {
+    ///
+    /// **It reaches both halves.** The record is the stream's metadata, which is what the record reducer builds its
+    /// `taskRun` row and its thread attachment from; and it is §8.8's *second* parent source, so the same file is read
+    /// into the channel's agent-run tree through `AgentRunTree.apply(metaFile:)` — the tree's own reader, opened
+    /// `O_RDONLY | O_NOFOLLOW`, so the source it records is `.metaFile` and not the mirror's `.agentMetadata`. This is
+    /// the only thing that gives a channel with no wire a tree at all: nothing else on a file-only open names an agent
+    /// run. A sidecar that is not one, or that cannot be read, moves neither half and reports nothing.
+    @discardableResult
+    private func loadMetadata(at url: URL, into stream: LogicalStream) -> [TimelineChange] {
         guard let data = try? Data(contentsOf: url),
-              var object = (try? JSONDecoder().decode(JSONValue.self, from: data))?.objectValue else { return }
+              var object = (try? JSONDecoder().decode(JSONValue.self, from: data))?.objectValue else { return [] }
         if object["type"] == nil { object["type"] = .string("agent_metadata") }
-        guard case .agentMetadata(let record, _) = RecordDecoder.decode(entry: .object(object)) else { return }
+        guard case .agentMetadata(let record, _) = RecordDecoder.decode(entry: .object(object)) else { return [] }
         let transcript = url.deletingLastPathComponent()
             .appendingPathComponent(url.lastPathComponent.replacingOccurrences(of: ".meta.json", with: ".jsonl"))
         streams[stream, default: StreamState(path: transcript)].metadata = record
+        let before = Set(overlay.items.map(\.id))
+        guard let changes = try? wire?.apply(metaFile: url, at: Date()) else { return [] }
+        return liveChanges(changes, before: before)
     }
 
     // MARK: - The alignment
@@ -574,7 +594,17 @@ public actor StreamIngestion {
         var st = streams[stream] ?? StreamState(path: URL(fileURLWithPath: frame.filePath))
         for (index, value) in frame.entries.enumerated() {
             let record = RecordDecoder.decode(entry: value)
-            if case .agentMetadata(let metadata, _) = record { st.metadata = metadata; continue }
+            if case .agentMetadata(let metadata, _) = record {
+                // Both halves, as on the file side: the stream's metadata for the record reducer, and §8.8's *first*
+                // parent source for the tree — the entry the engine mirrors at the head of the agent stream, which
+                // carries `parentAgentId` before the sidecar file exists on disk (§7.3).
+                st.metadata = metadata
+                let before = Set(overlay.items.map(\.id))
+                if let changes = wire?.apply(agentMetadata: metadata, for: stream, at: now) {
+                    effect.changes += liveChanges(changes, before: before)
+                }
+                continue
+            }
             if claimed.contains(index) { effect.duplicates += 1; continue }
             if let uuid = record.uuid {
                 let key = RecordKey(stream: stream, identity: .uuid(uuid))
@@ -639,7 +669,7 @@ public actor StreamIngestion {
         var effect = Effect()
         guard let (stream, kind) = resolve(path.path) else { return publish(effect) }
         if case .agentMetadata = kind {
-            loadMetadata(at: path, into: stream)
+            effect.changes = loadMetadata(at: path, into: stream)
             return publish(effect)
         }
         var st = streams[stream] ?? StreamState(path: path)
@@ -1029,7 +1059,10 @@ public actor StreamIngestion {
         pendingStateChange = nil
         let previous = projectionCache
         projectionCache = recompute()
-        effect.changes = Self.changes(from: previous, to: projectionCache) + overlayChanges
+        // `effect.changes` is not cleared: a caller that already folded the live half — the mirror's `agent_metadata`
+        // entries, a sidecar the watcher reported — has reported what moved there, and the durable diff below cannot
+        // see it.
+        effect.changes = Self.changes(from: previous, to: projectionCache) + effect.changes + overlayChanges
         sink.yield(effect)
         return effect
     }

@@ -86,6 +86,27 @@ public struct WireReducer: Sendable {
         return before.difference(to: Snapshot(self))
     }
 
+    /// One `agent_metadata` record into the channel's agent-run tree — parent §8.8's first source, which arrives on
+    /// the wire as a `transcript_mirror` entry and never as a frame this reducer routes. `StreamIngestion` owns the
+    /// mirror and calls this; the change list is derived by the same before/after comparison every other apply uses,
+    /// so a record that moved nothing reports nothing.
+    public mutating func apply(agentMetadata m: AgentMetadataRecord, for stream: LogicalStream,
+                               at now: Date = Date()) -> [TimelineChange] {
+        let before = Snapshot(self)
+        agents.apply(agentMetadata: m, for: stream, at: now)
+        rebuild()
+        return before.difference(to: Snapshot(self))
+    }
+
+    /// The `.meta.json` sidecar on disk — §8.8's second source. Throws only `AgentRunTreeError.notAnAgentSidecar` and
+    /// whatever reading the file threw; the tree is untouched when it does.
+    public mutating func apply(metaFile url: URL, at now: Date = Date()) throws -> [TimelineChange] {
+        let before = Snapshot(self)
+        try agents.apply(metaFile: url, at: now)
+        rebuild()
+        return before.difference(to: Snapshot(self))
+    }
+
     public mutating func apply(_ signal: HostSignal, at now: Date = Date()) -> [TimelineChange] {
         let before = Snapshot(self)
         switch signal {

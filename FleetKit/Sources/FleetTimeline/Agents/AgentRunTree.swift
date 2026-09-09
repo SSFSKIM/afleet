@@ -89,6 +89,11 @@ public struct AgentRunTree: Hashable, Sendable {
         if nodes[f.taskID] == nil {
             nodes[f.taskID] = AgentRunNode(id: f.taskID, elapsedOrigin: now)
             order.append(f.taskID)
+        } else if nodes[f.taskID]!.startedCount == 0 {
+            // A metadata source created this node and stamped it with its own arrival. The run's first `task_started`
+            // is when the run actually began, so it takes the origin back; a *repeat* start does not, because the
+            // elapsed reading a re-armed run shows is the one `startedCount` already documents.
+            nodes[f.taskID]!.elapsedOrigin = now
         }
         nodes[f.taskID]!.description = f.description
         if let type = f.subagentType { nodes[f.taskID]!.agentType = type }
@@ -139,23 +144,26 @@ public struct AgentRunTree: Hashable, Sendable {
     // MARK: - Parent source one: the `agent_metadata` mirror entry
 
     /// The mirror carries the sidecar's body before the sidecar file exists on disk. The stream names the task.
-    public mutating func apply(agentMetadata m: AgentMetadataRecord, for stream: LogicalStream) {
+    ///
+    /// `now` is the instant this source spoke, and it is the created node's `elapsedOrigin` when this source is the
+    /// first to name the run at all (see `absorb`).
+    public mutating func apply(agentMetadata m: AgentMetadataRecord, for stream: LogicalStream, at now: Date = Date()) {
         guard case .agent(let taskID) = stream.name else { return }
-        absorb(m.fields, taskID: taskID, source: .agentMetadata)
+        absorb(m.fields, taskID: taskID, source: .agentMetadata, at: now)
     }
 
     // MARK: - Parent source two: the `.meta.json` sidecar on disk
 
     /// Reads `agent-<taskId>.meta.json`. The task id comes from the file name, so the sidecar is readable wherever it
     /// lies; the bytes are read `O_RDONLY | O_NOFOLLOW` through the transcript reader, and nothing is written.
-    public mutating func apply(metaFile url: URL) throws {
+    public mutating func apply(metaFile url: URL, at now: Date = Date()) throws {
         let name = url.lastPathComponent
         guard name.hasPrefix("agent-"), name.hasSuffix(".meta.json") else { throw AgentRunTreeError.notAnAgentSidecar }
         let taskID = String(name.dropFirst("agent-".count).dropLast(".meta.json".count))
         guard !taskID.isEmpty else { throw AgentRunTreeError.notAnAgentSidecar }
         let data = try TranscriptReader(url: url).read(at: 0, length: .max)
         let fields = try JSONDecoder().decode(AgentMetadataFields.self, from: data)
-        absorb(fields, taskID: taskID, source: .metaFile)
+        absorb(fields, taskID: taskID, source: .metaFile, at: now)
     }
 
     // MARK: - Parent source three: the two-step join
@@ -209,8 +217,24 @@ public struct AgentRunTree: Hashable, Sendable {
 
     // MARK: - Internals
 
-    private mutating func absorb(_ m: AgentMetadataFields, taskID: String, source: AgentRunNode.ParentSource) {
-        guard nodes[taskID] != nil else { return }
+    /// **A metadata source creates the node when no `task_started` has.** Both sources name an agent stream — the
+    /// mirror entry by its stream, the sidecar by its `agent-<taskId>.meta.json` name — and an agent stream *is* a
+    /// `local_agent` run, so there is nothing else the record could be about. Without this the tree of a channel
+    /// opened from its files alone is permanently empty: no wire means no `task_started`, and every node the sidecars
+    /// describe would be dropped by a guard that exists only because `task_started` used to be the sole creator.
+    ///
+    /// A node created here reads `.running`, which is the same reading the record reducer's file-side `taskRun` row
+    /// takes for an agent stream whose spawning call it cannot see: neither the sidecar nor the transcript records a
+    /// terminal status, and the two halves of one channel must not disagree about the same run.
+    ///
+    /// `elapsedOrigin` is this source's instant, and `apply(taskStarted:)` replaces it on the first `task_started`
+    /// the node ever sees: the metadata's arrival is when the *host learned of* the run, not when the run began.
+    private mutating func absorb(_ m: AgentMetadataFields, taskID: String, source: AgentRunNode.ParentSource,
+                                 at now: Date) {
+        if nodes[taskID] == nil {
+            nodes[taskID] = AgentRunNode(id: taskID, elapsedOrigin: now)
+            order.append(taskID)
+        }
         if nodes[taskID]!.agentType == nil { nodes[taskID]!.agentType = m.agentType }
         if nodes[taskID]!.description.isEmpty { nodes[taskID]!.description = m.description }
         // The sidecar can be the first to name the spawning block, and the block is the join's key, so learning it
