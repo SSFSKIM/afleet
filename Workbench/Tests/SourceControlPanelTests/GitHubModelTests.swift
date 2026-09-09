@@ -116,7 +116,7 @@ final class GitHubModelTests: XCTestCase {
     /// invocations rather than a sample, failing rather than passing when it saw none.
     private func assertOnlyGitReadVerbs(_ recorder: RecordingRunner, atLeast minimum: Int,
                                         file: StaticString = #filePath, line: UInt = #line) {
-        let verbs = recorder.invocations(of: .git).map { Self.gitVerb($0.arguments) }
+        let verbs = recorder.verbs(of: .git)
         XCTAssertGreaterThanOrEqual(
             verbs.count, minimum,
             "saw \(verbs.count) git invocations, expected at least \(minimum); "
@@ -127,30 +127,6 @@ final class GitHubModelTests: XCTestCase {
                           "a git vector began with none of \(Self.allowedGitVerbs)",
                           file: file, line: line)
         }
-    }
-
-    /// The verb of a `git` argument vector: the first argument that is neither an option nor the
-    /// **value** of one.
-    ///
-    /// `-c key=value` puts a bare word after an option, and reading "the first argument without a
-    /// dash" calls that word the verb — `git -c status.renameLimit=1000 status …` reads as a
-    /// `status.renameLimit=1000`, which is on no allowlist and is not a verb at all.
-    private static func gitVerb(_ arguments: [String]) -> String {
-        var index = arguments.startIndex
-        while index < arguments.endIndex {
-            let argument = arguments[index]
-            if argument == "-c" {
-                index = arguments.index(index, offsetBy: 2, limitedBy: arguments.endIndex)
-                        ?? arguments.endIndex
-                continue
-            }
-            if argument.hasPrefix("-") {
-                index = arguments.index(after: index)
-                continue
-            }
-            return argument
-        }
-        return ""
     }
 
     // MARK: - 1. the branch-scoped list
