@@ -388,6 +388,57 @@ final class TimelineListTests: XCTestCase {
                        "the table was told of \(controller.hostedHeightNotes) height change(s) by its hosted rows")
     }
 
+    // MARK: - The neighbourhood across a preview delta (review scalpel-2#3)
+
+    /// A publish that moved only the preview reuses the neighbourhood the items already had.
+    ///
+    /// Building one walks every item in the channel and fills two dictionaries from them, and the
+    /// merge that hands it those items sorts both halves of the timeline — while the list's body
+    /// evaluates on every streaming delta, thirty a second, and a delta changes no item at all. So
+    /// what a delta cost grew with the history behind it. The floor is the second half: items that
+    /// really did move rebuild it, or this would be a cache that never notices anything.
+    func testAPreviewOnlyPublishReusesTheNeighbourhood() {
+        let cache = TimelineNeighbourhoodCache()
+        var timeline = ChannelTimeline(durable: DurableProjection(items: Self.items(50)))
+        let first = cache.neighbourhood(for: timeline)
+        XCTAssertEqual(first.precedingTimestamps.count, 49,
+                       "the neighbourhood of 50 item(s) knows \(first.precedingTimestamps.count) preceding instant(s), not 49")
+
+        timeline.preview = Self.preview("a first sentence.")
+        _ = cache.neighbourhood(for: timeline)
+        timeline.preview = Self.preview("a first sentence. And a second one, arriving a character at a time.")
+        let third = cache.neighbourhood(for: timeline)
+
+        XCTAssertEqual(cache.builds, 1,
+                       "two preview delta(s) rebuilt the neighbourhood \(cache.builds) time(s), not once for the items")
+        XCTAssertEqual(third.precedingTimestamps.count, 49,
+                       "the reused neighbourhood knows \(third.precedingTimestamps.count) preceding instant(s), not the 49 it was built with")
+
+        timeline.durable.items = Self.items(51)
+        let fourth = cache.neighbourhood(for: timeline)
+        XCTAssertEqual(cache.builds, 2,
+                       "an item that arrived left the neighbourhood at \(cache.builds) build(s), so the items never reach it")
+        XCTAssertEqual(fourth.precedingTimestamps.count, 50,
+                       "the rebuilt neighbourhood knows \(fourth.precedingTimestamps.count) preceding instant(s), not 50")
+    }
+
+    /// The list reads the channel's neighbourhood rather than building its own.
+    ///
+    /// The cache above is only worth having if the construction site uses it, and the site is one
+    /// argument inside a context the column builds per body evaluation.
+    func testTheContextReadsTheChannelsNeighbourhood() async throws {
+        let app = AppModel(registry: RowRegistry())
+        let model = ChannelTimelineModel(key: ChannelKey(configHome: Self.stream.configHome,
+                                                         session: Self.stream.sessionID),
+                                         workspace: nil)
+        let view = TimelineListView(model: model)
+        _ = view.context(in: app)
+        _ = view.context(in: app)
+
+        XCTAssertEqual(model.neighbourhoods.builds, 1,
+                       "two context(s) built the channel's neighbourhood \(model.neighbourhoods.builds) time(s), not once")
+    }
+
     // MARK: - Reaching a row by index (review scalpel-2#2)
 
     /// The indexed accessors answer exactly what the list of rows answers, with and without a
@@ -591,6 +642,11 @@ final class TimelineListTests: XCTestCase {
 
     private static func rows(_ count: Int, from first: Int = 0) -> [TimelineRow] {
         (first..<(first + count)).map { row(index: $0) }
+    }
+
+    /// The same invented items, as the timeline holds them.
+    private static func items(_ count: Int) -> [TimelineItem] {
+        rows(count).map(\.item)
     }
 
     /// A paragraph long enough that its height is a function of the width it is measured at, and

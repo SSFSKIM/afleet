@@ -87,8 +87,12 @@ struct TimelineListView: View {
                               collapse: collapse,
                               composer: composerSite(in: app),
                               editing: editing,
-                              neighbourhood: TimelineNeighbourhood(items: model.timeline.items,
-                                                                   agents: model.timeline.agents),
+                              // The channel's own, and not one built here: constructing it walks
+                              // every item in the history, and `items` merges and sorts the two
+                              // halves to hand it that walk — while this body re-evaluates on every
+                              // streaming delta, which changes no item at all. The model holds it
+                              // and rebuilds it only when the items moved.
+                              neighbourhood: model.neighbourhood,
                               isOverlayStale: model.timeline.overlay.stale,
                               // Parity §41.8 and §41.17's two rendering preferences, as the
                               // channel's own `get_settings` readback answered them.
