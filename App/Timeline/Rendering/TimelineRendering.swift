@@ -507,6 +507,11 @@ final class MarkdownText: @unchecked Sendable {
     /// The **sanitiser runs first** and the cache is keyed by what it returned (§5). Keying by the
     /// raw text would hold two entries for two strings that draw identically, and would leave the
     /// unsanitised text sitting in a key for the next reader to pick up.
+    ///
+    /// It runs **again on every run the walk emits**, and that is not belt and braces: the parser
+    /// decodes character references, so `&#x202E;` is an ordinary run of ASCII to the pass above and
+    /// a bidi override by the time a text node holds it. This pass keys the cache; the walk's own
+    /// sanitising is what §12 rests on.
     func attributed(_ source: String, highlighter: CodeHighlighter, phases: inout RenderPhases) -> NSAttributedString {
         let source = TextSanitiser.sanitise(source)
         if let hit = read(source, highlighter: highlighter) { return hit }
@@ -648,7 +653,7 @@ final class MarkdownText: @unchecked Sendable {
         case let code as CodeBlock:
             let language = code.language?.lowercased()
             let start = RenderClock.start()
-            let styled = highlighter.styling(code: code.code, language: language)
+            let styled = highlighter.styling(code: TextSanitiser.sanitise(code.code), language: language)
             phases.highlight += RenderClock.since(start)
             if let cold = styled.cold { pending.insert(cold) }
             out.append(styled.text)
@@ -693,7 +698,7 @@ final class MarkdownText: @unchecked Sendable {
             // below would do with this node instead: an `HTMLBlock` has no children, so its
             // plain-text projection is empty and the block would vanish silently — which is not
             // escaping either.
-            out.append(NSAttributedString(string: html.rawHTML.trimmingCharacters(in: .newlines) + "\n",
+            out.append(NSAttributedString(string: TextSanitiser.sanitise(html.rawHTML).trimmingCharacters(in: .newlines) + "\n",
                                           attributes: [.font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)]))
 
         case let paragraph as Paragraph:
@@ -801,7 +806,7 @@ final class MarkdownText: @unchecked Sendable {
         let first = max(0, range.lowerBound.line - 1)
         let last = min(lines.count, range.upperBound.line)
         guard first < last else { return plain(table) }
-        return lines[first..<last].joined(separator: "\n")
+        return TextSanitiser.sanitise(lines[first..<last].joined(separator: "\n"))
     }
 
     /// A paragraph's inline runs: emphasis, strong, inline code and link labels.
@@ -810,10 +815,10 @@ final class MarkdownText: @unchecked Sendable {
         for child in markup.children {
             switch child {
             case let text as Markdown.Text:
-                out.append(NSAttributedString(string: text.string,
+                out.append(NSAttributedString(string: TextSanitiser.sanitise(text.string),
                                               attributes: [.font: NSFont.systemFont(ofSize: 13)]))
             case let code as InlineCode:
-                out.append(NSAttributedString(string: code.code,
+                out.append(NSAttributedString(string: TextSanitiser.sanitise(code.code),
                                               attributes: [.font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
                                                            .backgroundColor: NSColor.quaternarySystemFill]))
             case let strong as Strong:
@@ -846,7 +851,7 @@ final class MarkdownText: @unchecked Sendable {
                                               attributes: [.font: NSFont.systemFont(ofSize: 13)]))
             case let html as InlineHTML:
                 // Escaped, never passed through (§5).
-                out.append(NSAttributedString(string: html.rawHTML,
+                out.append(NSAttributedString(string: TextSanitiser.sanitise(html.rawHTML),
                                               attributes: [.font: NSFont.systemFont(ofSize: 13)]))
             default:
                 out.append(NSAttributedString(string: plain(child),
@@ -911,14 +916,15 @@ final class MarkdownText: @unchecked Sendable {
         return inner.lowerBound.column - outer.lowerBound.column
     }
 
-    /// A node's text, with the whitespace its break nodes stand for.
+    /// A node's text, **sanitised**, with the whitespace its break nodes stand for.
     ///
     /// Headings, emphasis and link labels are projected through here rather than walked, so a break
     /// inside any of them reaches a reader only if this reproduces it — a childless node otherwise
     /// projects to the empty string and joins the words either side of it into one.
     private static func plain(_ markup: Markup) -> String {
-        if let text = markup as? Markdown.Text { return text.string }
-        if let code = markup as? InlineCode { return code.code }
+        if let text = markup as? Markdown.Text { return TextSanitiser.sanitise(text.string) }
+        if let code = markup as? InlineCode { return TextSanitiser.sanitise(code.code) }
+        if let html = markup as? InlineHTML { return TextSanitiser.sanitise(html.rawHTML) }
         if markup is SoftBreak { return " " }
         if markup is LineBreak { return "\n" }
         return markup.children.map(plain).joined()

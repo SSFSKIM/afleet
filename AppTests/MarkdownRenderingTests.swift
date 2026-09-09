@@ -456,6 +456,40 @@ final class MarkdownRenderingTests: XCTestCase {
                        "the accepted write counted \(markdown.parseCount) parse(s)")
     }
 
+    // MARK: - Sanitising after the parse (round 3, sweep #1)
+
+    /// A §12 character written as a **character reference** never reaches the drawn text.
+    ///
+    /// **Discriminating.** The sanitiser ran once, on the source, *before* the parse; the parser
+    /// then decoded `&#x202E;` and every other numeric or named reference into the raw scalar and
+    /// the walk copied it into a text run, a link label and a heading. So the one pass that
+    /// existed could be passed by writing the override as an entity, which is the cheapest thing
+    /// an untrusted string can do. The floor is the second half: the prose around the references
+    /// is still rendered, so a walk that dropped its text entirely would not pass this.
+    func testCharacterReferencesForStrippedScalarsDoNotReachTheDrawnText() {
+        var phases = RenderPhases()
+        let source = """
+        # hea&#xFEFF;ding
+
+        before &#x202E; after, a &#8203; zero width and a &#x2028; separator.
+
+        a **str&#x202E;ong** word, an *emp&#8203;hasis* and a [la&#x202E;bel](https://example.invalid/page)
+
+        > a quo&#x202E;ted line
+        """
+        let rendered = MarkdownText().attributed(source, highlighter: CodeHighlighter(), phases: &phases)
+        let scalars = Set(rendered.string.unicodeScalars.map(\.value))
+        for stripped: UInt32 in [0x202E, 0x200B, 0xFEFF, 0x2028] {
+            XCTAssertFalse(scalars.contains(stripped),
+                           "U+\(String(stripped, radix: 16, uppercase: true)) reached the drawn text")
+        }
+        // The floor: the words the references sat between are all still there.
+        for word in ["heading", "before", "after", "strong", "emphasis", "label", "quoted"] {
+            XCTAssertTrue(rendered.string.contains(word),
+                          "the text around the references was lost; \(rendered.length) character(s) were rendered")
+        }
+    }
+
     // MARK: - Emphasis over nested inline content (round 3, scalpel-4 #5)
 
     /// Bold and italic are **applied over** their children rather than replacing them.
