@@ -96,21 +96,31 @@ public actor FileWatch {
 
     // MARK: - The source
 
-    /// Whether the path is itself a symbolic link — `lstat(2)`'s answer, so the link and not what
-    /// it points at.
+    /// Whether **any** component of the path is a symbolic link — the last one or an ancestor.
     ///
-    /// A vnode source is armed on an inode and `open(2)` follows the link, so the source watches
-    /// the **target**: retargeting the link, or removing it, touches that inode not at all and
-    /// reaches the source never. The path is what the panel opened and what a save writes to, so
-    /// the poll stays armed beside the source for as long as the path is a link. It is asked again
-    /// at each decision rather than cached, because a path becomes and stops being a link while it
-    /// is being watched.
+    /// A vnode source is armed on an inode and `open(2)` resolves every link on the way to it, so
+    /// the source watches whatever the *whole* path resolved to: retargeting a link anywhere along
+    /// it, or removing one, touches that inode not at all and reaches the source never. Asking
+    /// only about the last component missed the ancestor case entirely — the arming succeeded, the
+    /// poll was stopped, and a retargeted parent directory went unobserved for the life of the
+    /// watch. The path is what the panel opened and what a save writes to, so the poll stays armed
+    /// beside the source for as long as any part of the path is a link. It is asked again at each
+    /// decision rather than cached, because a path becomes and stops being one while it is being
+    /// watched.
+    ///
+    /// The question is put as *does resolving change the path*, which is one call rather than an
+    /// `lstat(2)` per component. It answers no for the system's own `/var` and `/tmp` aliases,
+    /// which `resolvingSymlinksInPath` normalises away — nobody retargets those, and treating
+    /// every file under the temporary directory as a link would put a stat loop under every watch
+    /// on this machine. A path that does not exist yet resolves to itself and answers no, which
+    /// costs nothing: it cannot be armed either, so the poll is already carrying it, and the
+    /// question is put again the moment it can be.
     ///
     /// Two sources — the target's plus an `O_SYMLINK` one on the link — was the alternative. It
     /// observes the link's own inode but not its *replacement*, which is a directory operation and
     /// the case that matters here, so it would need the poll anyway.
     private var watchesASymbolicLink: Bool {
-        (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink == true
+        url.resolvingSymlinksInPath().path != url.standardizedFileURL.path
     }
 
     private func arm() -> Bool {

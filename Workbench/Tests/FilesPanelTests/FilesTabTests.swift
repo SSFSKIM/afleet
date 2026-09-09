@@ -183,6 +183,60 @@ final class FilesTabTests: XCTestCase {
         XCTAssertEqual(drawn.openFiles.count, 0, "the link followed the last render")
     }
 
+    /// A `.newWindow` delivery belongs to the channel its window was popped out **for**, which the
+    /// host knows and the render path does not. The pop-out is prepared from the channel the action
+    /// came from, routing suspends twice between that preparation and the handler, and the window
+    /// is free to move to another channel in between — so a resolution that ignores the destination
+    /// writes the file into the channel the window is on now while the new window renders the other.
+    func testANewWindowDeliveryOpensInTheChannelItsWindowWasPoppedOutFor() async throws {
+        let router = LinkRouter(externalOpener: { _ in }, diagnostic: { _ in })
+        let capability = RouterCapability(router: router)
+        let host = StubFilesTabHost()
+        let tab = FilesTab(host: host)
+        let poppedOut = try XCTUnwrap(tab.makeSession(for: try makeContext(
+            store: try makeStore(), cwd: try tree.directory("popped"), links: capability))
+            as? FilesPanelSession)
+        let showing = try XCTUnwrap(tab.makeSession(for: try makeContext(
+            store: try makeStore(), cwd: try tree.directory("showing"), links: capability))
+            as? FilesPanelSession)
+        host.showing = showing
+        host.poppedOut = poppedOut
+        let file = try tree.file("popped/routed.swift", "let routed = true\n")
+        try await waitUntilCount(2, in: router)
+
+        await router.open(.file(file, line: nil), from: .newWindow)
+
+        XCTAssertEqual(poppedOut.openFiles.count, 1,
+                       "the link did not reach the channel its own window was popped out for")
+        XCTAssertEqual(showing.openFiles.count, 0,
+                       "the link followed the channel the window happens to be on now")
+    }
+
+    /// With a host, the host's answer is the whole answer. Nil means this delivery has no channel
+    /// at all, and the session the render path drew last is *some other* channel's — a pop-out's,
+    /// or the last one Files was drawn for — so opening in it writes a file the link never named.
+    /// The render anchor is the answer only for a tab built with no host.
+    func testAHostedDeliveryTheHostResolvesNothingForOpensNothing() async throws {
+        let router = LinkRouter(externalOpener: { _ in }, diagnostic: { _ in })
+        let capability = RouterCapability(router: router)
+        let host = StubFilesTabHost()
+        let tab = FilesTab(host: host)
+        let drawnContext = try makeContext(store: try makeStore(),
+                                           cwd: try tree.directory("drawn"), links: capability)
+        let drawn = try XCTUnwrap(tab.makeSession(for: drawnContext) as? FilesPanelSession)
+        _ = tab.makeView(session: drawn, context: drawnContext)
+        host.showing = nil
+        let file = try tree.file("drawn/routed.swift", "let routed = true\n")
+        try await waitUntilCount(2, in: router)
+
+        await router.open(.file(file, line: nil), from: .currentPanel)
+
+        XCTAssertEqual(drawn.openFiles.count, 0,
+                       "a hosted delivery fell back to the session the render path drew")
+        XCTAssertEqual(host.selections, 0,
+                       "the panel was brought forward for a delivery that opened nothing")
+    }
+
     /// A `.currentPanel` delivery brings Files forward; a `.newWindow` one does not, because the
     /// host has already popped a window out for it and the main panel's selection is not its
     /// business.
@@ -554,10 +608,15 @@ final class FilesTabTests: XCTestCase {
 /// selection. A count and a session, never a channel key (§11).
 @MainActor
 final class StubFilesTabHost: FilesTabHost {
+    /// The channel the window is showing, and the channel a `.newWindow` delivery's window was
+    /// popped out for. Two, because the destination is what chooses between them.
     var showing: FilesPanelSession?
+    var poppedOut: FilesPanelSession?
     private(set) var selections = 0
 
-    func filesSession() -> FilesPanelSession? { showing }
+    func filesSession(for destination: LinkDestination) -> FilesPanelSession? {
+        destination == .newWindow ? poppedOut : showing
+    }
     func selectFilesTab() { selections += 1 }
 }
 

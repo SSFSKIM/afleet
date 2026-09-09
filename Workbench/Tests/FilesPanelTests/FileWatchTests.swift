@@ -410,6 +410,39 @@ final class FileWatchTests: XCTestCase {
                    "retargeting the link was never observed", within: .seconds(10))
     }
 
+    /// The same defect one component up. `open(2)` resolves **every** link on the way to the file,
+    /// so an ancestor that is a link leaves the source armed on the resolved inode just as surely
+    /// as a linked leaf does; retargeting that ancestor touches neither that inode nor any
+    /// directory a source is watching, so the poll is what sees it.
+    func testAnAncestorSymbolicLinkKeepsThePollArmedUnderTheVnodeSource() async throws {
+        let first = root.appendingPathComponent("first", isDirectory: true)
+        let second = root.appendingPathComponent("second", isDirectory: true)
+        try FileManager.default.createDirectory(at: first, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: second, withIntermediateDirectories: true)
+        try write("one", to: first.appendingPathComponent("note.txt"))
+        try write("twelve chars", to: second.appendingPathComponent("note.txt"))
+        let link = root.appendingPathComponent("current", isDirectory: true)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: first)
+        let watched = link.appendingPathComponent("note.txt")
+        let loaded = try XCTUnwrap(FileSnapshot.read(watched))
+        XCTAssertEqual(loaded.size, 3, "the premise did not hold: the path read the wrong target")
+
+        let log = EventLog()
+        let watch = watcher(on: watched, mode: .vnode, log: log)
+        await watch.start(baseline: loaded)
+        defer { Task { await watch.stop() } }
+
+        let polling = await watch.isPolling
+        XCTAssertTrue(polling, "an ancestor link was left to the source's resolved inode alone")
+
+        // The ancestor is retargeted; the inode the source was armed on is not touched at all.
+        try FileManager.default.removeItem(at: link)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: second)
+
+        await wait(on: log, until: { $0.contains { $0.snapshot?.size == 12 } },
+                   "retargeting the ancestor was never observed", within: .seconds(10))
+    }
+
     /// And the other half: the link removed and not replaced is a deletion of the path, however
     /// well the target it pointed at is doing.
     func testRemovingASymbolicLinkIsReportedAsADeletionUnderTheVnodeSource() async throws {
