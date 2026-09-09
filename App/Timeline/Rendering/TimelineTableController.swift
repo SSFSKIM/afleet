@@ -511,8 +511,15 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
     /// One row's SwiftUI content: whichever builder owns the item's kind (contract Y1), handed the
     /// render context on its own subtree, or the markdown pipeline for the two rows that are not
     /// items.
-    private func root(for row: RenderedRow) -> AnyView {
-        guard let item = row.item else { return AnyView(TimelineMarkdownRow(row: row)) }
+    func root(for row: RenderedRow) -> AnyView {
+        // The **streaming preview takes the same context as an item** (contract Y7). It was returned
+        // bare, so a link pressed in the message being streamed reached the router with no context,
+        // was declined, and fell through to the system — where a relative destination names a file in
+        // the app's own directory or none at all. The reader cannot tell a streaming message from a
+        // settled one, and the link has to behave the same in both.
+        guard let item = row.item else {
+            return AnyView(TimelineMarkdownRow(row: row).environment(\.timelineContext, context))
+        }
         return AnyView(body(for: item))
     }
 
