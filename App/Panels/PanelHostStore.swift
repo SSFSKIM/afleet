@@ -1,8 +1,8 @@
 import Foundation
-import CryptoKit
 import AfleetCore
 import FleetKit
 import PanelHostAPI
+import Workbench
 
 /// The host's own W6 document: which tab a channel was last showing (spec §7's selection
 /// ownership; C7's W6 names `panel.host.<configHomeHash>.<sessionId>` and C5 as its writer).
@@ -46,19 +46,16 @@ actor PanelHostStore {
     /// W6's key for one channel: `panel.host.<configHomeHash>.<sessionId>`, in the `workbench`
     /// namespace the scoped store pins — so the full path reads
     /// `workbench.panel.host.<configHomeHash>.<sessionId>`.
-    nonisolated static func key(for channel: ChannelKey) -> String {
-        "panel.host.\(configHomeHash(channel.configHome)).\(channel.session.description)"
-    }
-
-    /// The twelve-lowercase-hex-character prefix of the SHA-256 of the config home's path — the
-    /// spelling §11 uses for capture directories and the Files and Terminal documents use for their
-    /// keys, so all three name one config home the same way.
     ///
-    /// Recomputed rather than imported: ClaudeWire's spelling takes a `ConfigHome` and a
-    /// `ChannelKey` carries only the URL, and the panels' copies are their own packages'.
-    nonisolated static func configHomeHash(_ configHome: URL) -> String {
-        String(SHA256.hash(data: Data(configHome.path.utf8))
-            .map { String(format: "%02x", $0) }.joined().prefix(12))
+    /// The hash is the twelve-lowercase-hex-character prefix of the SHA-256 of the config home's
+    /// path — §11's spelling for capture directories, and the one the Files and Terminal documents
+    /// key by — and it is **borrowed rather than recomputed**, so the three panel documents of one
+    /// channel cannot come to disagree about which config home they belong to. `FilesPanelStore`'s
+    /// is the published one that takes exactly the URL a `ChannelKey` carries; ClaudeWire's asks
+    /// for a `ConfigHome`, which the key does not have. X1 leaves the app free to import either.
+    nonisolated static func key(for channel: ChannelKey) -> String {
+        let hash = FilesPanelStore.configHomeHash(channel.configHome)
+        return "panel.host.\(hash).\(channel.session.description)"
     }
 
     /// The channel's remembered tab, or nil.
