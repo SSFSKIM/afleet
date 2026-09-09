@@ -146,6 +146,77 @@ final class AgentNavigatorTests: XCTestCase {
                        "revealing the run left \(model.collapsed.count) closed branch(es), so the user's own was discarded")
     }
 
+    // MARK: - The wiring the launch installs
+
+    /// **Y4 as the app installs it: the chip's run lands on the session the host builds.**
+    ///
+    /// Every test above drives a navigator this file wired, over a store it handed to both halves.
+    /// That proves the navigator's own behaviour and nothing about the app's: a `performLaunch` that
+    /// gave the navigator a store the registered tab does not read passes all of them, and a real
+    /// chip click then selects the tab and opens nothing. So this one touches no seam of its own —
+    /// the app is launched, `app.agentNavigation` is the navigator the launch installed, and the
+    /// session is the one the app's own host builds for the channel.
+    func testTheInstalledNavigationLandsTheRunOnTheHostsOwnSession() async throws {
+        let tree = try TempTree()
+        let scratch = try ScratchConfigHome(tree: tree)
+        try scratch.writeClaudeJSON(projects: [])
+        let built = SidebarFixtures.snapshot(configHome: LaunchFixtures.directoryURL(scratch.root), entries: [])
+        let sequence = try ChannelRegistrarTests.sequence(tree: tree, configHome: scratch.root,
+                                                          fleet: FleetDouble(),
+                                                          index: StubIndex(persisted: nil, built: built))
+        let app = AppModel(registry: RowRegistry(), sequence: sequence,
+                           coordinatorFactory: { _ in StoppableCoordinatorDouble() })
+        await app.launch()
+        XCTAssertTrue(app.agentNavigation is AgentNavigator,
+                      "the launch left the chip's seam at \(type(of: app.agentNavigation)), so nothing below is Y4")
+
+        // A channel with a run in it, over a lifecycle whose events a test can push — the registry
+        // binding `bindWorkspace` performs on every launch, with the fleet replaced.
+        let panels = try await PanelRig(channels: 1)
+        app.bindWorkspace(panels.workspace, lifecycle: panels.lifecycle)
+        let key = panels.keys[0]
+        await panels.lifecycle.openEvents(of: key)
+        let channel = app.timelines.model(for: key)
+        await channel.open(Self.row(key))
+        await panels.lifecycle.push(try AgentGateRig.taskStartedFrame(taskID: Self.installedRun,
+                                                                      toolUseID: "toolu_invented_y4_00"),
+                                    to: key)
+        let armed = await Self.settle { channel.timeline.agents?.nodes.count == 1 }
+        XCTAssertTrue(armed, "the pushed run never reached the channel's tree, so there is no run to land on")
+
+        app.agentNavigation.show(run: Self.installedRun, in: key)
+
+        XCTAssertEqual(app.panels.selected, .agents, "the installed navigation did not bring the Agents tab forward")
+        let context = try XCTUnwrap(app.panels.context(for: key, cwd: PanelRig.cwd),
+                                    "the app's host built no context for the run's channel")
+        let session = try XCTUnwrap(app.panels.session(for: .agents, context: context) as? AgentsModel,
+                                    "the app's host made something other than the Agents tab's session")
+        XCTAssertTrue(session.selectedRun == Self.installedRun,
+                      "the session the app's own host built did not read the run the chip wrote")
+        XCTAssertTrue(session.selection == .run(Self.installedRun),
+                      "the pane reports a selection state other than the open run")
+    }
+
+    /// The run the pushed frame starts. Invented, and drawn rather than printed (§11).
+    static let installedRun: AgentRunID = "task_invented_y4_0001"
+
+    /// The row a channel is opened with — the shape the channel column hands the model.
+    static func row(_ key: ChannelKey) -> ChannelRow {
+        ChannelRow(key: key, title: "an invented channel", titleSource: .firstPrompt,
+                   preview: "invented preview", cwd: PanelRig.cwd, gitBranch: nil, agentName: nil,
+                   mtime: Date(), isRecent: true, mode: .ownedCandidate, decidingRule: "invented",
+                   isProvisional: false, state: SidebarFixtures.state(key, origin: .owned(.ready)))
+    }
+
+    /// Yields until the condition holds or the budget runs out, and answers whether it did.
+    static func settle(until condition: @MainActor @escaping () -> Bool) async -> Bool {
+        for _ in 0..<600 {
+            if condition() { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return condition()
+    }
+
     // MARK: - The rig
 
     /// The shell, the host, the store and the navigator, wired the way `performLaunch` wires them —

@@ -27,11 +27,7 @@ struct AgentTreeView: View {
             if let actions = model.actions {
                 AgentTreeActionBar(actions: actions)
                 if let banner = actions.banner {
-                    Text(banner.text)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 8)
-                        .padding(.bottom, 4)
+                    AgentTreeBanner(sentence: banner.text)
                 }
             }
             if model.selection == .unknownRun { AgentUnknownRunNotice() }
@@ -171,6 +167,25 @@ struct AgentOutline: View {
     private func bring(_ run: AgentRunID?, into scroll: ScrollViewProxy) {
         guard let run else { return }
         scroll.scrollTo(AgentTreeView.identity(of: run), anchor: .center)
+    }
+}
+
+/// Why the last channel-wide or node action did not happen — the engine's own sentence (§6.3).
+///
+/// A view of its own with the sentence **stored**, rather than a `Text` inside the tree's body, for
+/// the reason `AgentTreeEmptyState` is one: a `Mirror` walk reaches the objects a body holds as
+/// well as the strings it draws, so "the refusal is on screen" cannot be told from "the refusal is
+/// on the model the body holds" unless the drawn thing is a value a test can find and build.
+struct AgentTreeBanner: View {
+
+    let sentence: String
+
+    var body: some View {
+        Text(sentence)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 8)
+            .padding(.bottom, 4)
     }
 }
 

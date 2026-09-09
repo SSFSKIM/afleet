@@ -97,8 +97,16 @@ final class LiveAgentsTests: XCTestCase {
         }
         guard let row = listed else {
             await workspace.fleet.shutdown()
-            throw XCTSkip("the scratch config home lists no session whose transcript directory holds subagent files "
-                          + "(\(withRuns.count) session(s) on disk carry them, none of them listed)")
+            // **A skip only where the precondition is genuinely absent.** A home with no subagent
+            // transcripts at all cannot run this gate; a home that has them and an app that lists
+            // none of them is an indexing regression, and skipping on it turns a required gate into
+            // a green run that asserted nothing — which is the failure this arm is guarded against.
+            guard withRuns.isEmpty else {
+                XCTFail("\(withRuns.count) session(s) under the scratch config home carry subagent transcripts "
+                        + "and the app listed none of them")
+                return
+            }
+            throw XCTSkip("the scratch config home holds no session whose transcript directory carries subagent files")
         }
         let key = ChannelKey(configHome: home, session: row.id)
 

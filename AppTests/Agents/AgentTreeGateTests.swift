@@ -296,6 +296,19 @@ final class AgentTreeGateTests: XCTestCase {
                        "the parked run draws \(AgentNodeRow.statusLabel(content)) rather than Parked")
         XCTAssertNotEqual(AgentNodeRow.statusLabel(content), "Completed",
                           "a branch with work still under it is drawn as finished")
+
+        // **And the row draws it**, through the outline's own row expression. The clauses above ask
+        // the label helper, and a body that stopped drawing the status at all — or drew it from the
+        // run's `status` instead of from the parking the tree reports — leaves every one of them
+        // green while the tree on screen says the branch has finished.
+        let pane = rig.pane()
+        let row = try XCTUnwrap(AgentTreeView.visibleRows(read: parked, collapsed: []).first { $0.id == root },
+                                "the outline drew no row for the parked run")
+        let drawn = ViewTree.values(of: String.self, in: AgentOutline.view(of: row, in: pane, selected: nil).body)
+        XCTAssertEqual(drawn.filter { $0 == "Parked" }.count, 1,
+                       "the parked run's row draws Parked \(drawn.filter { $0 == "Parked" }.count) time(s), not once")
+        XCTAssertEqual(drawn.filter { $0 == "Completed" }.count, 0,
+                       "the parked run's row draws Completed beside its parking")
     }
 
     // MARK: - The two empty states (G1, child spec D10)

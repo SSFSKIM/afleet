@@ -394,6 +394,19 @@ final class AgentNodeActionTests: XCTestCase {
         XCTAssertTrue(actions.backgroundingDisabled, "the session's refusal left backgrounding available")
         XCTAssertTrue(actions.banner?.text == AgentNodeActions.backgroundingRefusal,
                       "the banner says something other than the engine's own sentence")
+        // **And the tree draws it.** The clause above reads the model; a body that raised the
+        // banner and never rendered it takes both affordances away with nothing on screen to say
+        // why, which is the state this arm exists to make legible. Asserted through the drawn
+        // value and its own body, because a sweep of the tree's strings finds the sentence on the
+        // action object the body holds whether or not anything renders it.
+        let banner = try XCTUnwrap(ViewTree.values(of: AgentTreeBanner.self,
+                                                   in: AgentTreeView(model: rig.model).body).first,
+                                   "the tree drew no banner at all for a refusal it is holding")
+        XCTAssertTrue(banner.sentence == AgentNodeActions.backgroundingRefusal,
+                      "the drawn banner says something other than the engine's own sentence")
+        let drawn = ViewTree.values(of: String.self, in: banner.body)
+            .filter { $0 == AgentNodeActions.backgroundingRefusal }
+        XCTAssertEqual(drawn.count, 1, "the banner's own body draws the refusal \(drawn.count) time(s), not once")
         XCTAssertNil(ViewTree.button("Move to Background", in: try Self.actionBody(of: Rig.runID, in: rig)),
                      "the node still offers backgrounding in a session that refuses it")
         XCTAssertNil(ViewTree.button(AgentTreeConfirm.backgroundAllTitle, in: try Self.topBarBody(in: rig)),

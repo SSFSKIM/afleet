@@ -57,10 +57,16 @@ final class AgentTranscriptTests: XCTestCase {
         // sibling of this pane's subject — absent.
         let input = pane.input(of: run, retainedBy: nil)
         XCTAssertGreaterThan(input.rows.count, 0, "the nested run drew no rows at all on a recording it spoke in")
-        let mine = AgentRunRead.items(of: run, in: rig.model.timeline)
+        // **The expectation is derived from the channel's items, not from the filter under test.**
+        // `input.rows` is `AgentRunRead.items(of:in:)`' own output; an expectation taken from the
+        // same expression shrinks with it, so a filter that returned nothing — or that dropped the
+        // run's messages and kept its tool calls — satisfies both operands at once.
+        let items = rig.model.timeline.items
+        let mine = items.filter { $0.provenance.agentID == run }
+        XCTAssertGreaterThan(mine.count, 0, "the recording carries no item of the nested run's, so this compares nothing")
         XCTAssertTrue(input.rows.map(\.id) == mine.map(\.id),
                       "the pane's \(input.rows.count) row(s) are not the run's \(mine.count) item(s), in order")
-        let parents = AgentRunRead.items(of: root, in: rig.model.timeline)
+        let parents = items.filter { $0.provenance.agentID == root }
         XCTAssertGreaterThan(parents.count, 0, "the parent run produced nothing, so its absence proves nothing")
         let drawnIDs = Set(input.rows.map(\.id.key))
         XCTAssertEqual(parents.filter { drawnIDs.contains($0.id.key) }.count, 0,
@@ -113,7 +119,10 @@ final class AgentTranscriptTests: XCTestCase {
         let input = rig.model.input(of: InventedAgents.run(0), retainedBy: nil)
 
         XCTAssertEqual(input.rows.count, 2, "the pane drew \(input.rows.count) row(s) for a run with 2 items")
-        XCTAssertTrue(input.rows.map(\.id) == AgentRunRead.items(of: InventedAgents.run(0), in: rig.timeline).map(\.id),
+        // Derived from the channel's items rather than from the filter the pane used, for the
+        // reason the gate arm above states: two operands out of one expression move together.
+        let mine = rig.timeline.items.filter { $0.provenance.agentID == InventedAgents.run(0) }
+        XCTAssertTrue(input.rows.map(\.id) == mine.map(\.id),
                       "the pane's rows are not the run's items, in the timeline's own order")
         let keys = Set(input.rows.map(\.id.key))
         XCTAssertFalse(keys.contains(TranscriptRig.mainThreadKey),
@@ -189,15 +198,38 @@ final class AgentTranscriptTests: XCTestCase {
 
     /// The badge is the **run's own** model, and not the channel's.
     ///
-    /// The two are stated differently on purpose. They are usually the same, so a corpus with one
-    /// model passes whichever value the pane picked up; here the run's assistant frames carried one
-    /// model and the channel's streaming tail another, and only the run's may be drawn.
-    func testTheBadgeIsTheRunsOwnModel() throws {
-        let rig = try TranscriptRig(selecting: InventedAgents.run(0), streaming: true)
+    /// **The premise is the channel's own readout, not two constants.** The two are usually the
+    /// same, so a corpus with one model passes whichever value the pane picked up; here the
+    /// channel's header model is supplied the way production supplies it — one `get_settings`
+    /// answer, read back through the poller into `ChannelTimelineModel.readout` — and it is the
+    /// model the run's items carry too. Only the run's own may be drawn.
+    ///
+    /// Discriminating twice over: a pane that preferred the channel's header model draws it here,
+    /// and a row that fell back to the message's own model draws it as well, because the item this
+    /// row is built from carries exactly that value.
+    func testTheBadgeIsTheRunsOwnModelAndNotTheChannelsHeaderReadout() async throws {
+        let rig = try TranscriptRig(selecting: InventedAgents.run(0))
         let content = try XCTUnwrap(rig.model.read.content(of: InventedAgents.run(0)),
                                     "the read holds no content for the run the pane is open on")
-        XCTAssertNotEqual(TranscriptRig.runModel, TranscriptRig.channelModel,
-                          "the run and the channel are on one model, so this test cannot tell them apart")
+
+        // The channel the pane is drawn over, with an engine answer behind its header.
+        let app = AppModel(registry: RowRegistry())
+        let double = ComposerLifecycleDouble()
+        await double.openEvents(of: rig.key)
+        let channel = ChannelTimelineModel(key: rig.key, workspace: nil, lifecycle: double)
+        channel.adopt(ChannelHeader(row: HeaderReadoutTests.Rig.row(
+            rig.key,
+            entry: HeaderReadoutTests.Rig.entry(rig.key, branch: "an-invented-branch"),
+            origin: .owned(.ready))))
+        await double.stageSend("get_settings",
+                               .success(.object(["applied": .object(["model": .string(TranscriptRig.channelModel)])])))
+        await channel.refreshReadbacks()
+
+        let header = try XCTUnwrap(channel.readout.model,
+                                   "the settings readback never reached the channel's readout, so there is no "
+                                   + "channel model to tell the run's from")
+        XCTAssertFalse(header == content.model,
+                       "the channel's header and the run report the same model, so this test cannot tell them apart")
 
         XCTAssertEqual(AgentTranscriptHeader.badge(of: content), TranscriptRig.runModel,
                        "the badge is not the model the run's own assistant frames carried")
@@ -206,18 +238,20 @@ final class AgentTranscriptTests: XCTestCase {
         XCTAssertEqual(drawn.filter { $0 == TranscriptRig.runModel }.count, 1,
                        "the framing draws the run's model \(drawn.filter { $0 == TranscriptRig.runModel }.count) "
                        + "time(s), not once")
-        XCTAssertEqual(drawn.filter { $0 == TranscriptRig.channelModel }.count, 0,
-                       "the framing draws the channel's model on a subagent's transcript")
+        XCTAssertEqual(drawn.filter { $0 == header }.count, 0,
+                       "the framing draws the channel's header model on a subagent's transcript")
 
         // The badge on the message, for the reason above: the header is not where item 38's badge
-        // is. The item this row is built from carries the **channel's** model, so a row that kept
-        // drawing its own would draw the wrong one and only this clause would see it.
-        let row = ViewTree.values(of: String.self, in: rig.assistantRow(model: TranscriptRig.channelModel))
+        // is. The item this row is built from carries the **channel's** model, and the context is
+        // built over the channel whose readout reports it — so a pane that preferred either draws
+        // the wrong one, and only this clause would see it.
+        let context = AgentTranscriptPane.context(for: content, in: app, channel: channel, model: rig.model)
+        let row = ViewTree.values(of: String.self, in: TranscriptRig.assistantRow(context: context, model: header))
         XCTAssertEqual(row.filter { $0 == TranscriptRig.runModel }.count, 1,
                        "the drawn message badges \(row.filter { $0 == TranscriptRig.runModel }.count) run model(s), "
                        + "not 1")
-        XCTAssertEqual(row.filter { $0 == TranscriptRig.channelModel }.count, 0,
-                       "a message inside the run's transcript is badged with a model that is not the run's")
+        XCTAssertEqual(row.filter { $0 == header }.count, 0,
+                       "a message inside the run's transcript is badged with the channel's model rather than the run's")
     }
 
     /// A run no assistant frame has arrived for **says so** rather than borrowing the channel's.
