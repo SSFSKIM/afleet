@@ -11,7 +11,7 @@ import Workbench
 /// call as the first launch, and what lets the whole sequence be tested without a window.
 @MainActor
 @Observable
-final class AppModel: FilesTabHost {
+final class AppModel: FilesTabHost, SourceControlTabHost {
     private(set) var route: AppRoute = .launching
 
     /// The sequence, with its seams. Production values by default; a test replaces the ones it
@@ -207,17 +207,32 @@ final class AppModel: FilesTabHost {
         // host builds a session lazily, for rendering, so a `.file` or `.diff` link raised before
         // anyone has looked at Files would otherwise resolve to nothing (C7.5 Design §9).
         // Spawned, because registration is a hop onto the link registry's actor and this is not.
+        //
+        // C7.7's two tabs, under `.sourceControl` and `.github`. Neither id is held by anything —
+        // C5's placeholder registers only `.thread` — so both are plain registrations and not X7's
+        // handover (C7.7 Design §2), and both are asserted rather than `try?`d for the reason the
+        // Files line above is: a shipped tab that vanished from the tab bar with no signal is the
+        // thing this must not do quietly.
+        //
+        // The Source Control tab's one `.commit` target goes the same way as the Files pair, and
+        // for the same reason: a link raised from a timeline row before anyone has looked at the
+        // panel must still resolve (Design §7). The GitHub tab registers nothing at all — a pull
+        // request is a `.pullRequest` link that C7.6's Browser resolves (Design §9).
         let files = FilesTab(host: self)
+        let scm = SourceControlWiring.makeTabs(host: self)
         do {
             try panels.register(PlaceholderTab())
             try panels.register(TerminalPanelTab(registry: terminalSessions))
             panels.registerPaneRunner(TerminalPaneRunner(registry: terminalSessions), for: .terminal)
             panels.select(.thread)
             try panels.register(files)
+            try panels.register(scm.sourceControl)
+            try panels.register(scm.github)
         } catch {
             assertionFailure("the shipped tabs are the first registrations on a freshly built host")
         }
         Task { await files.registerLinkTargets(through: panels.links) }
+        Task { await SourceControlWiring.registerLinkTargets(of: scm.sourceControl, through: panels.links) }
         // C7.6's Browser tab, under `.browser`, registered once (Q4). Not `try?` for the reason
         // above it: nothing else can hold `.browser` on a host built two lines ago, and a Browser
         // that vanished silently would leave every `.url` link falling through to W5's fallback and
@@ -266,7 +281,7 @@ final class AppModel: FilesTabHost {
     /// still only a mitigation — a link on behalf of a channel that is not on screen cannot say so
     /// until X7 carries the originating channel.
     func filesSession(for destination: LinkDestination) -> FilesPanelSession? {
-        guard let key = channel(for: destination),
+        guard let key = channel(for: destination, poppedOutAs: .files),
               let context = panels.context(for: key) else { return nil }
         return panels.session(for: .files, context: context) as? FilesPanelSession
     }
@@ -279,15 +294,46 @@ final class AppModel: FilesTabHost {
     /// reading the selection here would undo that capture: the file would open in the channel the
     /// window is on now while the window that was just opened renders the one the link came from.
     /// A pop-out that has been closed since names nothing, and the current channel answers instead.
-    private func channel(for destination: LinkDestination) -> ChannelKey? {
+    ///
+    /// **`poppedOutAs` is the tab whose window this delivery would have opened**, and it is a
+    /// parameter rather than the literal `.files` it began as because C7.7 asks the same question
+    /// for `.sourceControl`. It is what keeps the capture the caller's own: `lastPopOut` is one
+    /// slot over every tab, so a `.commit` delivery that accepted a Files window's channel would
+    /// select a commit in whichever channel Files was last popped out for. One rule, two tab ids,
+    /// and neither answers with the other's window.
+    private func channel(for destination: LinkDestination, poppedOutAs tab: PanelTabID) -> ChannelKey? {
         guard destination == .newWindow,
-              let window = panels.lastPopOut, window.tab == .files,
+              let window = panels.lastPopOut, window.tab == tab,
               panels.poppedOut.contains(window) else { return panels.selectedChannel }
         return window.channel
     }
 
     /// Brings Files forward, so a routed file does not open in a panel nobody can see.
     func selectFilesTab() { panels.select(.files) }
+
+    // MARK: - The Source Control panel's link deliveries (C7.7 spec Design §2, §7, §11)
+
+    /// What a delivered `.commit` selects in: the Source Control session for the channel the
+    /// delivery belongs to, built if this is that channel's first visit.
+    ///
+    /// It is `filesSession(for:)` with one tab id changed, deliberately and not by accident of
+    /// copying: the two panels answer the same question — which channel does this delivery belong
+    /// to, and which session of mine is that channel's — and C7.5 already settled it. Creating on
+    /// a first visit is right for the same reason it is right there: a link the user clicked is an
+    /// instruction to show something now, and the channel it names may never have shown this tab.
+    ///
+    /// The mitigation and its limit are C7.5's too (tracker 240): the delivery reaches the channel
+    /// the *host* resolves at the moment of delivery, which is right for the click a user just
+    /// made and wrong for a link raised on behalf of a channel that is not on screen. Only X7
+    /// carrying the originating channel closes that, and this leaf attempts no local fix.
+    func sourceControlSession(for destination: LinkDestination) -> SourceControlModel? {
+        guard let key = channel(for: destination, poppedOutAs: .sourceControl),
+              let context = panels.context(for: key) else { return nil }
+        return panels.session(for: .sourceControl, context: context) as? SourceControlModel
+    }
+
+    /// Brings Source Control forward, so a routed commit is not selected in a panel nobody can see.
+    func selectSourceControlTab() { panels.select(.sourceControl) }
 
     // MARK: - The Files panel's save (C7.5 spec Design §7)
 

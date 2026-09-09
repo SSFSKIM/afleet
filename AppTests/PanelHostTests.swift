@@ -25,9 +25,13 @@ final class PanelHostTests: XCTestCase {
     /// Reading host.selected alone would miss the original shell/host split entirely.
     func testProtocolSelectionUpdatesTheRenderedSelection() async throws {
         let app = AppModel(registry: RowRegistry())
-        // An id the app does **not** ship. It registers Thread, Files, Terminal and Browser in
-        // `init`, so a stub taking any of those is a duplicate; this test is about selection and
-        // any unshipped id proves it. `.sourceControl` is the free one until C7.7 lands.
+        // **C7.7 landed and the seven ids are all claimed**, so there is no free one left to take:
+        // `init` now registers Thread, Files, Source Control, Terminal, Browser and GitHub, and a
+        // stub taking any of them would throw `duplicateTab`. This test is about selection and is
+        // indifferent to which tab it drives, so it takes `.sourceControl` through X7's sanctioned
+        // handover — the `unregister` that awaits the outgoing tab's link withdrawal, then a plain
+        // `register` over the id — which is the pair C5 established for `.thread`.
+        await app.panels.unregister(.sourceControl)
         try app.panels.register(StubPanelTab(.sourceControl))
         let changed = expectation(description: "rendered selection invalidated")
         withObservationTracking {
@@ -42,6 +46,12 @@ final class PanelHostTests: XCTestCase {
         XCTAssertEqual(app.shell.panelTab, .sourceControl, "window still renders the old selection")
 
         // Tab-bar writes use the same owner, and a refused id cannot split the two views.
+        //
+        // The refused id has to be one nothing holds, and since C7.7 the app holds `.github` too —
+        // so it is withdrawn here and **not** registered over. Choosing a still-registered id
+        // instead would turn this leg into an assertion that a legal selection was ignored, which
+        // is the opposite of what it is for.
+        await app.panels.unregister(.github)
         app.shell.panelTab = .thread
         XCTAssertEqual(host.selected, .thread, "tab-bar selection did not reach the host")
         host.select(.github)
@@ -480,7 +490,11 @@ final class PanelHostTests: XCTestCase {
         let app = AppModel(registry: RowRegistry())
         app.bindWorkspace(rig.workspace, lifecycle: rig.lifecycle)
         let counter = SessionCounter()
-        // An unshipped id, for the reason the selection test above records.
+        // X7's handover onto `.sourceControl`, for the reason the selection test above records:
+        // since C7.7 all seven ids are claimed, and this test is about pop-out scene invalidation
+        // and session release rather than about which tab is popped out. The stub is what counts
+        // sessions, so it has to be the tab the host holds when the pop-out is made.
+        await app.panels.unregister(.sourceControl)
         try app.panels.register(StubPanelTab(.sourceControl, counter: counter))
         let key = rig.keys[0]
         _ = app.panels.context(for: key, cwd: PanelFixtures.cwd)
@@ -1181,8 +1195,11 @@ final class PanelHostTests: XCTestCase {
         let app = AppModel(registry: RowRegistry())
         app.bindWorkspace(rig.workspace, lifecycle: rig.lifecycle)
         let counter = SessionCounter()
-        // An id the app does not ship: it registers Thread, Files, Terminal and Browser in `init`,
-        // and this test is about which host the coordinator holds, not about which tab it is.
+        // X7's handover onto `.sourceControl`, for the reason the selection test above records:
+        // since C7.7 the app holds all seven ids, and this test is about which host the coordinator
+        // resolves from rather than about which tab it is. The stub is what counts the release, so
+        // the id it drives has to be one the host holds through the stub.
+        await app.panels.unregister(.sourceControl)
         try app.panels.register(StubPanelTab(.sourceControl, counter: counter))
         let key = rig.keys[0]
         _ = app.panels.session(for: .sourceControl, context: PanelFixtures.context(key))

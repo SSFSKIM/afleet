@@ -20,7 +20,8 @@ final class FilesPanelWiringTests: XCTestCase {
         XCTAssertTrue(app.panels.isRegistered(.files), "the app model does not hold the Files tab")
         XCTAssertEqual(app.panels.title(for: .files), PanelTabID.files.defaultTitle,
                        "the registered tab is not named by its own title")
-        XCTAssertEqual(app.panels.available(for: PanelFixtures.context()), [.thread, .files, .terminal, .browser],
+        XCTAssertEqual(app.panels.available(for: PanelFixtures.context()),
+                       [.thread, .files, .sourceControl, .terminal, .browser, .github],
                        "the channel does not offer exactly the shipped tabs")
         XCTAssertTrue(app.panels.session(for: .files, context: PanelFixtures.context())
                         is FilesPanelSession,
@@ -73,15 +74,20 @@ final class FilesPanelWiringTests: XCTestCase {
     }
 
     /// The registration is spawned from `AppModel.init`, so a bounded wait is what a test has.
-    /// A count, never a target (§11).
+    ///
+    /// **Three, not two, since C7.7**: the initialiser now spawns this pair and the Source Control
+    /// tab's one `.commit` target, and a wait for exactly two would return on whichever of the two
+    /// tasks won the race. The Browser's own pair is registered by the launch and is not counted
+    /// here. A count, never a target (§11).
     private func waitUntilRegistered(_ app: AppModel,
                                      file: StaticString = #filePath, line: UInt = #line) async throws {
         let deadline = ContinuousClock().now + .seconds(10)
         while ContinuousClock().now < deadline {
-            if await app.panels.links.targetCount == 2 { return }
+            if await app.panels.links.targetCount == 3 { return }
             try await Task.sleep(for: .milliseconds(20))
         }
-        XCTFail("the Files tab's two link targets never registered", file: file, line: line)
+        XCTFail("the tabs registered in the initialiser never registered their link targets",
+                file: file, line: line)
     }
 
     /// Design §7: Cmd+S reaches the Files session of the channel the main window is showing, is
