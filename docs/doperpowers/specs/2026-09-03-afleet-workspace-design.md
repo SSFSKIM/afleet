@@ -1385,6 +1385,16 @@ mirrors at the head of the agent stream (§7.3), which carries `parentAgentId` b
 1 before the sidecar file exists; the two-step join is the fallback for a host not reading
 the mirror: a frame's `parent_tool_use_id` names the `tool_use` block that spawned it; the
 frame that carried that block has its own `parent_tool_use_id`, which is the grandparent.
+Amended 2026-09-09 (corrective `b412f2e`): the `agent_metadata` entry is applied to two places — it
+is the stream's metadata, which the record reducer builds its `taskRun` row from, and it is this
+tree's first parent source; the `.meta.json` sidecar is the second, read by the tree's own reader.
+Because both name an agent stream and an agent stream is a `local_agent` run, either source creates
+the run's node when no `task_started` has, which is what gives a channel with no wire a tree at all;
+such a node reads the status and instant of its `taskRun` row (completed when the spawning call's
+result is on disk, running only when no spawning call is anywhere in the merged line — tracker 407)
+until a `task_started` replaces them. First source wins: the tree records a later disagreeing source
+in `conflicts` and does not re-parent; on the depth-2 recording the join answers first and the
+mirror's agreeing answer is retained beside it in `parentAnswers`, which is what a reader draws.
 The engine re-emits `task_started` for the **same** `task_id` when an auto-turn re-engages
 a backgrounded agent, so a repeat is the same node, not a new one. Depth-1 tool calls and
 results are always forwarded; text, thinking and depth 2 and deeper need
@@ -2438,7 +2448,20 @@ SwiftPM package or target that builds and tests without the children above it, p
 2026-09-08 at C6.2's merge (`c2dae0f`): `HostSignal.promptCancelled(uuid:)` retires a prompt
 from the reducer's outstanding list; the composer raises it only when `cancel_async_message`
 answers `cancelled: true`, since `false` means the prompt may already be running and its result
-is still owed to it.
+is still owed to it. Amended 2026-09-09 (corrective `b412f2e`, tracker 187 and 321): the tree is no
+longer wire-fed only — `StreamIngestion` routes every decoded `agent_metadata` record into it (the
+mirror's entry through `apply(agentMetadata:for:)`, the `.meta.json` sidecars through
+`apply(metaFile:)`), so `agents` is non-nil after `open` for **both** channel kinds and a foreign or
+archived session opened from its files has the tree the same corpus produces live; a node a metadata
+source created before any `task_started` takes its status and instant from the projection's `taskRun`
+row for the same task id (the record reducer stays the one place a status is derived from a spawning
+call), and `AgentRunTree.order` is sorted by that instant, so roots read in start order from files as
+they do live. The parenthesis above that said the tree is nil for a file-only channel no longer holds.
+`ChannelTimeline` also carries `registry: RegistryMirror`, a value snapshot of the channel fold's
+background-task registry taken in the same read as the items and the tree, the way `overlay` is
+carried, because §8.4's *Move to background* is gated on the mirror and the renderer had no other path
+to one (`StreamIngestion.registry` exposes the same value; empty before `open`). Nothing new is
+published for either: `.agentsChanged` still reports the tree's movement once per apply.
 - **X5 Lifecycle API.** Channel origin and sub-state as observable state; the actions
   open, send, reap, adopt, sendToBackground, openInTerminal, fork, quiescentRestart,
   stopEverything, backgroundAll, logout; the preconditions as a typed result (ready,
@@ -4737,3 +4760,7 @@ Pending — written at finish.
 - 2026-09-09 C7.4 merged (`054e42c`; composite Revision Note of the same date). X7's pane runner
   takes its channel's context; §17.4 C7's *Respawn* and item 15's "returns" re-worded from the
   leaf's Parent revisions; §17.9's C7 row brought current.
+- 2026-09-09 corrective `b412f2e` (tracker 187, 321, 406): X4 amended — the agent-run tree is fed by
+  both metadata sources for both channel kinds, `ChannelTimeline` carries the registry mirror; §8.8's
+  parent-source paragraph amended with node creation from a metadata source and the reconciliation of
+  its status against the `taskRun` row.
