@@ -251,18 +251,27 @@ public final class BrowserModel {
         activate(restored[index])
     }
 
-    /// Runs `operation` once the restoration has landed, or now if there is nothing to wait for.
+    /// Runs `operation` once the restoration has landed **and every mutation made before it has
+    /// run**, or now if there is neither to wait for.
     ///
     /// **Every mutation that can enqueue persistence goes through here, not only the routed one.**
     /// `performRestore` replaces the tab set whole, so a mutation made in front of the read it is
     /// waiting on is a mutation the read throws away — in memory and, through the structural write
     /// it enqueued, on disk as well. The user's `+` is as fast as a link (D57).
     ///
+    /// **The restoration landing does not open a door beside the queue** (D59). `performRestore`
+    /// installs the set and marks itself restored before the operations suspended behind it resume,
+    /// so a gate that asked only "has the read landed" would run a mutation made *after* it in
+    /// front of ones made before — a routed open of the current tab navigating the restored
+    /// selection before an earlier New Tab had run, which puts the link in the wrong tab. While any
+    /// mutation is still queued, a new one queues behind it; the queue drains in the order the user
+    /// made them, and only an empty queue is passed straight through.
+    ///
     /// *The controls are not disabled instead.* A disabled tab strip would flicker for the length
     /// of one store read on every channel switch, and it would drop a keystroke rather than delay
     /// it: deferring keeps the user's action, which is the honest half of the two.
     private func gated(_ operation: @escaping @MainActor () -> Void) {
-        guard !isRestored else { return operation() }
+        guard !isRestored || gatedOperationsOutstanding > 0 else { return operation() }
         // **A mutation nobody has restored for starts the restoration.** Joining one that has
         // already been asked for is not enough: the first thing a mutation does is enqueue a
         // structural write, so a set mutated in front of the read has already replaced the
@@ -272,6 +281,8 @@ public final class BrowserModel {
         // whichever door the mutation came through.
         let restoration = restoring()
         let previous = gateChain
+        gatedOperationsOutstanding += 1
+        enqueuedWork += 1
         gateChain = Task { @MainActor in
             if let previous {
                 await previous.value
@@ -279,6 +290,7 @@ public final class BrowserModel {
                 await restoration.value
             }
             operation()
+            self.gatedOperationsOutstanding -= 1
         }
     }
 
@@ -287,9 +299,15 @@ public final class BrowserModel {
     /// A link can arrive before the Browser tab has ever been drawn, so this is the entry point
     /// that orders the two: a structural write made in front of an unfinished read is a write the
     /// read then overwrites, in memory and on disk both (A1).
+    ///
+    /// **It takes the same queue as the panel's own controls and not a second waiter on the
+    /// restoration** (D59). Awaiting the read on its own account would put this link in a race with
+    /// every mutation already queued behind that read, and the loser is decided by which
+    /// continuation the runtime resumes first. It joins at the back of the queue, where it was made,
+    /// and returns when the queue has run that far — which is what a routing target awaits.
     func openRouted(_ url: URL, in destination: OpenDestination) async {
-        await restore()
         open(url, in: destination)
+        await gateChain?.value
     }
 
     // MARK: The operations
