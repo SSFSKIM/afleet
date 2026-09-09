@@ -28,6 +28,12 @@ final class HostLinkRouter: LinkRouterCapability {
     /// The one registry. Its fallbacks were given at construction and are not reachable from here.
     private let router: LinkRouter
 
+    /// Runs inside `open`, after the origin channel has been captured and before any of it is
+    /// read. A seam and never a behaviour: it is `nil` in the app, and it exists because "the
+    /// channel is a property of the action" is a claim about an ordering, and an ordering can only
+    /// be asserted from inside it.
+    var didCaptureOrigin: (@Sendable () async -> Void)?
+
     /// Where the no-channel diagnostic goes. Held as well as handed to the router because the
     /// branch below is the host's and not the registry's. The message names the link kind and
     /// never the link, so no path, no session id and no title reaches a log (§11).
@@ -76,13 +82,24 @@ final class HostLinkRouter: LinkRouterCapability {
     /// can move to another channel or leave every channel while one link is in flight. A pop-out
     /// that read the host's current channel when it finally ran would open the target in a channel
     /// the action did not come from, or report "no channel" for a link that had one. The channel an
-    /// action originated in is a property of the action, so it is captured with the action.
+    /// action originated in is a property of the action, so it is captured with the action. The
+    /// same capture is published as `LinkOrigin.channel` for the whole routed call, because a
+    /// target's handler needs it for the same reason and runs where this type cannot reach.
     ///
     /// **`.currentPanel` is routed with no `prepare` at all.** There is nothing to pop out for it,
     /// and a `prepare` that is a no-op is not free: it is what makes the router suspend between
     /// resolving a target and delivering to it, and a withdrawal landing in a suspension that
     /// exists for nothing makes the router refuse an unrelated surviving target for a preparation
     /// no window came of. With no hook the router validates and delivers without suspending.
+    ///
+    /// **A target that declines the pop-out never reaches this hook, and gets no window.** X7's
+    /// `LinkTarget.popsOutForNewWindow` (amended at C7.6's gate, 2026-09-09) marks a target that
+    /// answers `.newWindow` by *leaving the app* — the Browser hands the URL to the user's own
+    /// browser — so popping its tab out would present two windows for one Cmd-click. The registry
+    /// skips `prepare` for such a target rather than this closure returning early, because which
+    /// target a link resolves to is not known here: the hook is handed in before resolution runs.
+    /// Skipping it is also what keeps that delivery on the non-suspending path, for the reason the
+    /// paragraph above gives.
     ///
     /// **What was captured is revalidated immediately before the pop-out.** The capture is a
     /// property of the action, but a window is presented in the present: between the two, the
@@ -91,11 +108,23 @@ final class HostLinkRouter: LinkRouterCapability {
     /// A pop-out re-added after any of those draws the missing-channel placeholder, so it is
     /// reported rather than presented.
     func open(_ link: WorkspaceLink, from destination: LinkDestination) async {
+        let origin = self.host?.selectedChannel
+        // The barrier the ordering above is asserted at: it fires once the channel has been
+        // captured and before anything reads it, which is precisely the window in which the
+        // window can move. Nothing in the app sets it, and a test that instead yielded and hoped
+        // would be asserting the scheduler's habits rather than this type's rule (§17.7).
+        await didCaptureOrigin?()
+        await LinkOrigin.$channel.withValue(origin) {
+            await self.route(link, from: destination, origin: origin)
+        }
+    }
+
+    private func route(_ link: WorkspaceLink, from destination: LinkDestination,
+                       origin: ChannelKey?) async {
         guard destination == .newWindow else {
             await router.open(link, from: destination)
             return
         }
-        let origin = self.host?.selectedChannel
         await router.open(link, from: destination) { target, _ in
             if let host = self.host, let channel = origin {
                 guard host.canResolveChannel(channel), host.isRegistered(target.tab) else {
@@ -116,4 +145,17 @@ final class HostLinkRouter: LinkRouterCapability {
             }
         }
     }
+}
+
+/// The channel a routed action came from, for a target that has to resolve against a repository, a
+/// working directory or an environment.
+///
+/// It is the same capture `HostLinkRouter.open` takes for the pop-out, carried to a place that type
+/// cannot reach: a target's handler runs inside the registry, two suspensions away, and a handler
+/// that read the host's *current* channel there would resolve one channel's pull-request number
+/// against another channel's repository. A task-local is what makes the capture travel with the
+/// call rather than being read again at the far end, and it needs no change to X7's `LinkTarget`.
+/// `nil` outside a routed action, which is a row and never a guess (C7.6 Q3).
+enum LinkOrigin {
+    @TaskLocal static var channel: ChannelKey?
 }

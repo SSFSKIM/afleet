@@ -47,15 +47,41 @@ struct DeveloperSettings: Codable, Hashable, Sendable {
     /// Item 56's switch: the composition root builds no `TranscriptWatcher` when this is true.
     var transcriptWatcherStopped: Bool
     var isolatedSettingsForNewChannels: Bool
+    /// C7.6's Q15: whether the Web Inspector may attach to the Browser panel's web views. It is
+    /// read at launch and mirrored into the inspection policy the panel's web-view factory holds,
+    /// so it takes effect on the next launch, like every setting in this section except raw
+    /// capture. Under `#if DEBUG` the app passes `true` and never asks.
+    var webInspector: Bool
 
     init(binaryPathOverride: String? = nil,
          rawFrameCapture: Bool = false,
          transcriptWatcherStopped: Bool = false,
-         isolatedSettingsForNewChannels: Bool = false) {
+         isolatedSettingsForNewChannels: Bool = false,
+         webInspector: Bool = false) {
         self.binaryPathOverride = binaryPathOverride
         self.rawFrameCapture = rawFrameCapture
         self.transcriptWatcherStopped = transcriptWatcherStopped
         self.isolatedSettingsForNewChannels = isolatedSettingsForNewChannels
+        self.webInspector = webInspector
+    }
+
+    /// **Every field is `decodeIfPresent`, and that is what this initialiser exists for.**
+    ///
+    /// The synthesised `Decodable` requires every non-optional field to be present, so adding one
+    /// makes every document an earlier build wrote fail to decode — and `AfleetSettingsStore.read`
+    /// answers a decode failure with the defaults. Adding `webInspector` under the synthesised
+    /// coder would therefore have reset the user's binary override, capture switch and watcher
+    /// switch on the first launch of the new build, silently. Written this way a missing field is
+    /// that field's default and the rest of the document survives, and the next field added costs
+    /// one more line rather than another silent reset.
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        binaryPathOverride = try container.decodeIfPresent(String.self, forKey: .binaryPathOverride)
+        rawFrameCapture = try container.decodeIfPresent(Bool.self, forKey: .rawFrameCapture) ?? false
+        transcriptWatcherStopped = try container.decodeIfPresent(Bool.self, forKey: .transcriptWatcherStopped) ?? false
+        isolatedSettingsForNewChannels = try container
+            .decodeIfPresent(Bool.self, forKey: .isolatedSettingsForNewChannels) ?? false
+        webInspector = try container.decodeIfPresent(Bool.self, forKey: .webInspector) ?? false
     }
 
     /// The override as a URL, or nil when it is unset or blank.

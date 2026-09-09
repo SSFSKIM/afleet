@@ -34,9 +34,16 @@ public final class TerminalPanelTab: PanelTab {
     /// W6 document: `restoreOnce()` is idempotent, so this is the first render and no other. A
     /// session made by the pane runner for a channel no window was showing has had no render
     /// before this one, which is why the restore is asked for here and not at construction.
-    public func makeView(session: any PanelTabSession, context: ChannelContext) -> AnyView {
+    ///
+    /// `surface` says which window is asking (X7, amended at C7.6's merge). It reaches the pane's
+    /// view because the two windows over one popped-out tab draw the **same** session and the same
+    /// pane: the claim that decides which of them holds the surface is keyed by the host that
+    /// registered it, and giving each surface its own subtree identity is what stops SwiftUI
+    /// handing one window's host state to the other's (spec Design §8).
+    public func makeView(session: any PanelTabSession, context: ChannelContext,
+                         surface: PanelSurface) -> AnyView {
         guard let session = session as? TerminalPanelSession else { return AnyView(EmptyView()) }
         session.restoreOnce()
-        return AnyView(TerminalPanelView(session: session))
+        return AnyView(TerminalPanelView(session: session, surface: surface).id(surface))
     }
 }

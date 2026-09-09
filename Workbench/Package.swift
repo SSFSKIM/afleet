@@ -99,11 +99,48 @@ let package = Package(
         // MARK: - end of C7.4
 
         // MARK: - C7.5 files panel (owner: C7.5)
-        .target(name: "FilesPanel", dependencies: ["EditorCore", "LinkRouting", "PanelHostAPI", fleet], swiftSettings: v6),
+        // `SourceControlCore` and `core` are required, not decorative. The `.diff` target this leaf
+        // registers on `LinkRouter` renders a pair of whole texts, and W7 makes every `git`
+        // invocation and every parser C7.3's — `GitDiff.blob` and `GitDiff.workingTreeFile` exist,
+        // by C7.3's own account, "because the Monaco bridge takes two texts rather than a patch",
+        // which is this use. A second git reader inside this target is what W7 forbids. `core` is
+        // the member-import-visibility reason C5 recorded for `PanelHostAPITests` and C7.2 for
+        // `LinkRoutingTests`: neither `LinkRouting` nor `PanelHostAPI` re-exports AfleetCore, so a
+        // target naming a `WorkspaceLink` or a `DiffRef` must depend on the module defining them.
+        // W1's row predates both and is amended at C7.5's gate (composite, 2026-09-09).
+        .target(name: "FilesPanel",
+                dependencies: [core, "EditorCore", "SourceControlCore", "LinkRouting", "PanelHostAPI", fleet],
+                swiftSettings: v6),
+        // W1: "every panel target gets one [test target] when a panel leaf lands". The dependencies
+        // past `FilesPanel` are the ones the tests name types from directly — `EditorCommand` and
+        // `EditorResources` from EditorCore, `LinkRouter` from LinkRouting, `LinkTarget` and
+        // `ChannelContext` from PanelHostAPI, `ToolRunner` from SourceControlCore, `WorkspaceLink`
+        // from AfleetCore, the store from FleetKit — under that same visibility rule.
+        .testTarget(name: "FilesPanelTests",
+                    dependencies: ["FilesPanel", "EditorCore", "SourceControlCore", "LinkRouting",
+                                   "PanelHostAPI", core, fleet],
+                    swiftSettings: v6),
         // MARK: - end of C7.5
 
         // MARK: - C7.6 browser panel (owner: C7.6)
-        .target(name: "BrowserPanel", dependencies: ["LinkRouting", "PanelHostAPI", fleet], swiftSettings: v6),
+        // `SourceControlCore` and `core` are required, not decorative. `WorkspaceLink.pullRequest`
+        // carries an integer and nothing else, and turning it into a page needs the repository —
+        // which only `SourceControlCore` knows. The panel runs `gh pr view <n> --json url` through
+        // that module's `ToolRunner` (X11: the user's own binary, resolved through the captured
+        // PATH) rather than parsing remotes by hand or standing up a second process runner.
+        // W1's table row predates that seam and is amended at this leaf's merge; X1 forbids only
+        // ClaudeWire, and the edge is acyclic (SourceControlCore depends on AfleetCore alone).
+        // `core` because `LinkTarget`'s handler names `WorkspaceLink`, and BrowserPanel does not
+        // re-export the module that defines it.
+        .target(name: "BrowserPanel",
+                dependencies: ["LinkRouting", "PanelHostAPI", "SourceControlCore", core, fleet],
+                swiftSettings: v6),
+        // `PanelHostAPI`, `core` and `fleet` for the member-import-visibility reason C5 recorded
+        // for PanelHostAPITests: BrowserPanel re-exports none of them, so a test constructing a
+        // `WorkspaceLink`, a `LinkTarget` or a `SeenURL` must import the module that defines it.
+        .testTarget(name: "BrowserPanelTests",
+                    dependencies: ["BrowserPanel", "LinkRouting", "PanelHostAPI", "SourceControlCore", core, fleet],
+                    swiftSettings: v6),
         // MARK: - end of C7.6
 
         // MARK: - C7.7 source control panel (owner: C7.7)

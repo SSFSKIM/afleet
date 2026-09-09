@@ -21,7 +21,8 @@ import SwiftUI
 
     func makeSession(for context: ChannelContext) -> any PanelTabSession { ConsumerTabSession() }
 
-    func makeView(session: any PanelTabSession, context: ChannelContext) -> AnyView {
+    func makeView(session: any PanelTabSession, context: ChannelContext,
+                  surface: PanelSurface) -> AnyView {
         (session as? ConsumerTabSession)?.visitCount += 1
         return AnyView(Text(verbatim: title))
     }

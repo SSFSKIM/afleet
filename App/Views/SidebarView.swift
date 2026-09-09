@@ -104,10 +104,10 @@ struct SidebarView: View {
                                adopt: { Task { await browser.adopt(job) } },
                                attach: { Task { await Self.openJobPane(job, verb: .attach,
                                                                        browser: browser,
-                                                                       panels: shell.panels) } },
+                                                                       shell: shell) } },
                                logs: { Task { await Self.openJobPane(job, verb: .logs,
                                                                      browser: browser,
-                                                                     panels: shell.panels) } },
+                                                                     shell: shell) } },
                                stop: { Task { await browser.stop(job) } })
                 }
             }
@@ -134,12 +134,20 @@ struct SidebarView: View {
     /// evicts one — so a job in a channel no window has shown, or has stopped showing, would be
     /// refused for want of a directory the caller is holding. This is the caller, so it names that
     /// too. With no directory to name, the host's refusal stands exactly as it did.
+    /// **And naming a channel means showing it** (ruled 2026-09-09; tracker 384). A row acts on the
+    /// channel that row is about, so the window goes there: without this the host selected the
+    /// Terminal tab while the panel column went on deriving its channel from `shell.focus`, and
+    /// *Attach* started a pane in a channel nobody was looking at. Item 15 says *Attach* shows the
+    /// job's screen, and an invisible pane is not that. The selection happens **before** X5 is
+    /// asked, so the window is already on the channel when the client's first bytes arrive.
     static func openJobPane(_ job: JobEntry, verb: JobPaneVerb,
-                            browser: FleetBrowserModel, panels: PanelHostModel) async {
+                            browser: FleetBrowserModel, shell: ShellModel) async {
+        let panels = shell.panels
         guard let channel = browser.paneChannel(for: job, inView: panels.selectedChannel) else { return }
         if panels.context(for: channel) == nil, let cwd = browser.paneCWD(for: job, in: channel) {
             _ = panels.context(for: channel, cwd: cwd)
         }
+        shell.select(channel.session)
         let request: PaneRequest?
         switch verb {
         case .attach: request = await browser.attach(job)

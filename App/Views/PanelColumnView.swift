@@ -86,7 +86,7 @@ private struct PanelTabColumn: View {
             tabBar
             Divider()
             if available.contains(shell.panelTab) {
-                host.view(for: shell.panelTab, context: context)
+                host.view(for: shell.panelTab, context: context, surface: .panel)
             } else {
                 PlaceholderColumn(title: shell.panelTab.defaultTitle,
                                   detail: "This tab is not available for this channel.")

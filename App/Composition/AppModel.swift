@@ -11,7 +11,7 @@ import Workbench
 /// call as the first launch, and what lets the whole sequence be tested without a window.
 @MainActor
 @Observable
-final class AppModel {
+final class AppModel: FilesTabHost {
     private(set) var route: AppRoute = .launching
 
     /// The sequence, with its seams. Production values by default; a test replaces the ones it
@@ -101,6 +101,24 @@ final class AppModel {
     /// its pane in another, so the pane would exist and no window would ever draw it. It is held
     /// here rather than inside either owner because neither of them can be the one that owns it.
     let terminalSessions = TerminalSessionRegistry()
+    /// C7.6's Browser tab, and through it the one window-wide `BrowserModel` (spec §9.4, Q5).
+    ///
+    /// **One instance, app-scoped**, like the three owners above it: the tab set is shared across
+    /// channels and across the main and popped-out windows, and a second `BrowserTab` would be a
+    /// second set of web views for the same pages.
+    let browserTab: BrowserTab
+
+    /// Where the Browser's tab-set document goes. Bound to the workspace a launch reached, because
+    /// the tab is registered before any launch has run.
+    private let browserStore: DeferredWorkbenchStore
+
+    /// Q15's inspection policy, mirrored out of the settings document by each launch.
+    private let webInspector: WebInspectorSwitch
+
+    /// Whether the Browser's two link targets are in the registry. `launch()` runs again on *Check
+    /// again*, and a second pass that registered them again would leave two indistinguishable
+    /// targets per link kind, tying on specificity.
+    private var browserLinkTargetsRegistered = false
 
     /// The per-channel composers (spec §8.5), one `ComposerModel` and one shared
     /// `ChannelSurfaceState` per channel.
@@ -146,6 +164,11 @@ final class AppModel {
         self.panels = panels
         self.shell = ShellModel(panels: panels)
         self.sequence = sequence
+        let browserStore = DeferredWorkbenchStore()
+        let webInspector = WebInspectorSwitch()
+        self.browserStore = browserStore
+        self.webInspector = webInspector
+        self.browserTab = BrowserWiring.makeTab(store: browserStore, inspector: webInspector)
         self.coordinatorFactory = coordinatorFactory ?? { [timelines, composers] workspace in
             FleetCoordinator(workspace: workspace, panels: panels, timelines: timelines, composers: composers)
         }
@@ -161,13 +184,23 @@ final class AppModel {
         // id, both over `terminalSessions` — see that property for why the two share one registry.
         // Registration is what makes `PanelHost.run(_:for:)` reach a runner at all; without it
         // every X5 pane request answers `noPaneRunner` and no gate can run.
+        // C7.5's Files tab under `.files`, which nothing holds, so it is a plain registration and
+        // not a handover (C7.5 Design §10). Asserted for the same reason: a shipped tab that
+        // vanished from the tab bar with no signal is the thing this must not do quietly.
+        //
+        // Its two link targets are registered **with the tab**, not with its first session: the
+        // host builds a session lazily, for rendering, so a `.file` or `.diff` link raised before
+        // anyone has looked at Files would otherwise resolve to nothing (C7.5 Design §9).
+        // Spawned, because registration is a hop onto the link registry's actor and this is not.
+        let files = FilesTab(host: self)
         do {
             try panels.register(PlaceholderTab())
             try panels.register(TerminalPanelTab(registry: terminalSessions))
             panels.registerPaneRunner(TerminalPaneRunner(registry: terminalSessions), for: .terminal)
             panels.select(.thread)
+            try panels.register(files)
         } catch {
-            assertionFailure("these are the first registrations on a freshly built host")
+            assertionFailure("the shipped tabs are the first registrations on a freshly built host")
         }
         // Contract Y1: this child's two kinds, claimed on the app's one registry. Here rather than
         // in `performLaunch` because registration is synchronous and needs nothing a launch
@@ -183,6 +216,127 @@ final class AppModel {
             RowRegistry.shared.register(kind: .decision) { AnyView(DecisionRowView(row: $0)) }
             RowRegistry.shared.register(kind: .sentFile) { AnyView(SentFileRowView(row: $0)) }
         }
+        Task { await files.registerLinkTargets(through: panels.links) }
+        // C7.6's Browser tab, under `.browser`, registered once (Q4). Not `try?` for the reason
+        // above it: nothing else can hold `.browser` on a host built two lines ago, and a Browser
+        // that vanished silently would leave every `.url` link falling through to W5's fallback and
+        // opening in the system browser with no sign that a panel was meant to have it.
+        //
+        // **The tab is registered here and its two link targets are not**, which is the one place
+        // this milestone had to choose. `PanelHost.register` is X7's synchronous member and
+        // `LinkRouterCapability.register` is `async` — the registry is an actor — so the pair
+        // cannot both happen in an initialiser. A detached `Task` would leave the window of exactly
+        // the shape the targets exist to close: a link arriving before its target reaches W5's
+        // fallback and leaves the app. So target registration is awaited at the top of
+        // `performLaunch` instead, which is strictly earlier than the first link that can exist:
+        // a `WorkspaceLink` is opened through a `ChannelContext`, and no context exists until
+        // `bindWorkspace`, later in that same call.
+        do {
+            try panels.register(browserTab)
+        } catch {
+            assertionFailure("the Browser is registered on a freshly built host and nothing else holds .browser")
+        }
+    }
+
+    /// Registers the Browser's `.url` and `.pullRequest` targets on the app's one link registry
+    /// (Q4, D41), once for the life of the process.
+    func registerBrowserLinkTargets() async {
+        guard !browserLinkTargetsRegistered else { return }
+        browserLinkTargetsRegistered = true
+        for target in BrowserWiring.makeLinkTargets(model: browserTab.model, panels: panels) {
+            await panels.links.register(target)
+        }
+    }
+
+    // MARK: - The Files panel's link deliveries (C7.5 spec Design §9)
+
+    /// What a delivered `.file` or `.diff` opens in: the Files session for the channel the
+    /// delivery belongs to, built if this is that channel's first visit.
+    ///
+    /// **It creates where `filesSaveTarget` refuses to**, and the difference is what asked. A menu
+    /// item computing its own enabled state must not bring a panel into being; a link the user
+    /// clicked is an instruction to open something now, and the channel it belongs to may never
+    /// have shown Files.
+    ///
+    /// **The channel is the host's, not the render path's.** `PanelColumnView` draws only the
+    /// selected tab, so moving channels with Thread up renders no Files view, and a pop-out draws
+    /// one for a channel of its own; resolving through the last render would send the delivery to
+    /// whichever channel was drawn last. This is the Y-side of tracker 240's mitigation, and it is
+    /// still only a mitigation — a link on behalf of a channel that is not on screen cannot say so
+    /// until X7 carries the originating channel.
+    func filesSession(for destination: LinkDestination) -> FilesPanelSession? {
+        guard let key = channel(for: destination),
+              let context = panels.context(for: key) else { return nil }
+        return panels.session(for: .files, context: context) as? FilesPanelSession
+    }
+
+    /// Which channel a delivery belongs to.
+    ///
+    /// `.currentPanel` is the channel the main window is showing. `.newWindow` is the channel the
+    /// host popped a window out for immediately before this delivery — `HostLinkRouter` captured
+    /// it when the action was taken, precisely because the window may have moved on since, and
+    /// reading the selection here would undo that capture: the file would open in the channel the
+    /// window is on now while the window that was just opened renders the one the link came from.
+    /// A pop-out that has been closed since names nothing, and the current channel answers instead.
+    private func channel(for destination: LinkDestination) -> ChannelKey? {
+        guard destination == .newWindow,
+              let window = panels.lastPopOut, window.tab == .files,
+              panels.poppedOut.contains(window) else { return panels.selectedChannel }
+        return window.channel
+    }
+
+    /// Brings Files forward, so a routed file does not open in a panel nobody can see.
+    func selectFilesTab() { panels.select(.files) }
+
+    // MARK: - The Files panel's save (C7.5 spec Design §7)
+
+    /// The session Cmd+S reaches: the Files panel's, for the channel the **key window** is
+    /// showing — a popped-out Files window's own channel, or the main window's while Files is the
+    /// tab it has selected.
+    ///
+    /// **It resolves a session rather than creating one.** `session(for:context:)` builds one for
+    /// any context handed to it, and a menu item computing its own enabled state must not bring a
+    /// panel into being as a side effect. The guards below are what prevent it: `selected == .files`
+    /// means the panel column is already rendering Files for `selectedChannel` and membership of
+    /// `poppedOut` means a window is rendering it for its own channel, so in both cases the host
+    /// already holds that session — and a channel the host has never rendered has no context to
+    /// ask with.
+    func filesSaveTarget(inFocused window: PoppedOutPanel?) -> FilesPanelSession? {
+        guard let key = saveChannel(inFocused: window),
+              let context = panels.context(for: key) else { return nil }
+        return panels.session(for: .files, context: context) as? FilesPanelSession
+    }
+
+    /// Whose Files panel Cmd+S is aimed at.
+    ///
+    /// A popped-out window keeps a channel of its own and never touches the main window's
+    /// selection, so a menu item resolved from that selection alone saves whichever channel the
+    /// main window happens to show while the user is typing into a window in front of them — or
+    /// offers nothing at all. The key window decides: a popped-out Files panel names its own
+    /// channel, any other pop-out names none, and the main window's rule below is what answers
+    /// when it is the key window.
+    ///
+    /// A window closed since is not a target: `poppedOut` is the membership its own scene reads,
+    /// and one that has left it draws the missing-channel placeholder.
+    private func saveChannel(inFocused window: PoppedOutPanel?) -> ChannelKey? {
+        guard let window else {
+            guard panels.selected == .files else { return nil }
+            return panels.selectedChannel
+        }
+        guard window.tab == .files, panels.poppedOut.contains(window) else { return nil }
+        return window.channel
+    }
+
+    /// Whether the *Save* item has anything to do. The panel's own header button is disabled on
+    /// the same fact, so the key and the button agree.
+    func canSaveFiles(inFocused window: PoppedOutPanel?) -> Bool {
+        filesSaveTarget(inFocused: window)?.selected?.isDirty ?? false
+    }
+
+    /// Cmd+S. W4's editor vocabulary is closed, so Monaco cannot report the key press: the host
+    /// sends `save` and writes the `saveRequested` that comes back (C7.5 Design §7).
+    func saveFilesPanel(inFocused window: PoppedOutPanel?) {
+        filesSaveTarget(inFocused: window)?.save()
     }
 
     /// Whether this process has already claimed Y1's two kinds. `@MainActor` on the type isolates
@@ -207,6 +361,10 @@ final class AppModel {
         // `FleetCoordinator.release` would have to reach this registry, and that seam is filed as
         // tech debt rather than opened in a fix wave.
         terminalSessions.release()
+        // The Browser's tab-set document (W6's `browser` key in the `workbench` namespace). It is
+        // bound here rather than at construction because the tab is registered before any launch
+        // has run, and this is the call that also builds the first `ChannelContext`.
+        browserStore.bind(workspace.store)
         timelines.attach(to: workspace, lifecycle: lifecycle)
         panels.attach(to: workspace, timelines: timelines, lifecycle: lifecycle)
         composers.attach(to: workspace,
@@ -237,6 +395,9 @@ final class AppModel {
     }
 
     private func performLaunch() async {
+        // Before anything else, and before any `ChannelContext` exists: a link opened with no
+        // Browser target registered falls through to W5's fallback and leaves the app.
+        await registerBrowserLinkTargets()
         route = .launching
         launchStore = nil
         canResetBinaryOverride = false
@@ -245,6 +406,10 @@ final class AppModel {
         configured.settingsLoaded = { [weak self] store, settings in
             self?.launchStore = store
             self?.canResetBinaryOverride = settings.developer.binaryPathOverride != nil
+            // Q15: mirrored for the panel's web-view factory, which reads it synchronously at every
+            // `makeWebView` and cannot await the store. Release builds ask it; Debug builds are
+            // inspectable regardless and never do.
+            self?.webInspector.isOn = settings.developer.webInspector
         }
         let factory = coordinatorFactory
         configured.makeCoordinator = { [weak self] workspace in

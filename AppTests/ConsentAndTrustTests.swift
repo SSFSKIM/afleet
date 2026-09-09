@@ -769,7 +769,8 @@ private final class ConsentPanelHost: PanelHost {
     func selectIndex(_ index: Int, in context: ChannelContext) { unreachable("selectIndex") }
     func popOut(_ id: PanelTabID, channel: ChannelKey) { unreachable("popOut") }
     func session(for id: PanelTabID, context: ChannelContext) -> any PanelTabSession { unreachable("session") }
-    func view(for id: PanelTabID, context: ChannelContext) -> AnyView { unreachable("view") }
+    func view(for id: PanelTabID, context: ChannelContext,
+              surface: PanelSurface) -> AnyView { unreachable("view") }
 
     private nonisolated func unreachable(_ member: String) -> Never {
         fatalError("ConsentPanelHost.\(member) is not part of the consent and trust surface")

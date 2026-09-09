@@ -1,5 +1,14 @@
 // TerminalPanel: owned by C7.4 (docs/doperpowers/specs/2026-09-09-c7.4-terminal-panel.md).
+import PanelHostAPI
 import SwiftUI
+
+/// One drawn pane, identified by the pane **and** the window drawing it: the same pane is drawn
+/// by the main panel and by a popped-out window, and one identity for both would have SwiftUI
+/// hand one window's host state to the other.
+private struct PaneSubtree: Hashable {
+    let pane: ObjectIdentifier
+    let surface: PanelSurface
+}
 
 /// The Terminal tab's whole view: the pane bar, the selected pane, and the question a live pane
 /// asks before it closes.
@@ -10,6 +19,9 @@ import SwiftUI
 struct TerminalPanelView: View {
 
     let session: TerminalPanelSession
+    /// Which window is drawing this. Carried so the pane's subtree is identified per surface as
+    /// well as per pane: one session is drawn by both windows when a tab is popped out.
+    let surface: PanelSurface
 
     var body: some View {
         VStack(spacing: 0) {
@@ -20,7 +32,7 @@ struct TerminalPanelView: View {
                 // pane's subtree — and its host's `@State` claim, which belongs to a stack the pane
                 // now on screen knows nothing about (spec Design §8).
                 PaneView(session: session, pane: pane)
-                    .id(ObjectIdentifier(pane))
+                    .id(PaneSubtree(pane: ObjectIdentifier(pane), surface: surface))
             } else {
                 noPanes
             }

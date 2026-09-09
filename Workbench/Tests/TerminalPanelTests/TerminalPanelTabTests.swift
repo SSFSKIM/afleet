@@ -87,14 +87,14 @@ final class TerminalPanelTabTests: XCTestCase {
         )
         let session = try hold(tab.makeSession(for: fixture.context))
 
-        _ = tab.makeView(session: session, context: fixture.context)
+        _ = tab.makeView(session: session, context: fixture.context, surface: .panel)
         await session.settleRestore()
 
         // Two panes and not zero: removing the restore call from the tab leaves the document
         // unread, which is the gap T3 left and this test closes.
         XCTAssertEqual(session.panes.count, 2, "panes=\(session.panes.count)")
 
-        _ = tab.makeView(session: session, context: fixture.context)
+        _ = tab.makeView(session: session, context: fixture.context, surface: .panel)
         await session.settleRestore()
 
         // Two and not four: a re-render is not a second restore.
@@ -106,7 +106,7 @@ final class TerminalPanelTabTests: XCTestCase {
         let tab = TerminalPanelTab(registry: TerminalSessionRegistry())
         let session = try hold(tab.makeSession(for: fixture.context))
 
-        _ = tab.makeView(session: session, context: fixture.context)
+        _ = tab.makeView(session: session, context: fixture.context, surface: .panel)
         await session.settleRestore()
 
         XCTAssertEqual(session.panes.count, 1, "panes=\(session.panes.count)")

@@ -50,7 +50,10 @@ public enum PanelHostError: Error, Hashable, Sendable {
     /// panes and editors survive switching away and back (C7's acceptance). The host also gives
     /// each (tab, channel) a stable SwiftUI identity so the subtree is not rebuilt from scratch.
     func session(for id: PanelTabID, context: ChannelContext) -> any PanelTabSession
-    func view(for id: PanelTabID, context: ChannelContext) -> AnyView
+    /// `surface` is passed by whichever of the two window surfaces is asking, and reaches the
+    /// tab's `makeView`. There is no default: a caller that could omit it is a caller that can
+    /// silently claim to be the main panel from inside a popped-out window.
+    func view(for id: PanelTabID, context: ChannelContext, surface: PanelSurface) -> AnyView
     /// X5's pane request, delivered to the registered runner unchanged, `id` included, in the
     /// context of the channel **the caller names**.
     ///

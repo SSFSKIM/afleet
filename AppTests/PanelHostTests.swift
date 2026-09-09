@@ -25,7 +25,10 @@ final class PanelHostTests: XCTestCase {
     /// Reading host.selected alone would miss the original shell/host split entirely.
     func testProtocolSelectionUpdatesTheRenderedSelection() async throws {
         let app = AppModel()
-        try app.panels.register(StubPanelTab(.files))
+        // An id the app does **not** ship. It registers Thread, Files, Terminal and Browser in
+        // `init`, so a stub taking any of those is a duplicate; this test is about selection and
+        // any unshipped id proves it. `.sourceControl` is the free one until C7.7 lands.
+        try app.panels.register(StubPanelTab(.sourceControl))
         let changed = expectation(description: "rendered selection invalidated")
         withObservationTracking {
             _ = app.shell.panelTab
@@ -33,10 +36,10 @@ final class PanelHostTests: XCTestCase {
             changed.fulfill()
         }
         let host: any PanelHost = app.panels
-        host.select(.files)
+        host.select(.sourceControl)
         let result = await XCTWaiter.fulfillment(of: [changed], timeout: 1)
         XCTAssertEqual(result, .completed, "protocol selection did not invalidate the rendered tab")
-        XCTAssertEqual(app.shell.panelTab, .files, "window still renders the old selection")
+        XCTAssertEqual(app.shell.panelTab, .sourceControl, "window still renders the old selection")
 
         // Tab-bar writes use the same owner, and a refused id cannot split the two views.
         app.shell.panelTab = .thread
@@ -477,11 +480,12 @@ final class PanelHostTests: XCTestCase {
         let app = AppModel()
         app.bindWorkspace(rig.workspace, lifecycle: rig.lifecycle)
         let counter = SessionCounter()
-        try app.panels.register(StubPanelTab(.files, counter: counter))
+        // An unshipped id, for the reason the selection test above records.
+        try app.panels.register(StubPanelTab(.sourceControl, counter: counter))
         let key = rig.keys[0]
         _ = app.panels.context(for: key, cwd: PanelFixtures.cwd)
-        app.panels.popOut(.files, channel: key)
-        let panel = PoppedOutPanel(tab: .files, channel: key)
+        app.panels.popOut(.sourceControl, channel: key)
+        let panel = PoppedOutPanel(tab: .sourceControl, channel: key)
         let scene = PoppedOutPanelScene(app: app, panel: panel)
         let coordinator = try XCTUnwrap(app.coordinatorFactory(rig.workspace) as? FleetCoordinator)
         defer { coordinator.stop() }
@@ -616,6 +620,44 @@ final class PanelHostTests: XCTestCase {
         XCTAssertEqual(host.poppedOut.first?.tab, .files, "the wrong tab was popped out")
         XCTAssertEqual(recorder.poppedOutAtDelivery, 1,
                        "\(recorder.poppedOutAtDelivery) pop-outs were recorded when the target ran, not 1")
+    }
+
+    /// A target that declines the pop-out receives `.newWindow` and gets no window.
+    ///
+    /// X7's `popsOutForNewWindow`, ruled at C7.6's gate (2026-09-09). The Browser answers
+    /// `.newWindow` with the *system* browser, so a host that popped its tab out anyway would
+    /// present two windows for one Cmd-click — an afleet one and Safari's. Both halves are in one
+    /// test and asserted against the host's own pop-out registry, so "no pop-out happened" is a
+    /// statement about the host rather than about which branch the source took: the declining
+    /// target is delivered to and the default one still pops out, and the registry holds exactly
+    /// the second.
+    func testATargetThatDeclinesThePopOutDoesNotGetOneAndADefaultTargetStillDoes() async throws {
+        let host = PanelHostModel()
+        try host.register(StubPanelTab(.browser))
+        try host.register(StubPanelTab(.files))
+        let channel = PanelFixtures.key(0)
+        _ = host.context(for: channel, cwd: PanelFixtures.cwd)
+        host.focusChannel(channel)
+        let recorder = LinkRecorder()
+        host.presentWindow = { _ in recorder.note("window") }
+        await host.links.register(PanelFixtures.decliningURLTarget(.browser, specificity: 5,
+                                                                   into: recorder, note: "browser"))
+        await host.links.register(PanelFixtures.fileTarget(.files, specificity: 5, host: host,
+                                                           into: recorder, note: "files"))
+
+        await host.links.open(.url(PanelFixtures.url(1)), from: .newWindow)
+
+        XCTAssertEqual(recorder.destinations, [.newWindow],
+                       "the declining target received \(recorder.destinations) rather than .newWindow")
+        XCTAssertEqual(recorder.notes, ["browser"],
+                       "the recorded order was \(recorder.notes)")
+        XCTAssertEqual(host.poppedOut.count, 0,
+                       "the host recorded \(host.poppedOut.count) pop-outs for a target that declined one")
+
+        await host.links.open(PanelFixtures.fileLink, from: .newWindow)
+
+        XCTAssertEqual(host.poppedOut.map(\.tab), [.files],
+                       "the host popped out \(host.poppedOut.map(\.tab)) rather than the default target's tab")
     }
 
     /// The handler receives the destination for both cases.
@@ -1139,9 +1181,11 @@ final class PanelHostTests: XCTestCase {
         let app = AppModel()
         app.bindWorkspace(rig.workspace, lifecycle: rig.lifecycle)
         let counter = SessionCounter()
-        try app.panels.register(StubPanelTab(.files, counter: counter))
+        // An id the app does not ship: it registers Thread, Files, Terminal and Browser in `init`,
+        // and this test is about which host the coordinator holds, not about which tab it is.
+        try app.panels.register(StubPanelTab(.sourceControl, counter: counter))
         let key = rig.keys[0]
-        _ = app.panels.session(for: .files, context: PanelFixtures.context(key))
+        _ = app.panels.session(for: .sourceControl, context: PanelFixtures.context(key))
         XCTAssertEqual(app.panels.liveChannelCount, 1,
                        "the host holds \(app.panels.liveChannelCount) channels, not 1")
 
@@ -1220,7 +1264,8 @@ private final class StubPanelTab: PanelTab {
         return CountedSession(counter: counter)
     }
 
-    func makeView(session: any PanelTabSession, context: ChannelContext) -> AnyView {
+    func makeView(session: any PanelTabSession, context: ChannelContext,
+                  surface: PanelSurface) -> AnyView {
         AnyView(SessionHoldingPanel(session: session))
     }
 }
@@ -1313,7 +1358,7 @@ private final class URLBox: @unchecked Sendable {
 
 /// Every identifier these tests use. Invented throughout: a session is a hex-formatted index, a
 /// config home is a fixed invented path, a URL is under `invented.example` (§11).
-private enum PanelFixtures {
+enum PanelFixtures {
 
     static let configHome = URL(fileURLWithPath: "/invented/config-home")
     /// Read from the rig, which now lives in `Support/PanelRig.swift` and is shared with C7.4's
@@ -1352,13 +1397,26 @@ private enum PanelFixtures {
     /// that existed at the moment of delivery — which is the ordering the `.newWindow` rule is
     /// about, and a constant here would make that assertion unable to fail.
     @MainActor
-    static func fileTarget(_ tab: PanelTabID, specificity: Int, host: PanelHostModel? = nil,
-                           into recorder: LinkRecorder, note: String? = nil) -> LinkTarget {
+    fileprivate static func fileTarget(_ tab: PanelTabID, specificity: Int, host: PanelHostModel? = nil,
+                                       into recorder: LinkRecorder, note: String? = nil) -> LinkTarget {
         LinkTarget(tab: tab, specificity: specificity,
                    handles: { link in if case .file = link { true } else { false } },
                    open: { link, destination in
                        recorder.delivered(tab: tab, link: link, destination: destination,
                                           poppedOut: host?.poppedOut.count ?? 0, note: note)
+                   })
+    }
+
+    /// A target for `.url` links that declines the pop-out, the shape C7.6's Browser registers:
+    /// its `.newWindow` is the *system* browser, so there is no afleet window for it to render in.
+    @MainActor
+    fileprivate static func decliningURLTarget(_ tab: PanelTabID, specificity: Int,
+                                   into recorder: LinkRecorder, note: String? = nil) -> LinkTarget {
+        LinkTarget(tab: tab, specificity: specificity, popsOutForNewWindow: false,
+                   handles: { link in if case .url = link { true } else { false } },
+                   open: { link, destination in
+                       recorder.delivered(tab: tab, link: link, destination: destination,
+                                          poppedOut: 0, note: note)
                    })
     }
 

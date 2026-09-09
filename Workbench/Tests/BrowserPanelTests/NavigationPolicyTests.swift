@@ -1,0 +1,279 @@
+import Foundation
+import XCTest
+@testable import BrowserPanel
+
+/// C7.6 milestone 2, second half: the ledger's Q10 scheme table and Q11's gestures.
+///
+/// The policy is a pure function over value types this module owns, not over `WKNavigationAction`,
+/// for the reason grounding probe 3 measured: a synthesised DOM click carries no modifier flags and
+/// never reaches `decidePolicyFor` as `.linkActivated`, so a test driven through WebKit would be a
+/// test that cannot fail. The delegate is the adapter; this is the decision.
+final class NavigationPolicyTests: XCTestCase {
+
+    private static let page = URL(string: "https://example.invalid/page")!
+    private static let insecurePage = URL(string: "http://127.0.0.1:8123/listing/")!
+    private static let mail = URL(string: "mailto:someone@example.invalid")!
+    private static let localFile = URL(string: "file:///invented/notes.txt")!
+
+    /// The shape of an ordinary link click on a page that is already showing.
+    private func click(_ url: URL,
+                       modifiers: BrowserModifierFlags = [],
+                       hasTargetFrame: Bool = true) -> NavigationRequest {
+        NavigationRequest(url: url,
+                          navigationType: .linkActivated,
+                          modifierFlags: modifiers,
+                          hasTargetFrame: hasTargetFrame,
+                          origin: .pageContent)
+    }
+
+    /// The shape of a load the page gave itself: a redirect, a `location =`, a meta refresh. It
+    /// differs from `click` only in what WebKit *called* it, which since D38 authorises nothing.
+    private func scriptInitiated(_ url: URL, hasTargetFrame: Bool = true) -> NavigationRequest {
+        NavigationRequest(url: url,
+                          navigationType: .other,
+                          modifierFlags: [],
+                          hasTargetFrame: hasTargetFrame,
+                          origin: .pageContent)
+    }
+
+    // MARK: Q10 — which schemes load
+
+    func testHTTPAndHTTPSAndAboutBlankLoadInThePanel() {
+        XCTAssertEqual(NavigationPolicy.decide(click(Self.page)), .allow)
+        XCTAssertEqual(NavigationPolicy.decide(click(Self.insecurePage)), .allow)
+        XCTAssertEqual(NavigationPolicy.decide(click(URL(string: "about:blank")!)), .allow)
+    }
+
+    func testAnAboutURLOtherThanBlankDoesNotLoad() {
+        XCTAssertEqual(NavigationPolicy.decide(click(URL(string: "about:srcdoc")!)),
+                       .refuse(.unsupportedURL))
+    }
+
+    /// Q10: reading the user's disk is the Files tab's job, with Files' viewers and Files' rules.
+    func testAFileURLIsRefusedAndPointsAtTheFilesTab() {
+        XCTAssertEqual(NavigationPolicy.decide(click(Self.localFile)), .refuse(.localFile))
+        XCTAssertEqual(NavigationPolicy.decide(scriptInitiated(Self.localFile)), .refuse(.localFile))
+        XCTAssertEqual(NavigationPolicy.Reason.localFile.isDiagnosticOnly, false,
+                       "the file case is shown to the user, not merely logged")
+    }
+
+    /// A page that navigated itself must not launch an application. D38 widened this from "a
+    /// redirect" to *everything a page can produce*; the whole surface is asserted below.
+    func testAnotherSchemeFromARedirectIsDropped() {
+        XCTAssertEqual(NavigationPolicy.decide(scriptInitiated(Self.mail)),
+                       .refuse(.externalSchemeFromPageContent("mailto")))
+        XCTAssertEqual(NavigationPolicy.Reason.externalSchemeFromPageContent("mailto").isDiagnosticOnly,
+                       true,
+                       "a page that navigated itself gets a diagnostic, not a notice")
+    }
+
+    func testAnotherSchemeFromAScriptInitiatedNewWindowIsAlsoDropped() {
+        let request = scriptInitiated(URL(string: "x-apple-something://open")!, hasTargetFrame: false)
+        XCTAssertEqual(NavigationPolicy.decide(request),
+                       .refuse(.externalSchemeFromPageContent("x-apple-something")),
+                       "a missing target frame must not become a way out of the panel")
+    }
+
+    func testAURLWithNoSchemeIsRefused() {
+        var request = click(Self.page)
+        request.url = URL(string: "//example.invalid/relative")!
+        XCTAssertEqual(NavigationPolicy.decide(request), .refuse(.unsupportedURL))
+    }
+
+    // MARK: D29 — the two schemes that are refused from every source
+
+    private static let script = URL(string: "javascript:alert(1)")!
+    private static let inlineDocument = URL(string: "data:text/html;base64,PGgxPmhpPC9oMT4=")!
+
+    /// Every way a URL can arrive, so the assertion below is over the whole surface and not one
+    /// branch of it: a click, a Cmd-click, a `_blank`, a redirect and the URL bar.
+    private func everySource(_ url: URL) -> [NavigationRequest] {
+        [click(url),
+         click(url, modifiers: .command),
+         click(url, hasTargetFrame: false),
+         scriptInitiated(url),
+         scriptInitiated(url, hasTargetFrame: false),
+         .urlBarEntry(url)]
+    }
+
+    /// D29. A `javascript:` URL loaded into a tab executes in that page's origin — the classic way
+    /// an address bar becomes a script injection — so it is refused before any gesture is read.
+    func testAJavascriptURLIsRefusedFromEverySource() {
+        for request in everySource(Self.script) {
+            XCTAssertEqual(NavigationPolicy.decide(request), .refuse(.executableOrInlineContent("javascript")),
+                           "a javascript: URL from \(request.navigationType) must never load")
+        }
+    }
+
+    /// D29. A `data:` URL renders attacker-controlled markup in an origin the user reads as the
+    /// panel's own.
+    func testADataURLIsRefusedFromEverySource() {
+        for request in everySource(Self.inlineDocument) {
+            XCTAssertEqual(NavigationPolicy.decide(request), .refuse(.executableOrInlineContent("data")),
+                           "a data: URL from \(request.navigationType) must never load")
+        }
+    }
+
+    /// The load-bearing half of D29: handing either scheme to `NSWorkspace.shared.open` is not
+    /// safety, only someone else's problem. Neither may ever come back as `.allow` or as
+    /// `.openExternally`, however user-initiated the gesture that carried it.
+    func testNeitherSchemeIsEverAllowedOrHandedToTheSystemOpener() {
+        for url in [Self.script, Self.inlineDocument] {
+            for request in everySource(url) {
+                switch NavigationPolicy.decide(request) {
+                case .refuse:
+                    continue
+                case .allow, .openExternally, .newPanelTab:
+                    XCTFail("\(url.scheme ?? "?") escaped the policy as a non-refusal")
+                }
+            }
+        }
+    }
+
+    /// The refusal is shown, not merely logged: the common source is the user's own URL bar, and a
+    /// bar that swallows what was typed without a word is a bar that looks broken.
+    func testTheRefusalIsShownToTheUser() {
+        XCTAssertEqual(NavigationPolicy.Reason.executableOrInlineContent("javascript").isDiagnosticOnly, false)
+    }
+
+    // MARK: Q11 — the gestures
+
+    func testCommandClickOnALinkGoesToTheExternalOpener() {
+        XCTAssertEqual(NavigationPolicy.decide(click(Self.page, modifiers: .command)),
+                       .openExternally(Self.page))
+    }
+
+    func testCommandClickLeavesTheAppEvenWhenTheLinkOpensANewWindow() {
+        XCTAssertEqual(NavigationPolicy.decide(click(Self.page, modifiers: .command, hasTargetFrame: false)),
+                       .openExternally(Self.page))
+    }
+
+    /// Q11: `.command` on anything that is not a link activation is an ordinary load. A page that
+    /// redirects itself while the user happens to hold Cmd has not asked for a browser.
+    func testCommandHeldDuringARedirectIsNotACommandClick() {
+        var request = scriptInitiated(Self.page)
+        request.modifierFlags = .command
+        XCTAssertEqual(NavigationPolicy.decide(request), .allow)
+    }
+
+    func testShiftAndOptionClickCarryNoSpecialMeaning() {
+        XCTAssertEqual(NavigationPolicy.decide(click(Self.page, modifiers: .shift)), .allow)
+        XCTAssertEqual(NavigationPolicy.decide(click(Self.page, modifiers: .option)), .allow)
+        XCTAssertEqual(NavigationPolicy.decide(click(Self.page, modifiers: [.shift, .option])), .allow)
+    }
+
+    /// `target="_blank"` and `window.open` — measured in grounding probe 3 as the half of Q11 that
+    /// does reach the delegate headlessly.
+    func testAMissingTargetFrameOpensANewPanelTab() {
+        XCTAssertEqual(NavigationPolicy.decide(click(Self.page, hasTargetFrame: false)),
+                       .newPanelTab(Self.page))
+        XCTAssertEqual(NavigationPolicy.decide(scriptInitiated(Self.page, hasTargetFrame: false)),
+                       .newPanelTab(Self.page),
+                       "window.open is ordinary browsing, not an escape from the panel")
+    }
+
+    func testAScriptInitiatedLoadInTheSameFrameIsAllowed() {
+        XCTAssertEqual(NavigationPolicy.decide(scriptInitiated(Self.page)), .allow)
+    }
+
+    func testBackForwardAndReloadAreAllowed() {
+        for type in [BrowserNavigationType.backForward, .reload, .formSubmitted, .formResubmitted] {
+            var request = click(Self.page)
+            request.navigationType = type
+            XCTAssertEqual(NavigationPolicy.decide(request), .allow, "\(type) must not be refused")
+        }
+    }
+
+    // MARK: The URL bar as the surviving authority (D38)
+
+    /// The URL bar is a native action page content cannot reach, so it — and only it — may hand a
+    /// non-web scheme to the system.
+    func testAURLBarEntryIsTheOneOriginThatOpensANonWebScheme() {
+        let typed = NavigationRequest.urlBarEntry(Self.mail)
+        XCTAssertEqual(typed.origin, .urlBar)
+        XCTAssertEqual(NavigationPolicy.decide(typed), .openExternally(Self.mail))
+        XCTAssertEqual(NavigationPolicy.decide(.urlBarEntry(Self.page)), .allow)
+    }
+
+    // MARK: D38 — the navigation type authorises nothing
+
+    /// One request per way WebKit can classify something a page did. None of them is evidence that
+    /// a person was involved: a script calls `requestSubmit()` and WebKit reports `.formSubmitted`;
+    /// a server redirect reuses the action that triggered it, so `.linkActivated` can arrive at a
+    /// URL nobody ever saw.
+    private func everyPageContentShape(_ url: URL) -> [NavigationRequest] {
+        var shapes: [NavigationRequest] = []
+        for type in [BrowserNavigationType.linkActivated, .formSubmitted, .formResubmitted,
+                     .backForward, .reload, .other] {
+            for frame in [true, false] {
+                for modifiers in [BrowserModifierFlags(), .command, .shift] {
+                    shapes.append(NavigationRequest(url: url,
+                                                    navigationType: type,
+                                                    modifierFlags: modifiers,
+                                                    hasTargetFrame: frame,
+                                                    origin: .pageContent))
+                }
+            }
+        }
+        return shapes
+    }
+
+    /// The whole of F1, as one assertion: nothing a page can produce opens a non-web scheme.
+    func testNoPageContentNavigationOpensANonWebSchemeExternally() {
+        for url in [Self.mail, URL(string: "x-apple-something://open")!] {
+            for request in everyPageContentShape(url) {
+                XCTAssertEqual(NavigationPolicy.decide(request),
+                               .refuse(.externalSchemeFromPageContent(url.scheme!)),
+                               "\(url.scheme!) from \(request.navigationType) must not reach the system")
+            }
+        }
+    }
+
+    /// The named shapes, spelled out, so a failure says which one broke rather than "one of many".
+    func testAFormSubmissionToANonWebSchemeIsRefused() {
+        for type in [BrowserNavigationType.formSubmitted, .formResubmitted] {
+            let request = NavigationRequest(url: Self.mail,
+                                            navigationType: type,
+                                            modifierFlags: [],
+                                            hasTargetFrame: true,
+                                            origin: .pageContent)
+            XCTAssertEqual(NavigationPolicy.decide(request),
+                           .refuse(.externalSchemeFromPageContent("mailto")),
+                           "WebKit classifies a scripted submission as \(type) too")
+        }
+    }
+
+    func testAClickedLinkToANonWebSchemeIsRefused() {
+        XCTAssertEqual(NavigationPolicy.decide(click(Self.mail)),
+                       .refuse(.externalSchemeFromPageContent("mailto")),
+                       "a server redirect reuses the triggering action, so .linkActivated is not proof")
+    }
+
+    /// Cmd is read only for a URL the panel could have rendered itself, so it can never be the
+    /// thing that carries a non-web scheme out of the app.
+    func testACommandClickDoesNotCarryANonWebSchemeOut() {
+        XCTAssertEqual(NavigationPolicy.decide(click(Self.mail, modifiers: .command)),
+                       .refuse(.externalSchemeFromPageContent("mailto")))
+    }
+
+    /// The default is the safe one, so a future call site that says nothing grants nothing. Added
+    /// because the mutation that flipped the default to `.urlBar` reddened nothing on its first run:
+    /// every existing call site names the origin, so the default itself was untested — and an unsafe
+    /// default nobody notices is exactly the shape of the bug D38 exists to close.
+    func testARequestThatDoesNotNameItsOriginGrantsNothing() {
+        let request = NavigationRequest(url: Self.mail,
+                                        navigationType: .linkActivated,
+                                        modifierFlags: [],
+                                        hasTargetFrame: true)
+        XCTAssertEqual(request.origin, .pageContent)
+        XCTAssertEqual(NavigationPolicy.decide(request),
+                       .refuse(.externalSchemeFromPageContent("mailto")))
+    }
+
+    /// The refusal is a log line: the user never asked for this navigation, and a notice about it
+    /// would be the page writing into afleet's chrome.
+    func testAPageOriginatedExternalSchemeIsDiagnosticOnly() {
+        XCTAssertEqual(NavigationPolicy.Reason.externalSchemeFromPageContent("mailto").isDiagnosticOnly,
+                       true)
+    }
+}

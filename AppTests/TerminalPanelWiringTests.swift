@@ -54,6 +54,33 @@ final class TerminalPanelWiringTests: XCTestCase {
     /// **Nothing seeds the host's context here.** A background job's channel is a channel no
     /// window has shown; seeding one was the test standing in for a step the app does not take,
     /// and every one of these assertions passed over a path that could not run in the app.
+    /// **The row brings its channel into view, and does it before the pane runs** (ruled
+    /// 2026-09-09; tracker 384).
+    ///
+    /// The host selects the Terminal *tab*, but the panel column derives its *channel* from
+    /// `shell.focus`, so before this the pane opened where nobody was looking and item 15's
+    /// "*Attach* shows its screen" was not what happened. The reading is taken **inside** the
+    /// runner, at the moment the request arrives, because the claim is an ordering: a focus read
+    /// after the call cannot tell a selection that came first from one that came later. Dropping
+    /// `shell.select` fails this and nothing else.
+    func testAttachSelectsTheRowsChannelBeforeThePaneRuns() async throws {
+        let rig = try await WiringRig()
+        defer { rig.stop() }
+        let runner = rig.replaceTerminalRunner()
+        let session = WiringFixtures.session(11)
+        let job = WiringFixtures.job("jshow", session: session, cwd: rig.cwd)
+        await rig.lifecycle.stagePane(.success(WiringFixtures.request(purpose: .attach(job.short), cwd: rig.cwd)))
+        await runner.observeFocus { [shell = rig.shell] in shell.focus }
+        XCTAssertNotEqual(rig.shell.focus, .channel(session), "the test must begin somewhere else")
+
+        await SidebarView.openJobPane(job, verb: .attach, browser: rig.browser, shell: rig.shell)
+
+        let focus = await runner.focusAtRun
+        XCTAssertEqual(focus, [.channel(session)],
+                       "the window was not already on the row's channel when its pane ran")
+        XCTAssertEqual(rig.shell.focus, .channel(session), "the row did not leave its channel in view")
+    }
+
     func testAttachRunsTheRequestItWasGivenInTheChannelTheRowNames() async throws {
         let rig = try await WiringRig()
         defer { rig.stop() }
@@ -63,7 +90,7 @@ final class TerminalPanelWiringTests: XCTestCase {
         let staged = WiringFixtures.request(purpose: .attach(job.short), cwd: rig.cwd)
         await rig.lifecycle.stagePane(.success(staged))
 
-        await SidebarView.openJobPane(job, verb: .attach, browser: rig.browser, panels: rig.app.panels)
+        await SidebarView.openJobPane(job, verb: .attach, browser: rig.browser, shell: rig.shell)
 
         let received = await runner.received
         XCTAssertEqual(received, [staged], "Attach did not reach the pane runner with the request X5 answered")
@@ -88,7 +115,7 @@ final class TerminalPanelWiringTests: XCTestCase {
         let staged = WiringFixtures.request(purpose: .logs(job.short), cwd: rig.cwd)
         await rig.lifecycle.stagePane(.success(staged))
 
-        await SidebarView.openJobPane(job, verb: .logs, browser: rig.browser, panels: rig.app.panels)
+        await SidebarView.openJobPane(job, verb: .logs, browser: rig.browser, shell: rig.shell)
 
         let logged = await rig.lifecycle.loggedJobs
         XCTAssertEqual(logged, [job.short], "Logs did not go through LifecycleAPI.logs")
@@ -111,7 +138,7 @@ final class TerminalPanelWiringTests: XCTestCase {
         let job = WiringFixtures.job("jexec", session: nil)
         rig.app.panels.focusChannel(nil)
 
-        await SidebarView.openJobPane(job, verb: .attach, browser: rig.browser, panels: rig.app.panels)
+        await SidebarView.openJobPane(job, verb: .attach, browser: rig.browser, shell: rig.shell)
 
         XCTAssertNotNil(rig.browser.jobBanners[job.short.rawValue], "the row refused without saying so")
         let attached = await rig.lifecycle.attachedJobs
@@ -132,7 +159,7 @@ final class TerminalPanelWiringTests: XCTestCase {
         _ = rig.app.panels.context(for: rig.key, cwd: rig.cwd)
         rig.app.panels.focusChannel(rig.key)
 
-        await SidebarView.openJobPane(job, verb: .attach, browser: rig.browser, panels: rig.app.panels)
+        await SidebarView.openJobPane(job, verb: .attach, browser: rig.browser, shell: rig.shell)
 
         let channels = await runner.channels
         XCTAssertEqual(channels, [rig.key], "the exec job's pane did not land in the channel in view")
@@ -151,7 +178,7 @@ final class TerminalPanelWiringTests: XCTestCase {
         let staged = WiringFixtures.request(purpose: .attach(job.short), cwd: rig.cwd)
         await rig.lifecycle.stagePane(.success(staged))
 
-        await SidebarView.openJobPane(job, verb: .attach, browser: rig.browser, panels: rig.app.panels)
+        await SidebarView.openJobPane(job, verb: .attach, browser: rig.browser, shell: rig.shell)
 
         XCTAssertNotNil(rig.browser.jobBanners[job.short.rawValue], "the host refused without saying so")
         let received = await runner.received
@@ -280,10 +307,21 @@ private enum WiringFixtures {
 private actor WiringPaneRunner: PaneRunning {
     private(set) var received: [PaneRequest] = []
     private(set) var channels: [ChannelKey] = []
+    /// What the window was showing **at the moment the request reached the runner**, when a test
+    /// installs the probe. It is read here rather than after the call because the claim under test
+    /// is an ordering — the channel is selected *before* the pane runs — and a reading taken
+    /// afterwards cannot tell "selected first" from "selected eventually".
+    private(set) var focusAtRun: [ShellModel.Focus] = []
+    private var probe: (@MainActor @Sendable () -> ShellModel.Focus)?
+
+    func observeFocus(_ probe: @escaping @MainActor @Sendable () -> ShellModel.Focus) {
+        self.probe = probe
+    }
 
     func run(_ request: PaneRequest, in context: ChannelContext) async {
         received.append(request)
         channels.append(context.key)
+        if let probe { focusAtRun.append(await MainActor.run { probe() }) }
     }
 }
 
@@ -313,6 +351,9 @@ private struct WiringRig {
     let configHome: URL
     let key: ChannelKey
     let cwd: URL
+    /// The sidebar acts through the shell — it is what selects a channel — and the shell reads the
+    /// same host the app holds, exactly as `RootView` builds the pair.
+    let shell: ShellModel
 
     /// Takes `.terminal`'s pane runner for a recording one, for the groups that assert where a
     /// request travelled rather than what the panel did with it.
@@ -360,6 +401,7 @@ private struct WiringRig {
 
         lifecycle = LifecycleDouble()
         app = AppModel()
+        shell = ShellModel(panels: app.panels)
         app.bindWorkspace(workspace, lifecycle: lifecycle)
         browser = FleetBrowserModel(lifecycle: lifecycle, configHome: configHome.root)
     }
