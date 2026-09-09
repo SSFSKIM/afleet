@@ -20,6 +20,109 @@ import FleetKit
 @MainActor
 final class EditAndRewindTests: XCTestCase {
 
+    // MARK: - Main-conversation identity (tracker 428)
+
+    /// Replay the existing honoured, stale-target and unseen-later-turn arms while a newer
+    /// subagent prompt is rendered. Only the first two main turns have arrived in this snapshot;
+    /// both streams are byte-for-byte slices/copies of signed recordings, not authored frames.
+    func testAllRewindArmsNameTheNewestMainStreamMessage() async throws {
+        let answers = [try Rig.recordedHonouredBody(), try Rig.recordedRefusedBody(),
+                       Rig.refusal(reason: "unseen later turn")]
+        for answer in answers {
+            let rig = try await Rig(includeAgentStream: true, mainPromptLimit: 2)
+            let all = rig.renderedUserMessages()
+            let main = all.filter { $0.id.stream.name == .main }
+            XCTAssertEqual(main.count, 2, "the mixed snapshot must retain two main prompts")
+            XCTAssertTrue(all.last?.id.stream.name != .main,
+                          "a newer agent prompt must challenge the last-seen selection")
+            let newest = try XCTUnwrap(main.last, "the main stream has no newest prompt")
+            let honoured = answer["rewound"]?.boolValue == true
+            let target = try XCTUnwrap(honoured ? main.first : main.last,
+                                      "the main stream has no edit target")
+            XCTAssertEqual(rig.composer.renderedUserMessages.count, main.count,
+                           "the composer includes another stream's user messages")
+            XCTAssertTrue(rig.composer.lastSeenUserMessageUUID == newest.promptUUID,
+                          "the last-seen message belongs to another stream")
+            await rig.lifecycle.stageSend("rewind_conversation", .success(answer))
+            let sibling = ChannelKey(configHome: rig.key.configHome, session: SessionID())
+            if !honoured { await rig.lifecycle.stageFork(.success(sibling)) }
+
+            await rig.composer.edit(target)
+
+            let sent = await rig.lifecycle.payload(ofFirst: "rewind_conversation")
+            XCTAssertTrue(sent?["target_message_uuid"]?.stringValue == target.promptUUID,
+                          "the request changed the main-stream edit target")
+            XCTAssertTrue(sent?["last_seen_user_message_uuid"]?.stringValue == newest.promptUUID,
+                          "the request names another stream's newest message")
+            let forks = await rig.lifecycle.forkCount
+            XCTAssertEqual(forks, honoured ? 0 : 1)
+            XCTAssertEqual(rig.composer.rewindSignalsRaised, honoured ? 1 : 0)
+            if honoured {
+                XCTAssertTrue(target.promptUUID != newest.promptUUID,
+                              "the honoured arm must edit an older main message")
+                XCTAssertTrue(rig.composer.draft == answer["prefillText"]?.stringValue,
+                              "the honoured arm did not keep the recorded prefill")
+            } else {
+                let points = await rig.lifecycle.forkPoints
+                let expected = try Rig.recordedParentAssistantRecord(of: target.promptUUID)
+                XCTAssertTrue(points.first??.entryUUID == expected,
+                              "the fallback kept a record outside the main conversation")
+                XCTAssertTrue(points.first??.dropsTurn == target.promptUUID,
+                              "the fallback dropped another stream's turn")
+                XCTAssertTrue(rig.composers.model(for: sibling)?.draft == target.text,
+                              "the fallback did not prefill its own composer")
+            }
+            try await rig.assertNoFileRewind()
+            await rig.finish()
+        }
+    }
+
+    /// An agent reply lies between two main turns in timestamp order. It must never become
+    /// the inclusive fork point of an edit in the main conversation.
+    func testAForkSkipsInterleavedAgentAssistantRecords() async throws {
+        let rig = try await Rig(includeAgentStream: true)
+        let items = rig.timeline.timeline.items
+        let target = try XCTUnwrap(rig.renderedUserMessages().first { message in
+            guard message.id.stream.name == .main,
+                  let index = items.firstIndex(where: { $0.id == message.id }),
+                  let preceding = items[..<index].reversed().first(where: {
+                      if case .assistantMessage = $0 { return true }; return false
+                  }) else { return false }
+            return preceding.id.stream.name != .main
+        }, "the mixed recording has no main target preceded by an agent reply")
+        let expected = try Rig.recordedParentAssistantRecord(of: target.promptUUID)
+        await rig.lifecycle.stageFork(.success(ChannelKey(configHome: rig.key.configHome, session: SessionID())))
+        await rig.lifecycle.stageSend("rewind_conversation", .success(try Rig.recordedRefusedBody()))
+
+        await rig.composer.edit(target)
+
+        let points = await rig.lifecycle.forkPoints
+        XCTAssertEqual(points.count, 1)
+        XCTAssertTrue(points.first??.entryUUID == expected,
+                      "the fork point names an interleaved agent reply instead of the main parent")
+        XCTAssertTrue(points.first??.dropsTurn == target.promptUUID,
+                      "the fallback did not drop the selected main turn")
+        try await rig.assertNoFileRewind()
+        await rig.finish()
+    }
+
+    /// A subagent surface has no composer site, but an agent item passed directly to the
+    /// channel composer must still not issue a main-conversation rewind or fork.
+    func testAnAgentMessageCannotBeARewindOrForkTarget() async throws {
+        let rig = try await Rig(includeAgentStream: true)
+        let target = try XCTUnwrap(rig.renderedUserMessages().first { $0.id.stream.name != .main },
+                                  "the mixed recording has no agent prompt")
+        await rig.lifecycle.stageSend("rewind_conversation", .success(try Rig.recordedRefusedBody()))
+        await rig.lifecycle.stageFork(.success(ChannelKey(configHome: rig.key.configHome, session: SessionID())))
+        await rig.composer.edit(target)
+        let sent = await rig.lifecycle.sentSubtypes
+        let forks = await rig.lifecycle.forkCount
+        XCTAssertEqual(sent.count, 0, "an agent target issued a main-conversation control request")
+        XCTAssertEqual(forks, 0, "an agent target forked the main conversation")
+        XCTAssertEqual(rig.composer.rewindSignalsRaised, 0)
+        await rig.finish()
+    }
+
     // MARK: - The honoured leg
 
     /// The engine honoured the rewind: the field carries `prefillText` **verbatim**, and
@@ -566,7 +669,8 @@ private final class Rig {
     var timeline: ChannelTimelineModel { timelines.model(for: key) }
     var composer: ComposerModel { composers.model(for: key)! }
 
-    init(fixture: String = "rewind-turn") async throws {
+    init(fixture: String = "rewind-turn", includeAgentStream: Bool = false,
+         mainPromptLimit: Int? = nil) async throws {
         temp = try TempTree()
         home = try ScratchConfigHome(tree: temp)
         let projects = home.root.appending(path: "projects", directoryHint: .isDirectory)
@@ -578,6 +682,29 @@ private final class Rig {
         key = ChannelKey(configHome: home.configHome.root, session: main.session)
         try FileManager.default.createDirectory(at: projects, withIntermediateDirectories: true)
         try FileManager.default.copyItem(at: main.slugDirectory, to: destination.deletingLastPathComponent())
+
+        // Assemble the mixed snapshot only in the scratch tree. The agent file is copied from
+        // the signed explore recording unchanged; the optional main prefix preserves complete
+        // original lines from rewind-turn. No engine payload or identifier is embedded in tests.
+        if includeAgentStream {
+            guard let agent = try Self.mainTranscript(of: "explore-depth-1") else { throw RigError.noMainTranscript }
+            let source = agent.slugDirectory.appending(path: "\(agent.session)/subagents")
+            let parent = destination.deletingLastPathComponent().appending(path: "\(main.session)")
+            try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+            try FileManager.default.copyItem(at: source, to: parent.appending(path: "subagents"))
+        }
+        if let mainPromptLimit {
+            var prefix = Data()
+            var users = 0
+            for line in try Data(contentsOf: destination).split(separator: 0x0a) {
+                let record = try JSONDecoder().decode(JSONValue.self, from: Data(line))
+                if record["type"]?.stringValue == "user" { users += 1 }
+                if users > mainPromptLimit { break }
+                prefix.append(contentsOf: line)
+                prefix.append(0x0a)
+            }
+            try prefix.write(to: destination)
+        }
 
         let index = TranscriptIndex(configHome: home.configHome, storage: InMemoryIndexStorage())
         _ = try await index.build()

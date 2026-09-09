@@ -3321,6 +3321,18 @@ them), four new below. Numbers 384–393 are C7.4's; C6.1 continues from 394.
     by calling `startReadbacks` repeatedly. Re-check liveness when the task ends. First corrective
     after the merge (C6 recomposition). Round 3 scalpel-5#4.
 
+    **Closed 2026-09-10 — `corrective/c6-readbacks-rewind`.** A naturally completed non-nil
+    subscription clears its task and rechecks the live header, preserving a reopen that arrived
+    during its drain. Nil subscriptions do not retry; cancelled or terminated consumers do not
+    restart. `HeaderReadoutTests.testTheProcessIdentityOutlivesTheSubscription` now holds a
+    turn-end readback, buffers a second recorded result, finishes the old stream and adopts
+    archived then ready exactly once before releasing the hold. No repeated `startReadbacks`
+    or replacement-frame injection masks the race. Red: 14 tests, 2 assertions failed in this
+    regression (lost subscription and replacement mode). Green: all 14 passed, including new
+    nil-stream and close-during-drain arms; actual `** TEST SUCCEEDED **` read from the captured
+    log. `make test ONLY=AfleetTests/HeaderReadoutTests` also passed 281 Python tests and its
+    import-independent wiring/X7 checks. Evidence logs: `.build/corrective-logs/397-{red,green}.log`.
+
 ## From C7.4 (Terminal panel and jobs, `child/c7-terminal-panel`)
 
 Reserved ranges 262–276, 346–355 and 384–393. Filed 2026-09-09 at C7.4's close-out and after its
@@ -4210,3 +4222,16 @@ needs more. Nothing above is renumbered.
      against a recording that folds two streams. Closer: filter `renderedUserMessages` to
      `StreamName.main` and re-run C6.2's rewind arms. Owner: C6.2's successor on the composer.
      Raised by corrective/c6-recomp-decisions at its review's fix wave.
+
+     **Closed 2026-09-10 — `corrective/c6-readbacks-rewind`.** `renderedUserMessages` now selects
+     `StreamName.main`, leaving main-stream replays eligible for the rewind cursor while restore
+     retains its separate non-replay rule. An agent item cannot be an edit target, and a refused
+     main edit resolves its preceding assistant on that same logical stream, never an interleaved
+     agent reply. Three mixed-stream regressions use only runtime copies/slices of signed
+     `rewind-turn` and `explore-depth-1` transcripts. They replay the existing honoured and
+     stale-target bodies plus G4's existing injected unseen-later-turn arm (the corpus has two
+     recorded response bodies, not three). They also check fork entry/dropped-turn identity,
+     sibling prefill and zero file rewinds. Red: 18 tests, 12 expected assertion failures across
+     the three new regressions. Green: all 18 `EditAndRewindTests` passed, with the actual
+     `** TEST SUCCEEDED **` verdict read from the captured log. Evidence:
+     `.build/corrective-logs/428-{red,green}.log`; fixture integrity/signature verification passed.

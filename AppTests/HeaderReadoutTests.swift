@@ -287,28 +287,80 @@ final class HeaderReadoutTests: XCTestCase {
         let moved = await LaunchFixtures.waitAsync { @MainActor in rig.model.readout.mode == .acceptEdits }
         XCTAssertTrue(moved, "the readout did not follow the first process's status frame")
 
-        // The channel goes down: the stream is finished under the subscriber, exactly as archival
-        // finishes it. The model, and the live mode in its readout, stay.
-        await double.finishEvents(of: key)
-
-        // It comes back up on a replacement, and the strip subscribes again. Retried because the
-        // second subscription can only be taken once the first task has wound itself up.
-        await double.stageEngineReport(handshake: try Self.handshake("control-shapes"), systemInitFrom: nil)
-        let resubscribed = await LaunchFixtures.waitAsync { @MainActor in
-            rig.model.startReadbacks()
-            return await Self.subscriptions(double) >= 2
+        // Park a turn-end readback, then buffer another event behind it. Archival finishes
+        // that stream while its consumer is still suspended; reopening must not depend on the
+        // old task having already drained, or on the view asking for readbacks a second time.
+        await double.holdSend()
+        let before = await Self.polls(double, of: "get_settings")
+        let result = try XCTUnwrap(Self.results("plain-two-turn").first,
+                                  "the recording carries no turn end")
+        double.enqueue(result, to: key)
+        let held = await LaunchFixtures.waitAsync {
+            await Self.polls(double, of: "get_settings") == before + 1
         }
-        XCTAssertTrue(resubscribed, "the strip never subscribed a second time, so nothing below is a re-subscription")
+        XCTAssertTrue(held, "the turn-end readback never reached the hold")
+        double.enqueue(result, to: key)
+        await double.finishEvents(of: key)
+        rig.model.adopt(ChannelHeader(origin: .archived))
+        await double.stageEngineReport(handshake: try Self.handshake("control-shapes"), systemInitFrom: nil)
+        rig.model.adopt(ChannelHeader(origin: .owned(.ready)))
+        let whileHeld = await Self.subscriptions(double)
+        XCTAssertEqual(whileHeld, 1, "the old subscription must still be draining at reopen")
+        await double.releaseSend()
+
+        let resubscribed = await LaunchFixtures.waitAsync {
+            await Self.subscriptions(double) == 2
+        }
+        XCTAssertTrue(resubscribed, "reopening while the old stream drained lost the readback subscription")
 
         let replacement = try Self.handshake("control-shapes", epoch: ProcessEpoch.first.next())
+        double.enqueue(replacement, to: key)
         let followed = await LaunchFixtures.waitAsync { @MainActor in
-            double.enqueue(replacement, to: key)
-            return rig.model.readout.mode == .default
+            rig.model.readout.mode == .default
         }
         XCTAssertTrue(followed,
                       "the mode a process replaced before the re-subscription reported went on outranking the replacement's handshake")
 
         rig.model.close()
+    }
+
+    /// A live header can precede the supervisor. A nil events answer is not an ended
+    /// subscription and must wait for a later lifecycle trigger, rather than retrying itself.
+    func testANilReadbackStreamDoesNotResubscribeItself() async throws {
+        let rig = try await Rig(live: false)
+        rig.model.startReadbacks()
+        let asked = await LaunchFixtures.waitAsync {
+            await Self.polls(rig.double, of: "get_context_usage") == 1
+        }
+        XCTAssertTrue(asked, "the opening readback never completed")
+        let retried = await LaunchFixtures.waitAsync(upTo: .milliseconds(100)) {
+            await Self.subscriptions(rig.double) > 1
+        }
+        rig.model.close()
+        XCTAssertFalse(retried, "a nil events answer restarted the readback task")
+    }
+
+    /// Closing while a finished stream drains cancels the consumer. Its eventual return must
+    /// not revive readbacks even if the last adopted header still names a live process.
+    func testClosingDuringTheReadbackDrainDoesNotResubscribe() async throws {
+        let rig = try await Rig()
+        await rig.double.holdSend()
+        rig.model.startReadbacks()
+        let held = await LaunchFixtures.waitAsync {
+            await Self.polls(rig.double, of: "get_settings") == 1
+        }
+        XCTAssertTrue(held, "the opening readback never reached the hold")
+        let result = try XCTUnwrap(Self.results("plain-two-turn").first,
+                                  "the recording carries no turn end")
+        rig.double.enqueue(result, to: rig.key)
+        await rig.double.finishEvents(of: rig.key)
+        rig.model.close()
+        rig.model.adopt(ChannelHeader(origin: .owned(.ready)))
+        await rig.double.releaseSend()
+        let retried = await LaunchFixtures.waitAsync(upTo: .milliseconds(100)) {
+            await Self.subscriptions(rig.double) > 1
+        }
+        XCTAssertFalse(retried, "a terminated readback consumer subscribed again")
     }
 
     // MARK: - The rendering preferences (round 1, scalpel-4 #7)

@@ -317,8 +317,9 @@ final class ChannelTimelineModel {
     ///
     /// The subscription is this model's own fan-out, which `events(of:)` documents as legal and is
     /// how the ingestion and the Activity pump already share one channel. It ends when the channel
-    /// archives — the stream is finished then — and the task clears itself so a channel that comes
-    /// back up is asked again.
+    /// archives — the stream is finished then. Once its buffered events have drained, it clears
+    /// itself and rechecks the live header: reopening may have arrived while this task was still
+    /// occupied. A nil subscription waits for a new lifecycle trigger; it never retries itself.
     private func beginReadbacks() {
         guard readbacksWanted, readbackTask == nil, !isTerminated, poller != nil, let lifecycle else { return }
         let key = key
@@ -330,6 +331,7 @@ final class ChannelTimelineModel {
             // never reissued, so a subscription taken afterwards loses it and the header shows the
             // launch mode until the next change, which on a quiet channel is never.
             let stream = await lifecycle.events(of: key)
+            guard !Task.isCancelled else { return }
             await self?.refreshReadbacks()
             guard let stream else { self?.readbackTask = nil; return }
             // A restart replaces the process under a channel this model outlives, and the mode a
@@ -343,7 +345,7 @@ final class ChannelTimelineModel {
             // that would read one — so a replacement that runs no turn would leave the header naming
             // the mode of a process that is gone.
             for await event in stream {
-                guard let self, !self.isTerminated else { return }
+                guard let self, !self.isTerminated, !Task.isCancelled else { return }
                 if let seen = ReadbackPoller.epoch(of: event), self.readout.observed(epoch: seen) {
                     await self.refreshReadbacks()
                 }
@@ -351,7 +353,9 @@ final class ChannelTimelineModel {
                 guard ReadbackPoller.isTurnEnd(event) else { continue }
                 await self.refreshReadbacks()
             }
+            guard !Task.isCancelled else { return }
             self?.readbackTask = nil
+            self?.beginReadbacks()
         }
     }
 
