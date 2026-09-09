@@ -2795,3 +2795,29 @@ the merge; one (asynchronous highlighting never redrawing the row) is already 33
     between them pairs the old process's settings with the replacement's handshake, and
     `refreshReadbacks` publishes the pair unchecked. Have `engineReports` carry the epoch and drop a
     pair whose halves disagree. Round 2 scalpel-5#4.
+
+**Residue of waves D–G (2026-09-09), filed by the architect at the stitch: 380–383.**
+
+380. **A link's label is flattened through `plain()`.** Wave D made Strong and Emphasis recurse into
+    their children, so `**[guide](…)**` keeps its destination; the label of a link is still built by
+    `plain(link)`, so `[**bold** guide](…)` keeps the destination and loses the emphasis inside the
+    label. Route `Markdown.Link` through `inline` and lay the link attributes over the child runs.
+    Round 2 scalpel-4#5's remaining half.
+
+381. **`pruneHosts` and `refreshHostedRoots` still walk the whole row list per publish.** Wave F took
+    the concatenation out of every per-row reader (10,005 cached height queries on a 2,001-row table
+    with a preview: 7,141 ms before, 11 ms after), but a publish still builds `Set(rows.map(\.key))`
+    and, when the context changed, a dictionary of the same size. Removing that wants a maintained
+    key→index map on the controller, which needs one assignment point for `itemRows`. Per-publish,
+    not per-query, so it is bounded by the publish rate.
+
+382. **`ChannelTimelineModel.rows` and `items` re-merge and re-sort both halves of the timeline on
+    every body evaluation.** The neighbourhood no longer pays this (wave F's cache), but the row
+    list the table diffs against still does, so a preview-only publish sorts the whole history
+    before the diff sees it. The same key the neighbourhood cache uses (the published timeline with
+    its preview cleared) would serve.
+
+383. **`testAContextChangeReachesMountedRows` passes vacuously.** `InventedItems.context` builds a
+    fresh `TimelineEditState`, `RetractionRegistry` and `DecisionReservations` per call, so the
+    identity half of `differs` reports a change whatever the cwd does; the test would pass with
+    `cwd` removed from the comparison. Wave E's capability test pins all three (the pattern to copy).
