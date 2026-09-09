@@ -229,7 +229,7 @@ import test over `Workbench/Sources` (amended 2026-09-08 at C7.3's merge):
 | `TerminalPanel` | C7.4 | TerminalCore, LinkRouting, PanelHostAPI, FleetKit | panes, job attach, the hatch, `claude logs` |
 | `FilesPanel` | C7.5 | AfleetCore, EditorCore, SourceControlCore, LinkRouting, PanelHostAPI, FleetKit | tree, viewers, watcher, banners; the `.diff` target reads its two texts through C7.3's `GitDiff` (row amended 2026-09-09 at C7.5's gate: W7 makes every git invocation C7.3's, and `AfleetCore` is needed to name `WorkspaceLink`/`DiffRef` under member-import visibility) |
 | `BrowserPanel` | C7.6 | AfleetCore, SourceControlCore, LinkRouting, PanelHostAPI, FleetKit | shared tabs, quick-open, persistence; `.pullRequest(Int)` resolves through `gh pr view --json url` on C7.3's `ToolRunner` (row amended 2026-09-09 at C7.6's merge; a panel-local error row with the `gh auth login` hint otherwise, never a prompt) |
-| `SourceControlPanel` | C7.7 | SourceControlCore, EditorCore, LinkRouting, PanelHostAPI, FleetKit | graph, detail, diffs, GitHub tab |
+| `SourceControlPanel` | C7.7 | AfleetCore, SourceControlCore, LinkRouting, PanelHostAPI, FleetKit | graph, detail, GitHub tab; a diff is an emitted `.diff` link the Files tab opens, so `EditorCore` has no import site here (row amended 2026-09-09 at C7.7's merge, its `[parent-impact]`) |
 | `Workbench` | umbrella | all of the above | `@_exported import` of each |
 | `S1Harness`, `S3Harness` | C7.1, C7.2 | their core | `executableTarget`s under `Workbench/Spikes/`, not in the product; each opens an `NSWindow` from `swift run` without an app bundle |
 
@@ -416,7 +416,14 @@ is the classic single pass over topological order (a commit takes its first chil
 when it is that child's first parent, otherwise the first free lane; merges close lanes
 when their extra parents are reached; the working tree occupies row zero above `HEAD`),
 tested on a merge, an octopus merge and a detached tag. Advisory: the exact algorithm,
-refresh cadence, and pagination.
+refresh cadence, and pagination. As shipped 2026-09-09 (C7.7): freshness is FSEvents, not a
+poll — paths outside `.git` re-read the status, `.git/HEAD`, `packed-refs`, `refs/` and `logs/`
+re-read the history, and everything else under `.git` is ignored, because `git status` writes
+`.git/index` and an unclassified watcher would re-read the status because it just read it;
+pagination is closed only for the `.commit` lookup (paged in 2,000-commit steps, five pages,
+a named row past the bound), not for graph scroll (tracker 114 stands); each `GraphRow` draws the
+lower half of its own edges and the upper half of its predecessor's, edges iterated and never
+keyed by `toLane`, `truncated` drawn as a line that continues.
 
 ### Store namespaces (contract W6)
 
@@ -702,7 +709,13 @@ pane, C4 owns the transition.
 - **Contracts:** W4, W5, W7, X7, X11.
 - **Design inheritance:** §9.2 (scope binding, algorithm advisory), W7.
 - **Required:** required.
-- **Status:** not-dispatched, blocked-by C7.3, C7.5, C7.6, C5.G4. Branch `child/c7-scm-panel`.
+- **Status:** **merged** 2026-09-09 at `3ab455f` from `child/c7-scm-panel` `300cac4`
+  (27 commits). Spec `docs/doperpowers/specs/2026-09-09-c7.7-scm-panel.md`.
+  **Outcome:** G1 met headlessly (lanes named with their commits over merge, octopus and detached-tag repositories; the rendering contract asserted as the Canvas's draw operations; the commit-file corpus at the selected-commit readout; a file click emitting its `.diff` through a real `LinkRouter`; the one-second working-tree clause 5 of 5 inside the bound, ~0.23 s to appear and ~0.50 s to clear), the graph on screen a human leg; G2 met headlessly over authored `gh` documents and live (all three verbs decoded); G3 met (a routed `.commit` selects in-window, outside-window by paging, by unambiguous prefix; a delivery before the first read waits; `gh` absent and logged-out are distinct hints, no `auth` verb representable); G4 met by three proofs (argv allowlist, `Action.allCases` both ways, a source scan for stray buttons). Package 958 (from 673); App floor 19 bundles green. One cross-fence edit accepted at merge: `PanelHostModel.didMakeSession`, twelve additive lines on C5's host, the one moment a channel's two tab sessions can be paired for branch-change wiring — no protocol change. Human legs: the graph with lanes, badges and dates; the commit detail; the diff click opening Monaco; a real `claude` edit making the working-tree row appear; the PR row with check status; the PR loading in the Browser tab. Tracker 277–291 (277: a linked worktree's pointer-file `.git` puts history events outside the watched root — C7.3's; 289: tracker 118 stays open, no check in flight was reached). 196 `SourceControlPanelTests`. As shipped: two tabs
+  (`.sourceControl`, `.github`) with two sessions and no shared state; `.pullRequest` left to the
+  Browser under W5; no store document under the reserved key (nothing keeps its meaning across a
+  relaunch); G4 proved by an argv allowlist that makes write verbs unrepresentable plus a readout
+  action inventory asserted against a written-out list.
 
 ## Cross-Child Contracts
 
@@ -712,7 +725,8 @@ pane, C4 owns the transition.
 - **W2 `TerminalSurface` and the PTY layer's observable contract.** The protocol as written;
   exit reported once as an observed event; environment and cwd taken from the request and
   nothing else. Owner: C7.1. Binds C7.4 and the S1 fallback.
-- **W4 Monaco bundle, bridge vocabulary and view.** Owner: C7.2. Binds C7.5, C7.7.
+- **W4 Monaco bundle, bridge vocabulary and view.** Owner: C7.2. Binds C7.5 (C7.7's half fell
+  away 2026-09-09 with the `.diff`-link ruling: it emits the link and imports no editor).
 - **W5 `LinkRouter` registration.** Owner: C7.2. Binds C7.4 through C7.7 and C6.
 - **W6 Store keys.** Owner: C7 as a whole (declared here). Binds C7.5, C7.6; rides X6.
 - **W7 Source Control and GitHub data types and the tool runner.** Owner: C7.3. Binds C7.7.
@@ -802,7 +816,7 @@ parent's decision); any write under `<configHome>` (X9); IDE registration.
 | C7.4 Terminal panel | `2026-09-09-c7.4-terminal-panel.md`; plan `plans/2026-09-09-c7.4-terminal-panel.md`; Outcomes in the child spec | **merged** 2026-09-09 at `054e42c` from `child/c7-terminal-panel` `385bbe1` (43 commits); 85 tests; tracker 262–276, 346–355 and 384–393; X7 amended (`PanelHost.run(_:for:)`, `PaneRunning.run(_:in:)`); W8 gains the report's shape |
 | C7.5 Files panel | `2026-09-09-c7.5-files-panel.md`; plan `plans/2026-09-09-c7.5-files-panel.md`; Outcomes in the child spec | **merged** 2026-09-09 at `517899d` from `child/c7-files-panel` `210d8eb` (56 commits); G1–G4 met headless, human legs outstanding; 185 tests; tracker 232–246; W1 row and W6 amended at its gate; X7 gap on the link's channel recorded (240) |
 | C7.6 Browser panel | ledger `2026-09-09-c7.6-browser-panel.md`; Outcomes in the ledger | **merged** 2026-09-09 at `6f8a8ec` from `child/c7-browser-panel` `c62124c` (46 commits); G1 structural + human leg, G2 met (click half conditional on C6.1), G3 met, G4 Debug met; 187 tests; tracker 247–255; X7 amended (pop-out declination; `PanelSurface` on `makeView`/`view`) |
-| C7.7 Source Control panel | plan on `child/c7-scm-panel` | blocked-by C7.3, C7.5, C7.6, C5.G4 |
+| C7.7 Source Control panel | `2026-09-09-c7.7-scm-panel.md`; plan `plans/2026-09-09-c7.7-scm-panel.md`; Outcomes in the child spec | **merged** 2026-09-09 at `3ab455f` from `child/c7-scm-panel` `300cac4` (27 commits); 196 tests; W1 row and W4 amended (no editor import); freshness by FSEvents |
 
 Spike outcomes (S1, S3), the exit-or-stop finding, the worker-loading finding and the
 measured bundle size are recorded in the Revision Notes and summarised on the leaf's row
@@ -1036,3 +1050,9 @@ retrospect.
   W8 records the shape). Advisory overturns applied on the parent: §17.4 C7's *Respawn* is an X5
   action, not a pane; item 15's "the detach key returns" names what returns; tracker 93 closed by
   this leaf inside `TerminalCore` by design. 
+- 2026-09-09 reconciliation of C7.7 (merge `3ab455f` from `child/c7-scm-panel` `300cac4`,
+  27 commits). Two `[parent-impact]`s applied: W1's `SourceControlPanel` row takes
+  `AfleetCore` in place of `EditorCore`; W4 loses its C7.7 half — both follow from the `.diff`-link
+  ruling at C7.5's merge. Advisory overturns applied: §9.2's "Monaco diffs" phrasing on the parent;
+  W7's refresh cadence answered by a watcher; pagination closed only for the `.commit` lookup
+  (tracker 114 stands). Reviews ran on the fallback route for wave A and T5 (opus, after 429s) and on astra-high for the whole-branch round; the human's fixture signature was not needed by this leaf.
