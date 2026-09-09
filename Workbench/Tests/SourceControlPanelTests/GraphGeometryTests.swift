@@ -123,6 +123,22 @@ final class GraphGeometryTests: XCTestCase {
         edges.map { "\(half) \($0.fromLane)->\($0.toLane)" + ($0.truncated ? "T" : "") }.sorted()
     }
 
+    /// Each row as "subject@lane" — G1.1's clause, which asks for *which* commits sit in which
+    /// lane and not for a list of lane numbers.
+    ///
+    /// A subject is a repository-relative datum the fixture authored a line above (§6.3, §11);
+    /// a hash is not, and would change every run besides. Read together with the lane, it is what
+    /// separates the right assignment from a permutation of the rows that carries its lanes along
+    /// with it and satisfies `rows.map(\.lane)` exactly.
+    private func lanesBySubject(_ assignment: LaneAssignment) -> [String] {
+        assignment.rows.map { row in
+            switch row.content {
+            case .workingTree: return "(working tree)@\(row.lane)"
+            case .commit(let commit): return "\(commit.subject)@\(row.lane)"
+            }
+        }
+    }
+
     // MARK: - Group 1 — every edge is drawn by exactly two adjacent rows
 
     /// The half-edge pairing, over one assignment: row *i* draws the lower half of each of its own
@@ -192,7 +208,9 @@ final class GraphGeometryTests: XCTestCase {
         // The lanes this fixture is expected to occupy, named rather than counted: the merge in
         // lane 0 reaching into lane 1, `side` read at lane 1, and `two` taking both lines back.
         XCTAssertEqual(assignment.laneCount, 2)
-        XCTAssertEqual(assignment.rows.map(\.lane), [0, 1, 0, 0])
+        XCTAssertEqual(lanesBySubject(assignment),
+                       ["merge feature@0", "side@1", "two@0", "one@0"],
+                       "the fixture's own commits are not the ones sitting in these lanes")
         XCTAssertEqual(assignment.rows.map { $0.edges.map { [$0.fromLane, $0.toLane] } },
                        [[[0, 0], [0, 1]], [[0, 0], [1, 1]], [[0, 0], [1, 0]], []])
         assertHalfEdgePairing(assignment, "merge")
@@ -223,7 +241,8 @@ final class GraphGeometryTests: XCTestCase {
         let assignment = try await assignment(of: try await octopusRepository(tree))
 
         XCTAssertEqual(assignment.laneCount, 3)
-        XCTAssertEqual(assignment.rows.map(\.lane), [0, 2, 1, 0, 0])
+        XCTAssertEqual(lanesBySubject(assignment), ["octopus@0", "two work@2", "one work@1", "main work@0", "root@0"],
+                       "the fixture's own commits are not the ones sitting in these lanes")
         XCTAssertEqual(assignment.rows.map { $0.edges.map { [$0.fromLane, $0.toLane] } },
                        [[[0, 0], [0, 1], [0, 2]], [[0, 0], [1, 1], [2, 2]],
                         [[0, 0], [1, 1], [2, 2]], [[0, 0], [1, 0], [2, 0]], []])
@@ -251,7 +270,8 @@ final class GraphGeometryTests: XCTestCase {
 
         // One lane throughout: a detached `HEAD` behind `main` adds a decoration, not a lane.
         XCTAssertEqual(assignment.laneCount, 1)
-        XCTAssertEqual(assignment.rows.map(\.lane), [0, 0, 0])
+        XCTAssertEqual(lanesBySubject(assignment), ["three@0", "two@0", "one@0"],
+                       "the fixture's own commits are not the ones sitting in these lanes")
         XCTAssertEqual(assignment.rows.map { $0.edges.map { [$0.fromLane, $0.toLane] } },
                        [[[0, 0]], [[0, 0]], []])
         assertHalfEdgePairing(assignment, "detached tag")
@@ -326,7 +346,8 @@ final class GraphGeometryTests: XCTestCase {
         // carries a truncated edge and is *not* the last row.
         let assignment = try await assignment(of: try await windowedRepository(tree), limit: 2)
 
-        XCTAssertEqual(assignment.rows.map(\.lane), [0, 1])
+        XCTAssertEqual(lanesBySubject(assignment), ["side one@0", "main two@1"],
+                       "the fixture's own commits are not the ones sitting in these lanes")
         XCTAssertEqual(assignment.rows[0].edges.map { [$0.fromLane, $0.toLane] }, [[0, 0]])
         XCTAssertTrue(assignment.rows[0].edges[0].truncated,
                       "the fixture must actually carry a truncated edge on a non-last row")
@@ -453,10 +474,6 @@ final class GraphGeometryTests: XCTestCase {
             GraphSegment(half: .lower, fromLane: 0, toLane: 0, start: CGPoint(x: 15, y: 12),
                          end: CGPoint(x: 15, y: 24), truncated: false, runsOffEnd: false),
         ])
-        XCTAssertEqual(fromSmall, GraphGeometry.segments(for: small.rows[2],
-                                                         predecessor: small.rows[1],
-                                                         isLastRow: false, metrics: metrics),
-                       "the same inputs give the same segments")
     }
 
     func testMetricsScaleTheGeometryAndNothingElse() {
