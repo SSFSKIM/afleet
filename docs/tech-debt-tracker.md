@@ -2862,3 +2862,35 @@ Reserved range 247–261.
      know); or make the closed state visible as a panel-local row, which is the honest version and
      is §10's shape. Owner: whoever adds a path that can abandon a quit after the drain — C5's
      lifecycle, most likely. Filed 2026-09-09 at the R5 fix wave (wave E).
+
+253. **`BrowserPanelView` registers two main-panel lifetimes under one `.panel` key.** SwiftUI keys
+     the Browser subtree by (tab, channel), so a channel switch constructs the replacement before
+     it destroys the outgoing one, and both register as `.panel` — the same key, with nothing to
+     tell the two apart. In that order the outgoing view's `onDisappear` removes the *replacement's*
+     registration, so a live pop-out is handed ownership of the pages and the replacement has no
+     later appearance in which to consume `panelLeftHoldingPages` and take them back. The user's
+     "Bring them back here" is undone for the rest of the session, which is exactly the defect D63
+     closed for the ordering it was written against. File:
+     `Workbench/Sources/BrowserPanel/BrowserPanelView.swift`. Closer: a per-lifetime registration
+     token, so a disappearance can only remove the registration it made. Owner: C7.6.
+     Filed 2026-09-09 at C7.6's merge round (hard stop).
+
+254. **`navigationGeneration` does not advance for history or in-page navigation.** It counts what
+     the user did to the *tab set* — a tab opened, selected, closed, or a URL submitted — so a page
+     the user reached by Back, Forward, or by clicking a link inside the page leaves it where it
+     was. A pull-request lookup made before any of those and resolving after them therefore reads
+     its generation unchanged, concludes nothing overtook it, and replaces the page the user is
+     now on rather than opening its own tab: D61's rule, applied to a clock that did not tick.
+     File: `Workbench/Sources/BrowserPanel/BrowserModel.swift`. Closer: bump the generation on
+     every committed navigation — `settled` already runs for each one — which makes "the current
+     tab still means what the click meant" the whole of what the counter says. Owner: C7.6.
+     Filed 2026-09-09 at C7.6's merge round (hard stop).
+
+255. **The pull-request handler checks supersession only on the resolved branch.** `.resolved`
+     carries the generation the request was made at into `deliver`, which is D61 working; `.failed`
+     carries nothing. So a lookup the user has long since navigated past can still publish its
+     error row through `reportLinkError` and, at `.currentPanel`, reselect the Browser tab over a
+     newer navigation — a row about a link the user has moved on from, on top of a page they
+     just chose. File: `Workbench/Sources/BrowserPanel/BrowserLinkTargets.swift`. Closer: read
+     `made` on the failure branch too, and drop the row and the selection when it has moved.
+     Owner: C7.6. Filed 2026-09-09 at C7.6's merge round (hard stop).
