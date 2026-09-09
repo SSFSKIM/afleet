@@ -2447,6 +2447,7 @@ the gap between 141 and 157 is C6.1's and C6.2's reservations and is expected. (
      branch. Same class as 131/146/151/194: a seeding path whose order a busy host can change. Closer:
      the seeding test waits for delivery of the retained report rather than reading once. Owner: C6.2.
      Filed 2026-09-09 at C6.3's merge.
+
 ## From C7.5 (Files panel, `child/c7-files-panel`)
 
 232. **Every leaf builds its own git and temporary-tree fixtures.** `FilesPanelTests/Support`
@@ -2774,3 +2775,122 @@ the gap between 141 and 157 is C6.1's and C6.2's reservations and is expected. (
      `open` — the guard exists because `gotoLine` is an `error` then. File:
      `FilesPanelSession.swift`, with C7.2's vocabulary. Owner: C7.5.
      Filed 2026-09-09 at C7.5's third review round (hard stop).
+
+## From C7.6 (`child/c7-browser-panel`)
+
+Reserved range 247–261.
+
+247. **M1's `waitForWriteAttempts` and `waitForSleep` seams carry no deadline.** They are
+     continuation-shaped: a condition that never holds is a wait that never returns. That cost this
+     leaf a 900-second suite kill at M4, when a mutation stopped the model committing edits at all
+     and the coalescing test waited for a window that was never going to open. M4 added
+     deadline-bearing twins (`expectWriteAttempts`, `expectSleep`, fulfilled through
+     `XCTestExpectation` with the suite's 20-second deadline) and used them everywhere, but M1's own
+     tests still use the continuation form, so the trap is closed for new tests and open for old
+     ones. Closer: convert M1's remaining call sites to the twins and delete the continuation
+     seams, so the deadline-free shape cannot be reached at all. Owner: C7.6 at closeout, or the
+     next leaf that touches `BrowserTabStoreTests`. Filed 2026-09-09 at the R2 fix wave.
+
+248. **No native affordance for opening a page-originated non-web scheme.** D38 refuses every
+     non-web scheme that arrives from inside a rendered page — by link, form, subframe, redirect or
+     script — because WebKit's navigation type authenticates no user gesture. R2 recommended
+     requiring an explicit native action instead; refusing outright is the safe end of that
+     recommendation, and it is what shipped. What is missing is the other end: a user who genuinely
+     clicked a `mailto:` on a page has no way to act on it, and the refusal is diagnostic-only, so
+     they are not even told. This is usability, not correctness — the URL bar remains a working
+     path, and nothing about the affordance is required for the security property to hold. Closer:
+     a panel-local row or context-menu item ("Open in the default application") that carries the
+     refused URL and is actuated by a real `NSEvent`, which is the same unforgeable authority the
+     URL bar has. Owner: C7.6 at M6 if the app wiring makes it cheap, otherwise C7.7. Filed
+     2026-09-09 at the R2 fix wave.
+
+249. **`AfleetSettings` and `NotificationPreferences` still decode through the synthesised
+     `Decodable`.** Q15 found the trap on `DeveloperSettings` — a new non-optional field makes every
+     document an earlier build wrote fail to decode, and `AfleetSettingsStore.read` answers a decode
+     failure with the defaults, so the whole settings document silently reverts. M6 closed it there
+     with a hand-written `init(from:)` using `decodeIfPresent` for every field. The other two types
+     in the same document have the identical shape and the identical exposure: the next field added
+     to either resets the user's settings on first launch of the new build, silently. Not fixed
+     here, by the architect's ruling at this leaf's gate ("if the shape recurs elsewhere in
+     `AfleetSettings`, it is filed, not fixed"). Closer: the same hand-written initialiser on both,
+     or one shared decoding helper, plus a test per type that decodes a document written before its
+     newest field. A stronger closer, if the next owner wants one: make
+     `AfleetSettingsStore.read` distinguish "absent" from "unreadable" so a decode failure is
+     reported rather than answered with defaults. Owner: C5's fence — the next child that adds a
+     settings field. Filed 2026-09-09 at C7.6's M6.
+
+250. **A popup opened without a target frame loses the original request's method and body, and
+     WebKit's supplied configuration.** `BrowserWebTab`'s `createWebViewWith` answers a
+     `window.open` or a `target="_blank"` by asking the model for a new panel tab and loading
+     `URLRequest(url:)` built from the action's URL alone (Q11), so a `POST` becomes a `GET` with no
+     body, and the `WKWebViewConfiguration` WebKit hands the delegate — which carries the opener
+     relationship — is dropped in favour of the panel's own. Real, and out of scope on purpose: this
+     panel exists for a dev server, a documentation page and a pull request, and a `window.open`
+     carrying a POST body is not among them. Nothing here is a security hole; the loss is fidelity
+     on a shape the panel does not aim at. Closer: return a web view built from the supplied
+     configuration and let WebKit perform the navigation itself, which means the model can hand back
+     a `BrowserWebTab` built around a configuration it did not make — a change to
+     `BrowserWebViewFactory`'s one-way ownership. Owner: C7.6 at closeout if a page needs it,
+     otherwise the next leaf that touches `BrowserWebTab`. Filed 2026-09-09 at the R3/R4 fix wave.
+
+251. **A second main window would have two Browser panels claiming the same `WKWebView`, and one of
+     them would lose its page with nothing to say about it.** `AfleetApp` retains one `AppModel`
+     outside its `WindowGroup` and does not disable additional main windows, and `PanelColumnView`
+     passes `.panel` as the surface for every instance it draws. `PanelSurface.panel` carries no
+     window identity — wave C gave that to `poppedOutWindow(tab:channel:)` because a pop-out is a
+     window and needs one — so two main windows are one surface to `BrowserModel`: both would render
+     the same web views, an `NSView` has one superview, and the window that lost them would keep
+     drawing an ordinary Browser panel rather than the "Showing in the main window" placeholder that
+     exists for exactly this. Real, and **currently unreachable**: with one main window there is one
+     `.panel` and the identity is not needed. The treatment is known and is the one wave C already
+     applied to pop-outs — give the main surface its window's identity too, so `liveSurfaces` and
+     the "elsewhere" state work per window. It is not filed as this leaf's because **whether afleet
+     permits a second main window at all is C5's design question**, not the Browser panel's: the
+     answer decides between extending the identity and disabling the command, and a leaf must not
+     pick. Owner: C5. Filed 2026-09-09 at the R5 fix wave (wave D).
+
+252. **A quit that is abandoned after the panel drain leaves the Browser silently not persisting.**
+     Wave E's `BrowserModel.closeForQuit()` sets a one-way barrier and then drains, which is what
+     makes the drain the last word (D62). The barrier is never cleared, so if anything were to stop
+     the termination *after* `QuitGuard` reached the drain, the Browser panel would keep working —
+     tabs open, pages load — and quietly write nothing, with no row saying so. Unreachable today:
+     `QuitGuard.quit()` takes every decision that can decline before it drains, and returns `true`
+     unconditionally afterwards, so nothing in this tree abandons a quit past that point. It becomes
+     reachable the moment a second termination guard, an `applicationShouldTerminate` that can
+     answer `.terminateCancel` later, or a "quit was interrupted" path is added. Closers, in
+     ascending cost: clear the barrier if the quit is abandoned (one call, and the caller has to
+     know); or make the closed state visible as a panel-local row, which is the honest version and
+     is §10's shape. Owner: whoever adds a path that can abandon a quit after the drain — C5's
+     lifecycle, most likely. Filed 2026-09-09 at the R5 fix wave (wave E).
+
+253. **`BrowserPanelView` registers two main-panel lifetimes under one `.panel` key.** SwiftUI keys
+     the Browser subtree by (tab, channel), so a channel switch constructs the replacement before
+     it destroys the outgoing one, and both register as `.panel` — the same key, with nothing to
+     tell the two apart. In that order the outgoing view's `onDisappear` removes the *replacement's*
+     registration, so a live pop-out is handed ownership of the pages and the replacement has no
+     later appearance in which to consume `panelLeftHoldingPages` and take them back. The user's
+     "Bring them back here" is undone for the rest of the session, which is exactly the defect D63
+     closed for the ordering it was written against. File:
+     `Workbench/Sources/BrowserPanel/BrowserPanelView.swift`. Closer: a per-lifetime registration
+     token, so a disappearance can only remove the registration it made. Owner: C7.6.
+     Filed 2026-09-09 at C7.6's merge round (hard stop).
+
+254. **`navigationGeneration` does not advance for history or in-page navigation.** It counts what
+     the user did to the *tab set* — a tab opened, selected, closed, or a URL submitted — so a page
+     the user reached by Back, Forward, or by clicking a link inside the page leaves it where it
+     was. A pull-request lookup made before any of those and resolving after them therefore reads
+     its generation unchanged, concludes nothing overtook it, and replaces the page the user is
+     now on rather than opening its own tab: D61's rule, applied to a clock that did not tick.
+     File: `Workbench/Sources/BrowserPanel/BrowserModel.swift`. Closer: bump the generation on
+     every committed navigation — `settled` already runs for each one — which makes "the current
+     tab still means what the click meant" the whole of what the counter says. Owner: C7.6.
+     Filed 2026-09-09 at C7.6's merge round (hard stop).
+
+255. **The pull-request handler checks supersession only on the resolved branch.** `.resolved`
+     carries the generation the request was made at into `deliver`, which is D61 working; `.failed`
+     carries nothing. So a lookup the user has long since navigated past can still publish its
+     error row through `reportLinkError` and, at `.currentPanel`, reselect the Browser tab over a
+     newer navigation — a row about a link the user has moved on from, on top of a page they
+     just chose. File: `Workbench/Sources/BrowserPanel/BrowserLinkTargets.swift`. Closer: read
+     `made` on the failure branch too, and drop the row and the selection when it has moved.
+     Owner: C7.6. Filed 2026-09-09 at C7.6's merge round (hard stop).

@@ -10,6 +10,20 @@ public struct LinkTarget: Sendable {
     public let tab: PanelTabID
     /// Higher wins when two targets both handle a link; the host picks the most specific.
     public let specificity: Int
+    /// Whether the host pops this target's tab out before delivering `.newWindow`.
+    ///
+    /// A target that answers `.newWindow` by **leaving the app** has no window to be popped out
+    /// into, and a host that popped one anyway would present two: an afleet window holding the tab
+    /// *and* the system browser. C7.6's Browser is that target — Cmd-click on a `.url` or a
+    /// `.pullRequest` is the escape hatch to the user's real browser, with its profiles, its
+    /// extensions and its password manager (ruled at C7.6's gate, 2026-09-09).
+    ///
+    /// It defaults to `true`, so every registrant written before this field keeps the pop-out it
+    /// was written against. A target that declines is routed with **no** `prepare` at all rather
+    /// than with one that does nothing: `prepare` is what makes the registry suspend between
+    /// resolving a target and delivering to it, and a withdrawal landing in a suspension that
+    /// exists for nothing costs an unrelated surviving target its delivery.
+    public let popsOutForNewWindow: Bool
     public let handles: @Sendable (WorkspaceLink) -> Bool
     /// Receives the destination as well as the link, because C7's W5 is binding and says so:
     /// "a handler that receives the link and a `LinkDestination`". A handler given only the link
@@ -17,10 +31,12 @@ public struct LinkTarget: Sendable {
     /// would be lost at integration even though C7's own pure tests passed.
     public let open: @MainActor @Sendable (WorkspaceLink, LinkDestination) async -> Void
 
-    public init(tab: PanelTabID, specificity: Int, handles: @escaping @Sendable (WorkspaceLink) -> Bool,
+    public init(tab: PanelTabID, specificity: Int, popsOutForNewWindow: Bool = true,
+                handles: @escaping @Sendable (WorkspaceLink) -> Bool,
                 open: @escaping @MainActor @Sendable (WorkspaceLink, LinkDestination) async -> Void) {
         self.tab = tab
         self.specificity = specificity
+        self.popsOutForNewWindow = popsOutForNewWindow
         self.handles = handles
         self.open = open
     }

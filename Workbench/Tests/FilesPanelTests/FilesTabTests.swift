@@ -146,7 +146,7 @@ final class FilesTabTests: XCTestCase {
         let hidden = try XCTUnwrap(tab.makeSession(for: offscreen) as? FilesPanelSession)
         let file = try tree.file("onscreen/routed.swift", "let routed = true\n")
         // The host draws the channel it is on, which is what makes that session the presented one.
-        _ = tab.makeView(session: shown, context: onscreen)
+        _ = tab.makeView(session: shown, context: onscreen, surface: .panel)
         try await waitUntilCount(2, in: router)
 
         await router.open(.file(file, line: 3), from: .currentPanel)
@@ -172,7 +172,7 @@ final class FilesTabTests: XCTestCase {
             store: try makeStore(), cwd: try tree.directory("showing"), links: capability))
             as? FilesPanelSession)
         // The last thing rendered is one channel; the host is on the other.
-        _ = tab.makeView(session: drawn, context: drawnContext)
+        _ = tab.makeView(session: drawn, context: drawnContext, surface: .panel)
         host.showing = showing
         let file = try tree.file("showing/routed.swift", "let routed = true\n")
         try await waitUntilCount(2, in: router)
@@ -224,7 +224,7 @@ final class FilesTabTests: XCTestCase {
         let drawnContext = try makeContext(store: try makeStore(),
                                            cwd: try tree.directory("drawn"), links: capability)
         let drawn = try XCTUnwrap(tab.makeSession(for: drawnContext) as? FilesPanelSession)
-        _ = tab.makeView(session: drawn, context: drawnContext)
+        _ = tab.makeView(session: drawn, context: drawnContext, surface: .panel)
         host.showing = nil
         let file = try tree.file("drawn/routed.swift", "let routed = true\n")
         try await waitUntilCount(2, in: router)

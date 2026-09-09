@@ -616,6 +616,45 @@ final class QuitGuardTests: XCTestCase {
                        "a quit with no workspace behind it is not deferred")
         XCTAssertEqual(replies.answers.count, 0, "\(replies.answers.count) deferred repl(ies) were made")
     }
+
+    // MARK: - Panel state on the way to disk (C7.6 A7)
+
+    /// The quit drains panel state that is still on its way to disk, **before** the shutdown.
+    ///
+    /// The Browser commits URL and title changes through a trailing window (C7.6 Q6), so an edit
+    /// made in the last half-second lives in memory by design. `shutdown()` terminates nothing and
+    /// knows nothing about it, and the terminations above end conversations rather than panels — so
+    /// without this the app exits over its own unwritten tab set, which is what G3 rests on.
+    func testTheQuitDrainsPanelStateBeforeItShutsDown() async {
+        let fleet = QuitFleetDouble(channels: [.owned("a", busy: false, hasProcess: true)])
+        var drained = 0
+        var shutdownHadHappened: Bool?
+        let guardModel = QuitGuard(fleet: fleet,
+                                   drainPanels: {
+                                       drained += 1
+                                       shutdownHadHappened = fleet.memberSequence.contains("shutdown")
+                                   },
+                                   confirm: { _ in true })
+
+        let mayExit = await guardModel.quit()
+
+        XCTAssertTrue(mayExit, "nothing was busy, so the quit goes through")
+        XCTAssertEqual(drained, 1, "the quit drained panel state \(drained) times, not once")
+        XCTAssertEqual(shutdownHadHappened, false,
+                       "the drain ran after the shutdown, which is after the writes could still land")
+    }
+
+    /// A declined quit drains nothing: the app is not going away, and the window is still open.
+    func testADeclinedQuitDrainsNothing() async {
+        let fleet = QuitFleetDouble(channels: [.owned("a", busy: true, hasProcess: true)])
+        var drained = 0
+        let guardModel = QuitGuard(fleet: fleet, drainPanels: { drained += 1 }, confirm: { _ in false })
+
+        let mayExit = await guardModel.quit()
+
+        XCTAssertFalse(mayExit, "a declined quit does not exit")
+        XCTAssertEqual(drained, 0, "a declined quit drained panel state anyway")
+    }
 }
 
 // MARK: - Support

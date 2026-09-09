@@ -20,8 +20,8 @@ final class FilesPanelWiringTests: XCTestCase {
         XCTAssertTrue(app.panels.isRegistered(.files), "the app model does not hold the Files tab")
         XCTAssertEqual(app.panels.title(for: .files), PanelTabID.files.defaultTitle,
                        "the registered tab is not named by its own title")
-        XCTAssertEqual(app.panels.available(for: PanelFixtures.context()), [.thread, .files],
-                       "the channel does not offer exactly the two shipped tabs")
+        XCTAssertEqual(app.panels.available(for: PanelFixtures.context()), [.thread, .files, .browser],
+                       "the channel does not offer exactly the shipped tabs")
         XCTAssertTrue(app.panels.session(for: .files, context: PanelFixtures.context())
                         is FilesPanelSession,
                       "the host built something other than the Files panel's session")
@@ -53,7 +53,7 @@ final class FilesPanelWiringTests: XCTestCase {
         let leftContext = try XCTUnwrap(app.panels.context(for: rig.keys[0], cwd: left))
         let shownContext = try XCTUnwrap(app.panels.context(for: rig.keys[1], cwd: shown))
         // The window drew Files for the first channel, then moved to the second with Thread up.
-        _ = app.panels.view(for: .files, context: leftContext)
+        _ = app.panels.view(for: .files, context: leftContext, surface: .panel)
         app.panels.focusChannel(rig.keys[1])
         app.panels.select(.thread)
         try await waitUntilRegistered(app)

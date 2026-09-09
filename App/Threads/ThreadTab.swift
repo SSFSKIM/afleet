@@ -52,7 +52,10 @@ final class ThreadTab: PanelTab {
         ThreadModel(channel: context.key, lifecycle: lifecycle, fold: fold, reservations: reservations)
     }
 
-    func makeView(session: any PanelTabSession, context: ChannelContext) -> AnyView {
+    /// The surface is not read: this tab describes a view rather than owning one, so the same
+    /// description is right in the panel and in a popped-out window (X7).
+    func makeView(session: any PanelTabSession, context: ChannelContext,
+                  surface: PanelSurface) -> AnyView {
         guard let model = session as? ThreadModel else { return AnyView(EmptyView()) }
         return AnyView(ThreadView(model: model))
     }

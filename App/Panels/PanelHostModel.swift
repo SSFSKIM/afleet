@@ -338,12 +338,12 @@ final class PanelHostModel: PanelHost {
         return made
     }
 
-    func view(for id: PanelTabID, context: ChannelContext) -> AnyView {
+    func view(for id: PanelTabID, context: ChannelContext, surface: PanelSurface) -> AnyView {
         guard let tab = tabs[id] else { return AnyView(EmptyView()) }
         let session = session(for: id, context: context)
         // A stable identity per (tab, channel), so an unrelated re-render of the column does not
         // discard the subtree and take the tab's `@State` with it.
-        return AnyView(tab.makeView(session: session, context: context)
+        return AnyView(tab.makeView(session: session, context: context, surface: surface)
             .id(SessionSlot(tab: id, channel: context.key)))
     }
 

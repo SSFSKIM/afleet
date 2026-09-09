@@ -125,7 +125,7 @@ final class ThreadTabTests: XCTestCase {
         let host = PanelHostModel()
         let context = ThreadFixtures.context(Self.channel)
         try host.register(PlaceholderTab())
-        XCTAssertEqual(ViewTree.values(of: PlaceholderTabSession.self, in: host.view(for: .thread, context: context)).count, 1,
+        XCTAssertEqual(ViewTree.values(of: PlaceholderTabSession.self, in: host.view(for: .thread, context: context, surface: .panel)).count, 1,
                        "the placeholder is not drawing before the handover")
 
         await host.unregister(.thread)
@@ -134,7 +134,7 @@ final class ThreadTabTests: XCTestCase {
         XCTAssertEqual(host.available(for: context), [.thread], "the successor is not the tab the host presents")
         XCTAssertEqual(host.title(for: .thread), PanelTabID.thread.defaultTitle,
                        "the tab bar does not read this child's title")
-        let view = host.view(for: .thread, context: context)
+        let view = host.view(for: .thread, context: context, surface: .panel)
         XCTAssertEqual(ViewTree.values(of: PlaceholderTabSession.self, in: view).count, 0,
                        "C5's placeholder is still drawing after the handover")
         XCTAssertEqual(ViewTree.values(of: ThreadModel.self, in: view).count, 1,
@@ -182,7 +182,7 @@ final class ThreadTabTests: XCTestCase {
                       "the launch left C5's placeholder holding .thread")
         XCTAssertEqual(model.panels.selected, .thread, "the handover lost the selection it started with")
         XCTAssertEqual(ViewTree.values(of: PlaceholderTabSession.self,
-                                       in: model.panels.view(for: .thread, context: context)).count, 0,
+                                       in: model.panels.view(for: .thread, context: context, surface: .panel)).count, 0,
                        "C5's placeholder is still drawing after the launch")
         model.activity?.stop()
         fleet.finish()

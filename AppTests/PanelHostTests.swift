@@ -616,6 +616,44 @@ final class PanelHostTests: XCTestCase {
                        "\(recorder.poppedOutAtDelivery) pop-outs were recorded when the target ran, not 1")
     }
 
+    /// A target that declines the pop-out receives `.newWindow` and gets no window.
+    ///
+    /// X7's `popsOutForNewWindow`, ruled at C7.6's gate (2026-09-09). The Browser answers
+    /// `.newWindow` with the *system* browser, so a host that popped its tab out anyway would
+    /// present two windows for one Cmd-click — an afleet one and Safari's. Both halves are in one
+    /// test and asserted against the host's own pop-out registry, so "no pop-out happened" is a
+    /// statement about the host rather than about which branch the source took: the declining
+    /// target is delivered to and the default one still pops out, and the registry holds exactly
+    /// the second.
+    func testATargetThatDeclinesThePopOutDoesNotGetOneAndADefaultTargetStillDoes() async throws {
+        let host = PanelHostModel()
+        try host.register(StubPanelTab(.browser))
+        try host.register(StubPanelTab(.files))
+        let channel = PanelFixtures.key(0)
+        _ = host.context(for: channel, cwd: PanelFixtures.cwd)
+        host.focusChannel(channel)
+        let recorder = LinkRecorder()
+        host.presentWindow = { _ in recorder.note("window") }
+        await host.links.register(PanelFixtures.decliningURLTarget(.browser, specificity: 5,
+                                                                   into: recorder, note: "browser"))
+        await host.links.register(PanelFixtures.fileTarget(.files, specificity: 5, host: host,
+                                                           into: recorder, note: "files"))
+
+        await host.links.open(.url(PanelFixtures.url(1)), from: .newWindow)
+
+        XCTAssertEqual(recorder.destinations, [.newWindow],
+                       "the declining target received \(recorder.destinations) rather than .newWindow")
+        XCTAssertEqual(recorder.notes, ["browser"],
+                       "the recorded order was \(recorder.notes)")
+        XCTAssertEqual(host.poppedOut.count, 0,
+                       "the host recorded \(host.poppedOut.count) pop-outs for a target that declined one")
+
+        await host.links.open(PanelFixtures.fileLink, from: .newWindow)
+
+        XCTAssertEqual(host.poppedOut.map(\.tab), [.files],
+                       "the host popped out \(host.poppedOut.map(\.tab)) rather than the default target's tab")
+    }
+
     /// The handler receives the destination for both cases.
     ///
     /// A host that hard-coded `.currentPanel` would satisfy every other routing test and silently
@@ -1096,7 +1134,8 @@ private final class StubPanelTab: PanelTab {
         return CountedSession(counter: counter)
     }
 
-    func makeView(session: any PanelTabSession, context: ChannelContext) -> AnyView {
+    func makeView(session: any PanelTabSession, context: ChannelContext,
+                  surface: PanelSurface) -> AnyView {
         AnyView(SessionHoldingPanel(session: session))
     }
 }
@@ -1231,6 +1270,19 @@ enum PanelFixtures {
                    open: { link, destination in
                        recorder.delivered(tab: tab, link: link, destination: destination,
                                           poppedOut: host?.poppedOut.count ?? 0, note: note)
+                   })
+    }
+
+    /// A target for `.url` links that declines the pop-out, the shape C7.6's Browser registers:
+    /// its `.newWindow` is the *system* browser, so there is no afleet window for it to render in.
+    @MainActor
+    fileprivate static func decliningURLTarget(_ tab: PanelTabID, specificity: Int,
+                                   into recorder: LinkRecorder, note: String? = nil) -> LinkTarget {
+        LinkTarget(tab: tab, specificity: specificity, popsOutForNewWindow: false,
+                   handles: { link in if case .url = link { true } else { false } },
+                   open: { link, destination in
+                       recorder.delivered(tab: tab, link: link, destination: destination,
+                                          poppedOut: 0, note: note)
                    })
     }
 

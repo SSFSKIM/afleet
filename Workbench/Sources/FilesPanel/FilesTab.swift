@@ -90,7 +90,10 @@ public final class FilesTab: PanelTab {
         return session
     }
 
-    public func makeView(session: any PanelTabSession, context: ChannelContext) -> AnyView {
+    /// The surface is not read: this tab describes a view rather than owning one, so the same
+    /// description is right in the panel and in a popped-out window (X7).
+    public func makeView(session: any PanelTabSession, context: ChannelContext,
+                         surface: PanelSurface) -> AnyView {
         guard let session = session as? FilesPanelSession else { return AnyView(EmptyView()) }
         presented.bind(session)
         return AnyView(FilesPanelView(session: session))

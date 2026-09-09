@@ -24,7 +24,11 @@ struct PoppedOutPanelScene: View {
             // this body to drop the old view and the session that view retains.
             if let panel, app.panels.poppedOut.contains(panel),
                let context = app.panels.context(for: panel.channel) {
-                app.panels.view(for: panel.tab, context: context)
+                // The surface names *this* window, not "a popped-out window": several can be open
+                // at once, one per (tab, channel), and a panel that owns an `NSView` has to be
+                // able to tell which of them is asking (C7.6 fix wave C).
+                app.panels.view(for: panel.tab, context: context,
+                                surface: .poppedOutWindow(tab: panel.tab, channel: panel.channel))
                     .navigationTitle(panel.tab.defaultTitle)
             } else {
                 PlaceholderColumn(title: "This panel has no channel",

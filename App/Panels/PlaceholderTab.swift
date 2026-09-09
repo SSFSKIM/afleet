@@ -31,7 +31,8 @@ final class PlaceholderTab: PanelTab {
         PlaceholderTabSession()
     }
 
-    func makeView(session: any PanelTabSession, context: ChannelContext) -> AnyView {
+    func makeView(session: any PanelTabSession, context: ChannelContext,
+                  surface: PanelSurface) -> AnyView {
         guard let session = session as? PlaceholderTabSession else { return AnyView(EmptyView()) }
         return AnyView(PlaceholderTabView(session: session, context: context))
     }
