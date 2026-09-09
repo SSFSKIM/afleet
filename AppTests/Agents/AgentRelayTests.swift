@@ -147,6 +147,48 @@ final class AgentRelayTests: XCTestCase {
                        "one forwarded frame was read as delivering two separate sends")
     }
 
+    // MARK: - Settlement across a rebuild (recomposition finding 1)
+
+    /// **A settled arm survives *Check again*, and the call it did not claim stays free.**
+    ///
+    /// The turn boundary this machine reads its no-call arm from is a `turnSummary`, and a turn
+    /// summary comes from a `result` frame, which is wire-only: §7.3 puts per-turn cost and usage in
+    /// the ephemeral overlay, and the recorded transcript of a two-turn session carries no `result`
+    /// record at all. So a timeline rebuilt from the transcript files — what *Check again* leaves
+    /// behind — has no boundary in it, and an older record that had already read *Not delivered*
+    /// scans on past its own turn into the next one.
+    ///
+    /// Both halves are asserted, because either alone passes against the defect's opposite: the
+    /// older record must keep the conclusion it settled on, **and** the newer record must still get
+    /// the call, which is item 51's one-to-one correlation.
+    func testASettledArmSurvivesARebuildThatCarriesNoTurnSummaries() {
+        var wire = RelayWire()
+        wire.open()
+        let older = wire.record()
+        wire.assistantText(RelayWire.reply)
+        wire.result()
+        XCTAssertTrue(wire.state(of: older) == .notDelivered(.noCall),
+                      "the first turn closed with no SendMessage call and did not settle the no-call arm")
+
+        // The same channel as its transcript files hold it: every record, and none of the overlay.
+        XCTAssertEqual(wire.rebuiltFromFiles.overlay.turns.count, 0,
+                       "the file-only rebuild carries \(wire.rebuiltFromFiles.overlay.turns.count) turn summary(s), "
+                       + "so this asserts nothing about a timeline with no turn boundary in it")
+        XCTAssertTrue(wire.state(of: older, in: wire.rebuiltFromFiles) == .notDelivered(.noCall),
+                      "a settled no-call arm returned to another state once the turn boundary was gone")
+
+        // A second send of the same text to the same run, in a later turn, which the model relays.
+        let newer = wire.record(promptUUID: RelayWire.secondPromptUUID)
+        wire.sendMessageCall(to: RelayWire.target, id: RelayWire.secondSendCall)
+        wire.sendMessageResult(id: RelayWire.secondSendCall, success: true)
+        wire.forwarded(RelayWire.message)
+
+        XCTAssertTrue(wire.state(of: older, in: wire.rebuiltFromFiles) == .notDelivered(.noCall),
+                      "the older record claimed a later send's call once the turn boundary was gone")
+        XCTAssertTrue(wire.state(of: newer, in: wire.rebuiltFromFiles) == .delivered,
+                      "the newer record did not claim its own call and delivery after the rebuild")
+    }
+
     // MARK: - The four Not delivered arms
 
     /// **G4, arm one: the turn ends with no `SendMessage` call.**
@@ -901,9 +943,24 @@ struct RelayWire {
               "session_id": .string(Self.session.description)])
     }
 
+    /// The same channel **as its transcript files hold it** — the *Check again* path, and the
+    /// file-only rebuild of a channel opened from disk. The durable half is every record; the
+    /// overlay is dropped, because §7.3's overlay is "everything only the wire carries" and the
+    /// turn summary this machine reads a turn boundary from is folded from a `result` frame, which
+    /// no transcript record carries. The registry mirror goes with it: only a live process fills it.
+    var rebuiltFromFiles: ChannelTimeline {
+        ChannelTimeline(durable: reducer.durable, overlay: .empty, preview: nil,
+                        agents: reducer.agents, registry: RegistryMirror())
+    }
+
     // MARK: - Reading it
 
     func state(of record: AgentRelayRecord) -> AgentRelayState { reading(of: record).state }
+
+    /// The same reading, against a timeline this rig did not publish — the rebuild.
+    func state(of record: AgentRelayRecord, in timeline: ChannelTimeline) -> AgentRelayState {
+        relay.reading(of: record, in: key, of: timeline).state
+    }
 
     func reading(of record: AgentRelayRecord) -> AgentRelayReading {
         relay.reading(of: record, in: key, of: timeline)

@@ -62,12 +62,27 @@ enum AgentRelayMachine {
         /// record that took a call an older record had already settled on would report the older
         /// send's outcome for the newer one. Nil where no call named this run.
         var claimedCall: String?
+        /// Whether the turn this record's prompt started has closed — the `result` attributed to
+        /// this prompt uuid. It is what says the evidence is **complete**: until the turn closes the
+        /// model may still call `SendMessage`, call it again after a refusal, or call it for a
+        /// different run, and every one of those revises the arm.
+        var turnClosed: Bool
 
         init(_ state: AgentRelayState, reply: String? = nil, claimedKey: String? = nil,
-             claimedCall: String? = nil) {
+             claimedCall: String? = nil, turnClosed: Bool = false) {
             self.state = state; self.reply = reply; self.claimedKey = claimedKey
-            self.claimedCall = claimedCall
+            self.claimedCall = claimedCall; self.turnClosed = turnClosed
         }
+
+        /// Whether this conclusion is one no later frame can take back, and therefore one the
+        /// registry keeps rather than re-deriving.
+        ///
+        /// **A terminal arm alone is not enough.** *Not delivered* mid-turn is provisional by
+        /// design — the wrong-target arm is what is left while this run's own call has not arrived,
+        /// and a refusal the model retries in the same turn becomes a relay — so the arm settles
+        /// only once the turn has closed. *Delivered* settles on its own: the message is in the
+        /// agent's transcript and a transcript is not un-written.
+        var isSettled: Bool { state.isTerminal && (turnClosed || state == .delivered) }
     }
 
     /// Every record of one channel, advanced together.
@@ -76,11 +91,25 @@ enum AgentRelayMachine {
     /// same run are two messages and one forwarded frame is evidence for one of them; advancing each
     /// record in isolation would let a single frame deliver both. Records are advanced oldest first,
     /// so the earlier send claims the earlier frame.
-    static func advance(_ records: [AgentRelayRecord], in timeline: ChannelTimeline) -> [AgentRelayRecord.ID: Outcome] {
+    ///
+    /// **`settled` is the conclusions the registry already holds**, and they are held rather than
+    /// re-derived: the turn boundary a *Not delivered* was read from lives in the overlay, and a
+    /// timeline rebuilt from the transcript files carries no overlay at all (§7.3), so a record
+    /// re-derived after *Check again* would scan straight past its own turn into a later one and
+    /// claim a later send's call. A settled record's own claims are taken first, so nothing that is
+    /// re-derived can take a call or a delivery frame that already belongs to one.
+    static func advance(_ records: [AgentRelayRecord], in timeline: ChannelTimeline,
+                        settled: [AgentRelayRecord.ID: Outcome] = [:]) -> [AgentRelayRecord.ID: Outcome] {
         var claimed: Set<String> = []
         var calls: Set<String> = []
         var outcomes: [AgentRelayRecord.ID: Outcome] = [:]
-        for record in records.sorted(by: { $0.sentAt < $1.sentAt }) {
+        for record in records {
+            guard let held = settled[record.id] else { continue }
+            if let key = held.claimedKey { claimed.insert(key) }
+            if let call = held.claimedCall { calls.insert(call) }
+            outcomes[record.id] = held
+        }
+        for record in records.sorted(by: { $0.sentAt < $1.sentAt }) where outcomes[record.id] == nil {
             let outcome = advance(record, in: timeline, claiming: claimed, callsClaimed: calls)
             if let key = outcome.claimedKey { claimed.insert(key) }
             if let call = outcome.claimedCall { calls.insert(call) }
@@ -167,24 +196,31 @@ enum AgentRelayMachine {
         }
 
         guard let ours = settling(among: ours) else {
-            if wrongTarget { return Outcome(.notDelivered(.wrongTarget), reply: reply) }
-            return Outcome(turnClosed ? .notDelivered(.noCall) : .pending, reply: reply)
+            if wrongTarget {
+                return Outcome(.notDelivered(.wrongTarget), reply: reply, turnClosed: turnClosed)
+            }
+            return Outcome(turnClosed ? .notDelivered(.noCall) : .pending, reply: reply, turnClosed: turnClosed)
         }
         switch ours.verdict {
-        case .refused: return Outcome(.notDelivered(.refused), reply: reply, claimedCall: ours.id)
-        case .running: return Outcome(.pending, reply: reply, claimedCall: ours.id)
+        case .refused:
+            return Outcome(.notDelivered(.refused), reply: reply, claimedCall: ours.id, turnClosed: turnClosed)
+        case .running:
+            return Outcome(.pending, reply: reply, claimedCall: ours.id, turnClosed: turnClosed)
         // Not stored above, and named here rather than defaulted so a fifth verdict cannot be
         // absorbed by an `default:` that means whatever the last author assumed.
-        case .wrongTarget: return Outcome(.notDelivered(.wrongTarget), reply: reply)
+        case .wrongTarget:
+            return Outcome(.notDelivered(.wrongTarget), reply: reply, turnClosed: turnClosed)
         case .relayed: break
         }
         if let key = delivery(of: record, in: items, after: ours.index, claiming: claimed) {
-            return Outcome(.delivered, reply: reply, claimedKey: key, claimedCall: ours.id)
+            return Outcome(.delivered, reply: reply, claimedKey: key, claimedCall: ours.id,
+                           turnClosed: turnClosed)
         }
         if stoppedBeforeNextRound(record.target, in: timeline, after: ours.at) {
-            return Outcome(.notDelivered(.stoppedBeforeNextRound), reply: reply, claimedCall: ours.id)
+            return Outcome(.notDelivered(.stoppedBeforeNextRound), reply: reply, claimedCall: ours.id,
+                           turnClosed: turnClosed)
         }
-        return Outcome(.relayed, reply: reply, claimedCall: ours.id)
+        return Outcome(.relayed, reply: reply, claimedCall: ours.id, turnClosed: turnClosed)
     }
 
     /// One `SendMessage` call of the turn, as this record reads it.
@@ -374,6 +410,22 @@ final class AgentRelayRegistry {
     /// retry opens belongs to the registry the press came from.
     private var resends: [AgentRelayRecord.ID: @MainActor (AgentRelayRecord.ID, AgentRelayRegistry) async -> Void] = [:]
 
+    /// The conclusions already reached, kept for the life of the app.
+    ///
+    /// **The one thing the derivation cannot re-derive.** The state is read from the timeline on
+    /// every ask, and that is right while the evidence is still arriving — but the evidence a *Not
+    /// delivered* is read from includes the turn's `result`, which lives in the ephemeral overlay
+    /// and in no transcript record (§7.3). *Check again* rebuilds the workspace and the channel's
+    /// timeline comes back from the files with no turn boundary in it, so a record that had already
+    /// concluded would go back to *Pending* and then read the **next** send's `SendMessage` call as
+    /// its own — two messages settled on one call, which is exactly the correlation item 51 asks
+    /// for one-to-one. So a conclusion is kept, and re-derivation touches the unsettled records only.
+    ///
+    /// `@ObservationIgnored` because it is the derivation's own memory and not state a surface
+    /// draws: the reading a row shows is published by `records` and by the timeline it is derived
+    /// from, and a write here during a body evaluation must not invalidate that body.
+    @ObservationIgnored private var settlements: [AgentRelayRecord.ID: AgentRelayMachine.Outcome] = [:]
+
     /// Opens a record for a send that has already happened. Called after `sendPrompt` returned its
     /// uuid, never before: a record for a send the engine refused would be a message with a state and
     /// no message.
@@ -399,7 +451,13 @@ final class AgentRelayRegistry {
     /// Every record of a channel with its state, derived from the timeline in one pass so that
     /// delivery stays correlated one-to-one.
     func outcomes(in channel: ChannelKey, of timeline: ChannelTimeline) -> [AgentRelayRecord.ID: AgentRelayMachine.Outcome] {
-        AgentRelayMachine.advance(records(in: channel), in: timeline)
+        let records = records(in: channel)
+        let outcomes = AgentRelayMachine.advance(records, in: timeline, settled: settlements)
+        for record in records {
+            guard let outcome = outcomes[record.id], outcome.isSettled else { continue }
+            settlements[record.id] = outcome
+        }
+        return outcomes
     }
 
     /// What the row for one sent message draws (contract Y8), or nil where this prompt sent no relay
