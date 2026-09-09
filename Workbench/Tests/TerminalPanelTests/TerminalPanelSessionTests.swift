@@ -90,6 +90,42 @@ final class TerminalPanelSessionTests: XCTestCase {
         XCTAssertNil(session.selectedPane, "closing the last pane left a selected pane")
     }
 
+    // MARK: Group 4 — two closes of one pane
+
+    /// A close suspends while the pane tears its child down, and the panel can be re-entered
+    /// there: a double-click on the close button, or the view's close arriving while the
+    /// confirmation's is in flight, both put two `close(_:)` calls on one pane inside each other.
+    /// The second must be the no-op the first's work already made it, and not a second mutation
+    /// over an index the first is still holding — which removes a neighbour, reports a second exit
+    /// for a request C4 has already been told about, or leaves the array shorter than the index it
+    /// is about to remove from.
+    func testTwoConcurrentClosesOfOnePaneMoveTheStackOnceAndReportOneExit() async throws {
+        let (session, fixture) = try makeSession()
+        let neighbour = session.openShellPane()
+        let target = session.run(PaneRequest(
+            executable: URL(filePath: "/bin/sh"),
+            arguments: ["-c", PaneTestChild.selfTerminating(after: 30, "sleep 30")],
+            cwd: fixture.cwd,
+            environment: ["PATH": "/usr/bin:/bin"],
+            purpose: .logs(JobShort(rawValue: "jtwice"))
+        ))
+        XCTAssertEqual(session.panes.count, 2, "the pane the closes are about was never opened")
+
+        async let first: Void = session.close(target)
+        async let second: Void = session.close(target)
+        _ = await (first, second)
+
+        XCTAssertEqual(session.panes.count, 1, "panes=\(session.panes.count)")
+        XCTAssertTrue(session.panes.first === neighbour, "the second close removed the neighbour")
+        XCTAssertEqual(session.selectedIndex, 0, "the selection does not name the surviving pane")
+
+        // Both closes have returned, so every report either has been made or never will be; the
+        // wait gives a second one every chance to arrive before it is called absent.
+        try? await Task.sleep(for: .milliseconds(300))
+        let reported = await fixture.exits.recorded
+        XCTAssertEqual(reported.count, 1, "exits=\(reported.count)")
+    }
+
     // MARK: Group 5 — G4.1: two channels, two stacks, and a child that survives the switch
 
     func testTwoChannelsNeverSeeEachOthersPanesAndAChildSurvivesTheSwitch() async throws {

@@ -61,8 +61,38 @@ enum PaneTestContext {
     actor RecordingStore: ScopedStore {
         private var storage: [String: Data] = [:]
         private(set) var writtenKeys: [String] = []
+        /// A read held open, and whoever asked to be told one had begun. The pair exists because
+        /// standing a mutation *inside* the read a restore is waiting on is the one interleaving
+        /// that cannot be produced by ordering calls.
+        private var isHoldingReads = false
+        private var heldRead: CheckedContinuation<Void, Never>?
+        private var announcement: CheckedContinuation<Void, Never>?
+        private var hasBegunHeldRead = false
+
+        /// Every read from here on blocks until ``releaseHeldRead()``.
+        func holdReads() { isHoldingReads = true }
+
+        func releaseHeldRead() {
+            isHoldingReads = false
+            heldRead?.resume()
+            heldRead = nil
+        }
+
+        /// Returns once a held read has begun, so the caller knows it is standing inside one.
+        func awaitHeldRead() async {
+            guard !hasBegunHeldRead else { return }
+            await withCheckedContinuation { announcement = $0 }
+        }
 
         func read<T: Codable & Sendable>(_ type: T.Type, key: String) async throws -> T? {
+            if isHoldingReads {
+                hasBegunHeldRead = true
+                announcement?.resume()
+                announcement = nil
+                await withCheckedContinuation { (held: CheckedContinuation<Void, Never>) in
+                    heldRead = held
+                }
+            }
             guard let data = storage[key] else { return nil }
             return try JSONDecoder().decode([T].self, from: data).first
         }

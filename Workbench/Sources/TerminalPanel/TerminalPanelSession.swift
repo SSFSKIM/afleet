@@ -55,13 +55,32 @@ public final class TerminalPanelSession: PanelTabSession {
     /// The write in flight, chained so two mutations in one turn cannot land out of order. The
     /// document has one writer, so serialising it here is the whole of the concurrency story.
     @ObservationIgnored private var persistence: Task<Void, Never>?
-    @ObservationIgnored private var isRestoring = false
+    /// How far the one read of the W6 document has got. Nothing is written before it is `.done`:
+    /// a session that wrote first would write over shells it has never seen (see
+    /// ``schedulePersist()``).
+    @ObservationIgnored private var reading: DocumentRead = .pending
     /// The one restore, kept so a re-render can be told it already happened and so a test can wait
-    /// for it. `nil` until the tab's first render asks (see ``restoreOnce()``).
+    /// for it. `nil` until the first render — or the first pane — asks (see ``restoreOnce()``).
     @ObservationIgnored private var restoration: Task<Void, Never>?
+    /// The closes in flight, by pane. A second close of one pane joins the first and mutates
+    /// nothing: `TerminalPane.close()` marks itself closed before it awaits its teardown, so by
+    /// the time a second call returned there would be no live child left to tell the two apart —
+    /// and both would be holding a position in `panes` from before the suspension.
+    @ObservationIgnored private var closes: [ObjectIdentifier: Task<Void, Never>] = [:]
     /// The pane the standing question is about, held by reference because the confirmation value
     /// carries only its identity.
     @ObservationIgnored private var paneAwaitingClose: TerminalPane?
+
+    /// The three states of the one document read, in order. They exist because the read is a
+    /// suspension the rest of the session goes on running through.
+    private enum DocumentRead {
+        /// Nobody has asked yet, and nothing may be written.
+        case pending
+        /// The read is in flight. A mutation is welcome; its write waits for the read to land.
+        case reading
+        /// Read, and reconciled with whatever the session held. Writes go out from here on.
+        case done
+    }
 
     public init(context: ChannelContext) {
         self.context = context
@@ -157,11 +176,18 @@ public final class TerminalPanelSession: PanelTabSession {
     /// Design §6), which is why this returns `nil` rather than restarting one.
     @discardableResult
     public func restart(_ pane: TerminalPane) async -> TerminalPane? {
-        guard pane.request == nil, let index = panes.firstIndex(where: { $0 === pane }) else {
+        guard pane.request == nil,
+              panes.contains(where: { $0 === pane }),
+              closes[ObjectIdentifier(pane)] == nil
+        else {
             return nil
         }
         let cwd = pane.spawn?.cwd
         await pane.close()
+        // Resolved after the suspension and never before it: a pane opened or closed while the
+        // child was being torn down has moved every position after its own, and the old one now
+        // names a neighbour — or nothing at all.
+        guard let index = panes.firstIndex(where: { $0 === pane }) else { return nil }
         panes.remove(at: index)
         reportedPanes.remove(ObjectIdentifier(pane))
         if paneAwaitingClose === pane { cancelPendingClose() }
@@ -196,11 +222,32 @@ public final class TerminalPanelSession: PanelTabSession {
     /// Ends the pane, drops it, moves the selection to a neighbour and rewrites the document.
     /// Closing the last pane leaves none: a Terminal tab with no pane is a state the view renders,
     /// not one this method papers over by opening another.
+    ///
+    /// Two closes of one pane are one close: the second awaits the first and returns, rather than
+    /// mutating a second time over a position the first is still holding.
     public func close(_ pane: TerminalPane) async {
-        guard let index = panes.firstIndex(where: { $0 === pane }) else { return }
+        let identity = ObjectIdentifier(pane)
+        if let inFlight = closes[identity] {
+            await inFlight.value
+            return
+        }
+        let close = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await performClose(pane)
+        }
+        closes[identity] = close
+        await close.value
+        closes[identity] = nil
+    }
+
+    private func performClose(_ pane: TerminalPane) async {
+        guard panes.contains(where: { $0 === pane }) else { return }
         // A question about a pane that is going away has nothing left to ask.
         if paneAwaitingClose === pane { cancelPendingClose() }
         await pane.close()
+        // Resolved after the suspension: the stack may have moved while the child was being torn
+        // down, and a pane that is no longer here has already been reported and dropped.
+        guard let index = panes.firstIndex(where: { $0 === pane }) else { return }
         reportExitIfOwed(by: pane)
         let wasSelected = selectedIndex == index
         panes.remove(at: index)
@@ -222,38 +269,56 @@ public final class TerminalPanelSession: PanelTabSession {
     /// read. An absent document and one written under a `schemaVersion` this build does not know
     /// are the same answer and neither throws: a panel that refused to open because its own state
     /// file was from another version would be a channel the user cannot get a terminal in.
+    ///
+    /// Read once, and once only — the second ask is a no-op, because reading the same document
+    /// into the panes it already opened is how a stack doubles.
     public func restore() async {
+        await restore(openingDefaultPane: true)
+    }
+
+    /// `openingDefaultPane` is the difference between the two askers. A renderer must not be shown
+    /// an empty Terminal tab, so it gets one shell pane when there is nothing to read; the read a
+    /// pane request triggers is only there to make the write safe, and a panel that opened a shell
+    /// nobody asked for in a channel nobody is looking at would be spawning on its own initiative.
+    private func restore(openingDefaultPane: Bool) async {
+        guard reading == .pending else { return }
+        reading = .reading
         let document = try? await context.store.read(TerminalPanelState.self, key: storeKey)
-        isRestoring = true
-        defer { isRestoring = false }
-        guard let document,
-              document.schemaVersion == TerminalPanelState.currentSchemaVersion,
-              !document.panes.isEmpty
-        else {
+        // Read after the suspension: whatever the session did during it is what the document is
+        // being reconciled with, and it is that state — not the empty one this began in — that
+        // decides whether there is a tab to fill and a selection to leave alone.
+        let held = !panes.isEmpty
+        let selectionHeld = selectedIndex
+        if let document,
+           document.schemaVersion == TerminalPanelState.currentSchemaVersion,
+           !document.panes.isEmpty {
+            for persisted in document.panes {
+                openShellPane(cwd: persisted.cwd.map { URL(fileURLWithPath: $0) })
+            }
+            if held {
+                // The session chose a pane before the document arrived. That choice is the user's
+                // and the document's is stale, so the restored shells go behind it.
+                selectedIndex = selectionHeld
+            } else if let selected = document.selected, panes.indices.contains(selected) {
+                selectedIndex = selected
+            }
+        } else if openingDefaultPane, !held {
             openShellPane()
-            isRestoring = false
-            schedulePersist()
-            return
         }
-        for persisted in document.panes {
-            openShellPane(cwd: persisted.cwd.map { URL(fileURLWithPath: $0) })
-        }
-        if let selected = document.selected, panes.indices.contains(selected) {
-            selectedIndex = selected
-        }
-        isRestoring = false
+        reading = .done
+        // The one write of everything the two halves came to: the panes the document named, the
+        // panes the session opened while it was being read, and the selection standing over them.
         schedulePersist()
     }
 
     /// Reads the W6 document once for the life of this session, and never again.
     ///
-    /// The tab calls it on every render because a session has no other moment it can be sure of:
+    /// The tab calls it on every render because a render is a moment a session can be sure of:
     /// it may have been made by the pane runner for a channel no window was showing, long before
     /// anything rendered. Idempotent, so the second render is not a second restore — which would
     /// otherwise double the channel's panes on every redraw.
     public func restoreOnce() {
-        guard restoration == nil else { return }
-        restoration = Task { await self.restore() }
+        requestRead(openingDefaultPane: true)
     }
 
     /// Returns once the one restore has landed. Tests await it; nothing in the app needs to.
@@ -261,16 +326,35 @@ public final class TerminalPanelSession: PanelTabSession {
         await restoration?.value
     }
 
-    /// Returns once every scheduled write has landed. Tests await it; nothing in the app needs to.
+    /// Returns once every scheduled write has landed — including the one a restore still owes,
+    /// since nothing is written before the document has been read. Tests await it; nothing in the
+    /// app needs to.
     public func settlePersistence() async {
+        await restoration?.value
         await persistence?.value
     }
 
+    private func requestRead(openingDefaultPane: Bool) {
+        guard restoration == nil, reading == .pending else { return }
+        restoration = Task { await self.restore(openingDefaultPane: openingDefaultPane) }
+    }
+
     private func schedulePersist() {
-        guard !isRestoring else { return }
+        // Nothing is written until the document has been read. A session the pane runner made for
+        // a channel no window is showing holds no persistable pane at all, so its write would be
+        // an empty document over the channel's saved shells — and a mutation standing inside the
+        // read would race the reconciliation. Both wait for the same moment; ``restore`` ends by
+        // asking for this write again.
+        guard reading == .done else { return }
+        let shellPanes = panes.enumerated().filter { $0.element.request == nil }
         let document = TerminalPanelState(
-            panes: panes.filter { $0.request == nil }.map { PersistedPane(cwd: $0.spawn?.cwd.path) },
-            selected: selectedIndex
+            panes: shellPanes.map { PersistedPane(cwd: $0.element.spawn?.cwd.path) },
+            // An index into the array being written, and not into the full stack: the restore
+            // reads it back against the shell panes alone, so a stack with a request pane in front
+            // of them would come back selecting the pane after the right one.
+            selected: selectedIndex.flatMap { selected in
+                shellPanes.firstIndex { $0.offset == selected }
+            }
         )
         let store = context.store
         let key = storeKey
@@ -284,6 +368,9 @@ public final class TerminalPanelSession: PanelTabSession {
     // MARK: Internals
 
     private func append(_ pane: TerminalPane) {
+        // A pane is the first thing that could put a write in front of the read, so it is also
+        // what makes the document be read when no renderer has asked yet.
+        requestRead(openingDefaultPane: false)
         panes.append(pane)
         selectedIndex = panes.count - 1
         paneCountDidChange?(self)
