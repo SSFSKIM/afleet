@@ -129,6 +129,14 @@ final class AppModel: FilesTabHost {
     /// call site changes when it does.
     var agentNavigation: any AgentNavigating = NoAgentNavigation()
 
+    /// Which run each channel's Agents pane has open (C6.4, child spec D5).
+    ///
+    /// **One instance, app-scoped**, for the reason `decisions` above it is: contract Y4's
+    /// `show(run:in:)` is synchronous and the tab's per-channel session is built lazily by the host
+    /// on first render, so a chip clicked before the tab was ever opened has nothing to write to. A
+    /// store per surface would drop exactly those navigations.
+    let agentSelection = AgentSelectionStore()
+
     /// Activity, the badges and the notification router (spec §5, §6). Nil until a launch reaches a
     /// workspace, and rebuilt by each one — *Check again* is the same call as the first launch, and
     /// a second Activity following the first fleet's channels would notify twice.
@@ -423,6 +431,22 @@ final class AppModel: FilesTabHost {
                 assertionFailure("the handover unregistered .thread before registering over it")
             }
             if wasShowingThread { panels.select(.thread) }
+            // C6.4's Agents tab under `.agents` (contract Y3, and this leaf's `[parent-impact]`).
+            // **A plain registration, not a handover**: `PlaceholderTab` claims `.thread` alone and
+            // nothing else registers `.agents`, so there is nothing to unregister first. Here
+            // rather than on `init`'s registration line for Y3's second reason — the tab's own
+            // later actions are X5 requests, and the lifecycle exists nowhere earlier.
+            //
+            // The registry reaches it as a closure and not as a reference: a panel holding the
+            // app's one `ChannelTimelineRegistry` is the duplicate-capability path the C6 cut
+            // exists to prevent, and X7 hands panels capabilities rather than the host.
+            let agents = AgentsTab(timelines: { [timelines] key in timelines.model(for: key).timeline },
+                                   selection: agentSelection)
+            do {
+                try panels.register(agents)
+            } catch {
+                assertionFailure("the Agents tab is registered on a host where nothing holds .agents")
+            }
         }
         await startActivity(over: reached)
         // **Last.** Publishing the route is what puts the actionable surfaces on screen — the
