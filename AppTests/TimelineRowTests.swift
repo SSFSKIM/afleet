@@ -196,6 +196,65 @@ final class TimelineRowTests: XCTestCase {
                              "the opaque row drew no text at all")
     }
 
+    // MARK: - The task card's identity (review scalpel-3#2)
+
+    /// **A cached task card does not outlive the capability it was built under.**
+    ///
+    /// `TaskCardSeam` keys both the mounted `TaskCardView` and the `.task` that builds the model by
+    /// one identity, and `makeTaskCard` returns a card only for a channel afleet owns that has a
+    /// process to send through. Keyed by the task and its status alone, a card built as nil while
+    /// the channel was read-only stayed nil after the channel was adopted, and one built while the
+    /// channel was owned went on offering *Stop* after it was released — `TaskCardView` holds its
+    /// model in `@State`, so the same identity keeps the same card.
+    ///
+    /// The documented stability is asserted in the same breath: `task_progress` arrives repeatedly
+    /// while a run is live, and a rebuild on each one would drop a refusal banner and an in-flight
+    /// request the reader is watching, so a progress update must not move the identity while the
+    /// status does.
+    func testTheTaskCardIdentityFollowsTheChannelsCapability() {
+        let item = Self.task(status: .running)
+        let lifecycle = LifecycleDouble()
+        let owned = InventedItems.context(lifecycle: lifecycle, isOwned: true)
+        let readOnly = InventedItems.context(lifecycle: lifecycle, isOwned: false)
+        let released = InventedItems.context(lifecycle: nil, isOwned: true)
+
+        // The floor: the gate the identity has to follow is the one that is actually there.
+        XCTAssertNotNil(owned.makeTaskCard(item), "an owned channel's running task was given no card")
+        XCTAssertNil(readOnly.makeTaskCard(item), "a read-only channel's running task was given a card")
+        XCTAssertNil(released.makeTaskCard(item), "a channel with no process built a card anyway")
+
+        XCTAssertNotEqual(TaskCardSeam.identity(of: item, in: readOnly),
+                          TaskCardSeam.identity(of: item, in: owned),
+                          "a channel that was adopted keeps the card it was denied while read-only")
+        XCTAssertNotEqual(TaskCardSeam.identity(of: item, in: released),
+                          TaskCardSeam.identity(of: item, in: owned),
+                          "a channel that lost its process keeps the actionable card it had")
+        XCTAssertNotEqual(TaskCardSeam.identity(of: item, in: nil),
+                          TaskCardSeam.identity(of: item, in: owned),
+                          "a row drawn outside the timeline's subtree keeps the card it had inside it")
+
+        // What must *not* move it: another `task_progress` on the same live run.
+        let progressed = Self.task(status: .running, description: "an invented job, further along")
+        XCTAssertEqual(TaskCardSeam.identity(of: progressed, in: owned),
+                       TaskCardSeam.identity(of: item, in: owned),
+                       "a task_progress rebuilt the card, dropping the banner and the request in flight")
+        // And what must: the status the card's actions are derived from.
+        XCTAssertNotEqual(TaskCardSeam.identity(of: Self.task(status: .completed), in: owned),
+                          TaskCardSeam.identity(of: item, in: owned),
+                          "a finished task keeps the model that reads Running and offers Stop")
+    }
+
+    /// One task on the invented stream (§11).
+    private static func task(status: TaskStatus, description: String = "an invented job") -> TaskRunItem {
+        TaskRunItem(id: InventedItems.id("task-invented-1"),
+                    timestamp: InventedItems.epoch,
+                    provenance: InventedItems.provenance,
+                    taskID: "task_invented0001",
+                    kind: .localAgent,
+                    description: description,
+                    status: status)
+    }
+
     // MARK: - One item of every kind
 
     /// An invented item per kind, so the registration test can ask the registry for all thirteen.

@@ -203,9 +203,14 @@ extension TimelineRenderContext {
     /// and the row then draws its reading, which is exactly what it draws for an archived one.
     @MainActor
     func makeTaskCard(_ item: TaskRunItem) -> TaskCardModel? {
-        guard isOwned, let lifecycle else { return nil }
+        guard offersTaskCard, let lifecycle else { return nil }
         return TaskCardModel(item: item, registry: RegistryMirror(), lifecycle: lifecycle, channel: key)
     }
+
+    /// Whether a task on this channel gets a card at all — the gate above, named so that the row
+    /// keying its cached card can ask the same question the builder answers. A card is `@State`
+    /// behind an identity, so a gate the identity cannot see is a card that outlives it.
+    var offersTaskCard: Bool { isOwned && lifecycle != nil }
 }
 
 // MARK: - The neighbourhood

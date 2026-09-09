@@ -125,17 +125,77 @@ final class AgentChipTests: XCTestCase {
                        "a call in its own message joined a group of \(separate.groupCount)")
     }
 
+    /// **A group's status is its members', not its lead's** (review sweep#3).
+    ///
+    /// Parallel `Agent` calls in one message draw one row, and the lead draws it. Reading the
+    /// lead's own status makes that row a report on one member: a lead that finished while its
+    /// siblings work reads *Done* over a group that is still running, and a group with a failed
+    /// member reads *Done* over a failure. The elapsed time goes with it — the group ends when its
+    /// last member ends, not when the lead did.
+    func testAGroupsStatusComesFromEveryMember() {
+        let lead = Self.call(name: "Agent", id: "toolu_invented0001", status: .completed, at: 0)
+        let running = Self.call(name: "Agent", id: "toolu_invented0002", status: .running, at: 0)
+        let live = InventedItems.context(neighbourhood: TimelineNeighbourhood(items: [.toolCall(lead),
+                                                                                     .toolCall(running)]))
+
+        let group = AgentChip.content(for: lead, in: live, now: InventedItems.epoch.addingTimeInterval(40))
+        XCTAssertTrue(group.isGroupLead, "the finished call did not lead the group, so this proves nothing")
+        XCTAssertEqual(group.status, .running,
+                       "a group with a working sibling reads \(group.status.rawValue)")
+        XCTAssertEqual(group.title, "Running 2 agents", "the group reads \(group.title)")
+        XCTAssertEqual(group.headline, "Initializing…",
+                       "the group's headline reads \(group.headline) while a sibling is still running")
+        XCTAssertEqual(group.elapsed, 40, "a running group's elapsed time is \(group.elapsed ?? -1)s")
+
+        // A failed sibling, with nothing left running.
+        let failed = Self.call(name: "Agent", id: "toolu_invented0002", status: .failed,
+                               result: .string("an invented refusal"), at: 20)
+        let broken = InventedItems.context(neighbourhood: TimelineNeighbourhood(items: [.toolCall(lead),
+                                                                                       .toolCall(failed)]))
+        let after = AgentChip.content(for: lead, in: broken, now: InventedItems.epoch.addingTimeInterval(40))
+        XCTAssertEqual(after.status, ToolCallItem.Status.failed,
+                       "a group with a failed sibling reads \(after.status.rawValue)")
+        XCTAssertNotEqual(after.headline, "Done",
+                          "the group's headline reads Done over a member that failed")
+        XCTAssertEqual(after.elapsed, 20,
+                       "the group ended with its lead rather than its last member: \(after.elapsed ?? -1)s")
+
+        // All done: the group is done, and it ends when the last of them ended.
+        let done = Self.call(name: "Agent", id: "toolu_invented0002", status: .completed, at: 30)
+        let settled = AgentChip.content(for: lead,
+                                        in: InventedItems.context(neighbourhood: TimelineNeighbourhood(
+                                            items: [.toolCall(lead), .toolCall(done)])),
+                                        now: InventedItems.epoch.addingTimeInterval(90))
+        XCTAssertEqual(settled.status, .completed, "a finished group reads \(settled.status.rawValue)")
+        XCTAssertEqual(settled.elapsed, 30, "a finished group ran for \(settled.elapsed ?? -1)s")
+
+        // The floor: a call on its own still reads its own status.
+        let alone = Self.call(name: "Agent", id: "toolu_invented0003", status: .completed, at: 0,
+                              messageID: "msg_invented0002")
+        let solo = AgentChip.content(for: alone,
+                                     in: InventedItems.context(neighbourhood: TimelineNeighbourhood(
+                                         items: [.toolCall(alone)])),
+                                     now: InventedItems.epoch.addingTimeInterval(40))
+        XCTAssertEqual(solo.groupCount, 1, "the lone call joined a group of \(solo.groupCount)")
+        XCTAssertEqual(solo.status, .completed, "a lone finished call reads \(solo.status.rawValue)")
+    }
+
     // MARK: - Fixtures
 
     private static func call(name: String, id: String = "toolu_invented0001",
+                             status: ToolCallItem.Status = .running,
+                             result: JSONValue? = nil,
+                             at offset: TimeInterval = 0,
                              messageID: String? = "msg_invented0001") -> ToolCallItem {
         InventedItems.toolCall(name,
                                id: id,
                                input: .object(["description": .string("an invented errand"),
                                                "prompt": .string("an invented brief"),
                                                "subagent_type": .string("an-invented-type")]),
-                               status: .running,
-                               messageID: messageID)
+                               result: result,
+                               status: status,
+                               messageID: messageID,
+                               at: offset)
     }
 
 }

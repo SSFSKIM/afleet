@@ -68,7 +68,7 @@ struct TaskCardSeam: View {
                 // Pinned to the same identity the model is keyed by. `TaskCardView` takes its model
                 // into `@State`, which SwiftUI carries across a body evaluation: without this, a
                 // replaced model would be built and then ignored.
-                TaskCardView(model: card).id(TaskCardSeam.identity(of: item))
+                TaskCardView(model: card).id(TaskCardSeam.identity(of: item, in: context))
             } else {
                 Text(TextSanitiser.sanitise(TaskRunRow.activeForm(of: item)))
                     .font(.caption)
@@ -78,21 +78,28 @@ struct TaskCardSeam: View {
                 FileLinkLabel(path: output.path, context: context)
             }
         }
-        .task(id: TaskCardSeam.identity(of: item)) {
+        .task(id: TaskCardSeam.identity(of: item, in: context)) {
             card = context?.makeTaskCard(item)
         }
     }
 
-    /// What makes this the *same* card: the task, and the status the card's actions are derived
-    /// from.
+    /// What makes this the *same* card: the task, the status the card's actions are derived from,
+    /// and whether this channel can be acted on at all.
     ///
     /// Keyed by the task so a row reused for a different run does not go on holding the first run's
     /// model — its *Stop* would stop the task the reader left. Keyed by the status as well because
     /// the model takes the item by value and the fold's later ones would otherwise never reach it,
-    /// so a finished task would go on reading *Running* and offering *Stop*. Not keyed by the whole
-    /// item: `task_progress` arrives repeatedly while a run is live, and rebuilding on each one
-    /// would drop a refusal banner and an in-flight request the reader is watching.
-    static func identity(of item: TaskRunItem) -> String {
-        "\(item.taskID)#\(item.status.rawValue)"
+    /// so a finished task would go on reading *Running* and offering *Stop*. Keyed by the channel's
+    /// capability third: `makeTaskCard` builds a card only for an owned channel with a process, and
+    /// neither of those is a property of the item — a card built as nil while the channel was
+    /// read-only would stay nil after it was adopted, and an actionable one would go on offering
+    /// *Stop* after the channel was released, because `TaskCardView` holds its model in `@State`
+    /// under this very identity.
+    ///
+    /// Not keyed by the whole item: `task_progress` arrives repeatedly while a run is live, and
+    /// rebuilding on each one would drop a refusal banner and an in-flight request the reader is
+    /// watching.
+    static func identity(of item: TaskRunItem, in context: TimelineRenderContext?) -> String {
+        "\(item.taskID)#\(item.status.rawValue)#\(context?.offersTaskCard == true ? "actionable" : "read-only")"
     }
 }

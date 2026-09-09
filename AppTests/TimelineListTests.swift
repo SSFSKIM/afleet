@@ -571,6 +571,51 @@ final class TimelineListTests: XCTestCase {
                        "the mounted row still draws against the context it was built with")
     }
 
+    /// A capability that changed reaches the rows that are already mounted (review scalpel-3#1).
+    ///
+    /// Ownership and the composer are what contract Y6 gates *Edit* on, and both live on the context
+    /// the mounted roots captured. A comparison that reads only the cwd, the flags and the shared
+    /// objects calls a channel that was just adopted — or that has just acquired a composer —
+    /// unchanged, and every mounted row goes on offering, or omitting, the action the old context
+    /// allowed.
+    ///
+    /// Every channel-scoped object is held fixed across the publishes, because a fresh one is itself
+    /// a difference: a test that let them be rebuilt would pass on the identity comparison alone and
+    /// assert nothing about the capabilities.
+    func testACapabilityChangeReachesMountedRows() throws {
+        let controller = TimelineTableController()
+        let collapse = TimelineCollapseState()
+        let editing = TimelineEditState()
+        let retraction = RetractionRegistry()
+        let decisions = DecisionReservations()
+        let items = Self.rows(3)
+        func context(owned: Bool, composer: (any ComposerSite)? = nil) -> TimelineRenderContext {
+            InventedItems.context(collapse: collapse, composer: composer, editing: editing,
+                                  decisions: decisions, isOwned: owned, retraction: retraction)
+        }
+
+        controller.apply(TimelineRenderInput(rows: items), context: context(owned: false))
+        let host = try XCTUnwrap(controller.tableView(controller.tableView, viewFor: nil, row: 0) as? TimelineRowHostView,
+                                 "the table mounted a row that does not record the context it drew against")
+        XCTAssertEqual(host.renderedContext?.isOwned, false, "the row was mounted against an owned context")
+
+        // Ownership alone: the channel was adopted, nothing else moved.
+        controller.apply(TimelineRenderInput(rows: items), context: context(owned: true))
+        XCTAssertEqual(host.renderedContext?.isOwned, true,
+                       "an adopted channel did not reach the rows already mounted")
+
+        // The composer alone: the same ownership, a capability that was nil and now is not.
+        let composer = RecordingComposerSite()
+        controller.apply(TimelineRenderInput(rows: items), context: context(owned: true, composer: composer))
+        XCTAssertTrue(host.renderedContext?.composer === composer,
+                      "a composer the channel has just acquired did not reach the rows already mounted")
+
+        // And away again: a channel that lost its composer keeps none on its mounted rows.
+        controller.apply(TimelineRenderInput(rows: items), context: context(owned: true))
+        XCTAssertNil(host.renderedContext?.composer,
+                     "a composer the channel has lost is still held by the rows already mounted")
+    }
+
     // MARK: - The anchor across the durable replacement (review scalpel-2#6)
 
     /// The reader's place survives the moment the streaming message becomes an item.
