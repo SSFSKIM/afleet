@@ -155,13 +155,18 @@ final class PaneSurfaceContainer: NSView {
     }
 
     /// Makes the surface first responder, if one is owed the keyboard and there is a window to ask.
+    ///
+    /// **The debt is discharged by the grant, never by the attempt.** A window can refuse — the
+    /// responder holding the keyboard declines to resign — and it says so in its answer. A request
+    /// written off before that answer was read left the pane with no keyboard and nothing owing, so
+    /// nothing tried again; keeping it owed means the next layout, or the window arriving, pays it.
     private func takeSurfaceFocus() {
         guard owesSurfaceFocus, let window, let surfaceView = adoptedSurfaceView,
               surfaceView.superview === self
         else { return }
+        guard window.makeFirstResponder(surfaceView) else { return }
         owesSurfaceFocus = false
         focusHandoffCount += 1
-        window.makeFirstResponder(surfaceView)
     }
 
     /// Takes it only while nobody holds it. This is the repair arm: a host that is still mounted

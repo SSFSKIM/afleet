@@ -259,6 +259,40 @@ final class PaneViewClaimTests: XCTestCase {
                       "the outgoing host left the pane attached to nothing")
     }
 
+    /// The debt is discharged by the grant and not by the attempt. A window can refuse to move the
+    /// keyboard — the responder holding it declines to resign, which is an editor with a sheet up
+    /// or a field mid-validation — and `makeFirstResponder` says so in its answer. Clearing the
+    /// debt before reading that answer left the pane with no keyboard and nothing left owing, so
+    /// neither the next layout nor the window arriving ever tried again.
+    func testAFocusRequestTheWindowRefusesIsStillOwedAndPaidByTheNextAttempt() {
+        let surface = GhosttyTerminalSurface()
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 1_200, height: 700))
+        let stubborn = StubbornResponder(frame: NSRect(x: 0, y: 0, width: 600, height: 100))
+        let container = PaneSurfaceContainer(frame: NSRect(x: 0, y: 100, width: 600, height: 400))
+        root.addSubview(stubborn)
+        root.addSubview(container)
+        window = PaneTestChild.window(around: root)
+        window?.makeFirstResponder(stubborn)
+        XCTAssertTrue(window?.firstResponder === stubborn, "the test did not begin with the focus held")
+
+        container.adopt(surface.view)
+
+        XCTAssertTrue(window?.firstResponder === stubborn, "the window moved a focus it was refusing")
+        XCTAssertTrue(container.owesSurfaceFocus, "a refused focus request was written off as paid")
+        XCTAssertEqual(container.focusHandoffCount, 0, "handoffs=\(container.focusHandoffCount)")
+
+        // The responder lets go, and the container is put into a window again — the next attempt.
+        stubborn.yields = true
+        container.removeFromSuperview()
+        root.addSubview(container)
+
+        XCTAssertFalse(container.owesSurfaceFocus, "the debt outlived the attempt that paid it")
+        XCTAssertEqual(container.focusHandoffCount, 1, "handoffs=\(container.focusHandoffCount)")
+        let responder = window?.firstResponder as? NSView
+        XCTAssertTrue(responder === surface.view || responder?.isDescendant(of: surface.view) == true,
+                      "the pane never got the keyboard the window had refused it")
+    }
+
     /// Which of two standing hosts the view goes to is the newest, which is what the top of a
     /// claimant stack means — and it is a fact about registration order, not about which container
     /// happened to be made first. Asserted in the order the existing hand-off test does not cover:
@@ -398,4 +432,15 @@ final class PaneViewClaimTests: XCTestCase {
         container.adoptIfUnheld(surface.view)
         XCTAssertTrue(surface.view.superview === repaired, "a re-laid-out host stole the surface back")
     }
+}
+
+/// A responder that keeps the keyboard until it is told to let go. `makeFirstResponder` answers
+/// false while it holds, which is a window refusing a request rather than granting it — the one
+/// thing a container cannot learn any other way.
+private final class StubbornResponder: NSView {
+    var yields = false
+
+    override var acceptsFirstResponder: Bool { true }
+
+    override func resignFirstResponder() -> Bool { yields }
 }
