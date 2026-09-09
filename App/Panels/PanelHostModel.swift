@@ -453,19 +453,58 @@ final class PanelHostModel: PanelHost {
 
     // MARK: - The pane seam
 
-    /// X5's request, delivered to the registered runner **unchanged, `id` included**.
+    /// X5's request, delivered to the registered runner **unchanged, `id` included**, in the context
+    /// of the channel the caller named (X7 as amended 2026-09-09, C7.4's `[parent-impact]`).
     ///
     /// The host neither edits a request nor constructs an exit: C4 accepts an exit only when its
     /// `request.id` is the one it is waiting on, so a host that minted a fresh id would have every
     /// exit discarded and nothing would say why.
-    func run(_ request: PaneRequest) async throws {
+    ///
+    /// **The channel comes from the caller and never from `selectedChannel`.** Every caller of this
+    /// method already holds the channel it is acting on — the header's *Open in terminal*, C6.3's
+    /// trust banner, the sidebar's job rows — and each of them suspends before it arrives here:
+    /// `openInTerminal` awaits a whole ownership handoff, which is long enough for the user to move
+    /// the window to another channel. A host reading its own focus would hand the runner the context
+    /// of whichever channel the user had drifted to, and the pane would open there while X5 waited
+    /// on an exit from the channel it had released.
+    ///
+    /// **The runner is looked up before the context is resolved**, so a window that has no Terminal
+    /// leaf registered yet still says exactly that (item 47's stated degradation) rather than
+    /// reporting a channel it could in fact resolve.
+    func run(_ request: PaneRequest, for channel: ChannelKey) async throws {
         let tab = runners[.terminal] != nil ? PanelTabID.terminal
             : PanelTabID.allCases.first(where: { runners[$0] != nil })
-        guard let tab, let runner = runners[tab] else { throw PanelHostError.noPaneRunner(.terminal) }
+        guard let tab, let runner = runners[tab] else {
+            await discharge(request)
+            throw PanelHostError.noPaneRunner(.terminal)
+        }
+        // Resolved before anything moves: a selection changed for a pane that then never started
+        // would leave the window showing an empty panel and the user nothing to read.
+        guard let context = context(for: channel) else {
+            await discharge(request)
+            throw PanelHostError.noChannelContext
+        }
         // Selecting or creating the Terminal tab is spec §7's wording; a runner registered for a
         // tab that is not registered runs without a selection moving.
         select(tab)
-        await runner.run(request)
+        await runner.run(request, in: context)
+    }
+
+    /// A request that cannot be run is **reported as an exit with code 127**, and only then does
+    /// `run(_:for:)` throw.
+    ///
+    /// C7.4's Design §2 already fixes 127 for the other half of this: a spawn that never executed
+    /// is reported as a `PaneExit` because C4 is waiting on that id and a hatch whose pane never
+    /// started would leave its channel released for ever. A request that never reaches a pane at
+    /// all is the same fact one step earlier — X5 has installed `pendingHatch`, which only a
+    /// matching `paneExited` clears, and no pane exists for anyone else to report. So the two
+    /// places carry one rule: whoever refuses the request discharges it.
+    ///
+    /// The throw is unchanged, and deliberately so: the caller's banner is what tells the user,
+    /// and this is only what stops the channel being stranded behind it.
+    private func discharge(_ request: PaneRequest) async {
+        guard let lifecycle else { return }
+        await lifecycle.paneExited(PaneExit(request: request, code: 127, observedAt: Date()))
     }
 }
 

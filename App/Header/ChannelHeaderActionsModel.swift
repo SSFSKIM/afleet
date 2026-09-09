@@ -40,9 +40,14 @@ final class ChannelHeaderActionsModel {
     /// `fleetKit` namespace (§7.8). Nil until a launch reaches a workspace.
     @ObservationIgnored let store: (any StateStore)?
 
-    /// Where a `PaneRequest` is run — X7's host. Nil in a scene that has no panel host, where
-    /// *Open in terminal* says so rather than handing the request nowhere.
-    @ObservationIgnored var paneRunner: (@MainActor (PaneRequest) async throws -> Void)?
+    /// Where a `PaneRequest` is run — X7's host — for the channel the header names. Nil in a scene
+    /// that has no panel host, where *Open in terminal* says so rather than handing the request
+    /// nowhere.
+    ///
+    /// The channel travels with the request because the host resolves no channel of its own: the
+    /// header holds the one it is drawn for, and the handoff below suspends across an ownership
+    /// transition the user can outrun by selecting another channel (X7 as amended 2026-09-09).
+    @ObservationIgnored var paneRunner: (@MainActor (PaneRequest, ChannelKey) async throws -> Void)?
 
     /// The row this header is drawing, as the fleet browser built it. **The gate on every action**
     /// (`ChannelRow.offersOwnedActions`), and the source of `readOnlyReason`. Nil before the column
@@ -243,10 +248,15 @@ final class ChannelHeaderActionsModel {
     /// The handoff itself, which nothing but `openInTerminal()` and the confirm it raises reaches.
     /// Answers whether the channel was handed off, which is what the confirm reports.
     ///
-    /// **The first production caller of `PanelHostModel.run(_:)`** (tracker 72 recorded it as
+    /// **The first production caller of `PanelHostModel.run(_:for:)`** (tracker 72 recorded it as
     /// uncalled). That method throws `PanelHostError.noPaneRunner` until C7's Terminal leaf lands, so
     /// the refusal is surfaced as an inline note naming the tab — item 47's degradation stated by the
     /// composite, and not a silent skip.
+    ///
+    /// It names `key` rather than letting the host resolve a channel, and that is the whole reason
+    /// the amended seam takes one: the `openInTerminal` above has already awaited a census and this
+    /// line awaits the release itself, so the window may well be showing a different channel by the
+    /// time the pane opens.
     @discardableResult
     private func handOff() async -> Bool {
         do {
@@ -255,7 +265,7 @@ final class ChannelHeaderActionsModel {
                 note = "There is no panel host in this window to run \(PanelTabID.terminal.defaultTitle) in."
                 return false
             }
-            try await paneRunner(request)
+            try await paneRunner(request, key)
             note = "Handed off to \(PanelTabID.terminal.defaultTitle)."
             return true
         } catch let error as PanelHostError {
@@ -287,6 +297,8 @@ final class ChannelHeaderActionsModel {
             "The \(tab.defaultTitle) panel is not available yet, so this channel was not handed off."
         case .duplicateTab(let tab):
             "The \(tab.defaultTitle) panel is already registered."
+        case .noChannelContext:
+            "This window has no panel for this conversation, so this channel was not handed off."
         }
     }
 

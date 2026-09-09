@@ -93,6 +93,14 @@ final class AppModel: FilesTabHost {
     /// feed in its context would watch a timeline nothing updates.
     let panels: PanelHostModel
 
+    /// C7.4's map from a channel to its Terminal panes.
+    ///
+    /// **One instance, and it is the whole point of the property.** The registered tab and the
+    /// registered pane runner are two objects, and each of them asks this for a channel's session:
+    /// a registry per owner would leave the host rendering one session while a `PaneRequest` placed
+    /// its pane in another, so the pane would exist and no window would ever draw it. It is held
+    /// here rather than inside either owner because neither of them can be the one that owns it.
+    let terminalSessions = TerminalSessionRegistry()
     /// C7.6's Browser tab, and through it the one window-wide `BrowserModel` (spec §9.4, Q5).
     ///
     /// **One instance, app-scoped**, like the three owners above it: the tab set is shared across
@@ -195,6 +203,10 @@ final class AppModel: FilesTabHost {
         // one call and the once-per-process guard moved with them.
         TimelineRowKinds.register(on: registry)
         //
+        // C7.4's Terminal leaf takes `.terminal` here and registers its pane runner for the same
+        // id, both over `terminalSessions` — see that property for why the two share one registry.
+        // Registration is what makes `PanelHost.run(_:for:)` reach a runner at all; without it
+        // every X5 pane request answers `noPaneRunner` and no gate can run.
         // C7.5's Files tab under `.files`, which nothing holds, so it is a plain registration and
         // not a handover (C7.5 Design §10). Asserted for the same reason: a shipped tab that
         // vanished from the tab bar with no signal is the thing this must not do quietly.
@@ -206,6 +218,8 @@ final class AppModel: FilesTabHost {
         let files = FilesTab(host: self)
         do {
             try panels.register(PlaceholderTab())
+            try panels.register(TerminalPanelTab(registry: terminalSessions))
+            panels.registerPaneRunner(TerminalPaneRunner(registry: terminalSessions), for: .terminal)
             panels.select(.thread)
             try panels.register(files)
         } catch {
@@ -342,6 +356,16 @@ final class AppModel: FilesTabHost {
     /// prevent. `lifecycle` is the seam pane exits leave through; production passes nil and gets
     /// `workspace.fleet`.
     func bindWorkspace(_ workspace: Workspace, lifecycle: (any LifecycleAPI)? = nil) {
+        // The Terminal registry goes the same way as the host's sessions and contexts, and for the
+        // same reason: a session kept across the rebind holds the previous workspace's store and
+        // its `reportPaneExit`, so its panes would write where nothing reads and report exits to a
+        // lifecycle nobody is listening to. Releasing it also ends those panes, which is the only
+        // moment anything can — after this line nothing holds them.
+        //
+        // A channel *removed* from the fleet wants the same treatment and does not get it here:
+        // `FleetCoordinator.release` would have to reach this registry, and that seam is filed as
+        // tech debt rather than opened in a fix wave.
+        terminalSessions.release()
         // The Browser's tab-set document (W6's `browser` key in the `workbench` namespace). It is
         // bound here rather than at construction because the tab is registered before any launch
         // has run, and this is the call that also builds the first `ChannelContext`.
@@ -351,7 +375,7 @@ final class AppModel: FilesTabHost {
         composers.attach(to: workspace,
                          context: { [panels] key, cwd in panels.context(for: key, cwd: cwd) },
                          timeline: { [timelines] key in timelines.model(for: key) },
-                         paneRunner: { [panels] request in try await panels.run(request) },
+                         paneRunner: { [panels] request, channel in try await panels.run(request, for: channel) },
                          lifecycle: lifecycle)
         // *Fork from here* opens a sibling channel and the window has to move to it, which is C5's own selection
         // path and not a second one. Set after `attach`, which releases the models of the previous workspace.

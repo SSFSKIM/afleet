@@ -102,10 +102,71 @@ struct SidebarView: View {
                     JobRowView(job: job,
                                banner: browser.jobBanners[job.short.rawValue],
                                adopt: { Task { await browser.adopt(job) } },
-                               attach: { Task { shell.pendingPane = await browser.attach(job) } },
+                               attach: { Task { await Self.openJobPane(job, verb: .attach,
+                                                                       browser: browser,
+                                                                       shell: shell) } },
+                               logs: { Task { await Self.openJobPane(job, verb: .logs,
+                                                                     browser: browser,
+                                                                     shell: shell) } },
                                stop: { Task { await browser.stop(job) } })
                 }
             }
+        }
+    }
+
+    /// X5's two job panes, *Attach* and *Logs*, as one verb over two requests.
+    ///
+    /// **A static function taking its collaborators**, the shape `PanelColumnView
+    /// .resolvePendingPanelIndex` already has here: the test calls exactly what the row calls, with
+    /// no window and no `List` around it. Logic inside the row's closure would be reachable only by
+    /// rendering the sidebar.
+    ///
+    /// **The channel is named before X5 is asked.** `claude attach` starts a client, and starting
+    /// one for a pane that could never be placed leaves a child running for a screen nobody will
+    /// see; naming first means the row refuses before anything is spawned.
+    ///
+    /// **And the host's refusal is a banner too** (§10). `run(_:for:)` throws when no Terminal leaf
+    /// holds a runner or when the host cannot resolve the named channel — both are things the user
+    /// should read on the row that asked, not errors travelling into a channel.
+    ///
+    /// **Naming a channel means making it resolvable.** The host can build a context only for a
+    /// channel it has been given a working directory for, and it forgets both when LRU pressure
+    /// evicts one — so a job in a channel no window has shown, or has stopped showing, would be
+    /// refused for want of a directory the caller is holding. This is the caller, so it names that
+    /// too. With no directory to name, the host's refusal stands exactly as it did.
+    /// **And naming a channel means showing it** (ruled 2026-09-09; tracker 384). A row acts on the
+    /// channel that row is about, so the window goes there: without this the host selected the
+    /// Terminal tab while the panel column went on deriving its channel from `shell.focus`, and
+    /// *Attach* started a pane in a channel nobody was looking at. Item 15 says *Attach* shows the
+    /// job's screen, and an invisible pane is not that.
+    ///
+    /// **Two conditions on that move, and both are about what the user would be shown.** It happens
+    /// only *after* X5 has answered, because a refusal moves nobody: the window would otherwise be
+    /// standing in a channel where nothing opened, to read a banner on the row it was sent from.
+    /// And it happens only for a channel the browser has a **row** for, because `PanelColumnView`
+    /// resolves the channel it draws through that row — selecting a session with none leaves the
+    /// column on its pick-a-channel placeholder, which is the invisible pane again. It still
+    /// happens **before** `panels.run`, so the window is already there when the client's first
+    /// bytes arrive.
+    static func openJobPane(_ job: JobEntry, verb: JobPaneVerb,
+                            browser: FleetBrowserModel, shell: ShellModel) async {
+        let panels = shell.panels
+        guard let channel = browser.paneChannel(for: job, inView: panels.selectedChannel) else { return }
+        if panels.context(for: channel) == nil, let cwd = browser.paneCWD(for: job, in: channel) {
+            _ = panels.context(for: channel, cwd: cwd)
+        }
+        let request: PaneRequest?
+        switch verb {
+        case .attach: request = await browser.attach(job)
+        case .logs: request = await browser.logs(job)
+        }
+        // A refusal from X5 has already been written onto the row by the browser.
+        guard let request else { return }
+        if browser.row(channel.session) != nil { shell.select(channel.session) }
+        do {
+            try await panels.run(request, for: channel)
+        } catch {
+            browser.noteJobFailure(job, error)
         }
     }
 
@@ -213,13 +274,21 @@ struct ChannelRowView: View {
     }
 }
 
-/// One background job, with the three actions spec §4 names.
+/// Which of X5's two job panes a row asked for. Two cases rather than a boolean, because §9.5 and
+/// §17 C7 name them as two affordances and the sentence a refusal writes is the row's either way.
+enum JobPaneVerb {
+    case attach
+    case logs
+}
+
+/// One background job, with the actions spec §4 and §9.5 name.
 struct JobRowView: View {
 
     let job: JobEntry
     let banner: String?
     let adopt: () -> Void
     let attach: () -> Void
+    let logs: () -> Void
     let stop: () -> Void
 
     var body: some View {
@@ -235,6 +304,7 @@ struct JobRowView: View {
             HStack(spacing: 8) {
                 Button("Adopt", action: adopt).disabled(job.sessionID == nil)
                 Button("Attach", action: attach)
+                Button("Logs", action: logs)
                 Button("Stop", action: stop)
             }
             .buttonStyle(.link)

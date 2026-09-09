@@ -20,7 +20,7 @@ final class FilesPanelWiringTests: XCTestCase {
         XCTAssertTrue(app.panels.isRegistered(.files), "the app model does not hold the Files tab")
         XCTAssertEqual(app.panels.title(for: .files), PanelTabID.files.defaultTitle,
                        "the registered tab is not named by its own title")
-        XCTAssertEqual(app.panels.available(for: PanelFixtures.context()), [.thread, .files, .browser],
+        XCTAssertEqual(app.panels.available(for: PanelFixtures.context()), [.thread, .files, .terminal, .browser],
                        "the channel does not offer exactly the shipped tabs")
         XCTAssertTrue(app.panels.session(for: .files, context: PanelFixtures.context())
                         is FilesPanelSession,
