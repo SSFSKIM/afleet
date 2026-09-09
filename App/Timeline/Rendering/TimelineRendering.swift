@@ -671,8 +671,12 @@ final class MarkdownText: @unchecked Sendable {
             }
 
         case let list as OrderedList:
+            // **Numbered from the list's own start** (§5). A list written `4.` continues an earlier
+            // one — which is how a procedure's fifth step reaches a reader — and numbering from the
+            // enumeration's offset renumbered it from one, quietly naming a different step.
+            let start = Int(clamping: list.startIndex)
             for (offset, item) in list.listItems.enumerated() {
-                out.append(NSAttributedString(string: String(repeating: "    ", count: indent) + "\(offset + 1). ",
+                out.append(NSAttributedString(string: String(repeating: "    ", count: indent) + "\(start + offset). ",
                                               attributes: [.font: NSFont.systemFont(ofSize: 13)]))
                 for child in item.children {
                     append(child, to: out, highlighter: highlighter, indent: indent + 1, lines: lines,

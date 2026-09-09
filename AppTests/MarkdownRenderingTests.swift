@@ -455,4 +455,24 @@ final class MarkdownRenderingTests: XCTestCase {
         XCTAssertEqual(markdown.parseCount, 1,
                        "the accepted write counted \(markdown.parseCount) parse(s)")
     }
+
+    // MARK: - The ordered list's own numbering (round 3, scalpel-4 #6)
+
+    /// A list that begins at `4.` is drawn from four.
+    ///
+    /// **Discriminating.** The walk numbered from the enumeration offset and never read the list's
+    /// own start, so a numbered list continuing an earlier one — which is how model output writes
+    /// step four of a procedure — was renumbered from one, silently telling the reader to do the
+    /// wrong step. The floor is the second half: a list that does start at one still says one.
+    func testAnOrderedListKeepsItsStartNumber() {
+        let continued = build("4. an invented step\n5. another invented step\n")
+        XCTAssertTrue(continued.string.contains("4. "),
+                      "the list did not start at four; \(continued.length) character(s) were rendered")
+        XCTAssertTrue(continued.string.contains("5. "), "the list's second item is not five")
+        XCTAssertFalse(continued.string.contains("1. "), "the list was renumbered from one")
+
+        let ordinary = build("1. an invented step\n2. another invented step\n")
+        XCTAssertTrue(ordinary.string.contains("1. ") && ordinary.string.contains("2. "),
+                      "an ordinary list no longer numbers from one")
+    }
 }
