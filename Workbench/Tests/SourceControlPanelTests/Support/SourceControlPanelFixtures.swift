@@ -350,9 +350,38 @@ final class RecordingRunner: ToolRunning, @unchecked Sendable {
     struct Invocation: Sendable, Equatable {
         let tool: Tool
         let arguments: [String]
-        /// The first argument that is not an option, which is the verb — `git -c foo=bar log` is a
-        /// `log`. Empty when there is none.
-        var verb: String { arguments.first { !$0.hasPrefix("-") } ?? "" }
+
+        /// The options that stand before a subcommand and take their value as the **next**
+        /// argument, so that value is not the verb either.
+        ///
+        /// "The first argument that does not start with a dash" is wrong for every one of these:
+        /// `git -c diff.renameLimit=1000 status` is a `status`, and a helper that answered
+        /// `diff.renameLimit=1000` would let `git -c anything=x commit` present itself under a
+        /// name no allowlist admits and no denylist rejects — which is exactly what G4 reads off
+        /// this property. The attached spellings (`--git-dir=…`) need no entry: they start with a
+        /// dash and are skipped as ordinary options.
+        static let optionsTakingASeparateValue: Set<String> = [
+            "-c", "--config-env", "--namespace", "-C", "--git-dir", "--work-tree", "--exec-path",
+        ]
+
+        /// The subcommand, as git itself reads it — `git -c foo=bar log` is a `log`. Empty when
+        /// the vector names none.
+        var verb: String {
+            var index = 0
+            while index < arguments.count {
+                let argument = arguments[index]
+                if Self.optionsTakingASeparateValue.contains(argument) {
+                    index += 2
+                    continue
+                }
+                if argument.hasPrefix("-") {
+                    index += 1
+                    continue
+                }
+                return argument
+            }
+            return ""
+        }
     }
 
     private let underlying: any ToolRunning
