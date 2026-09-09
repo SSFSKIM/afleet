@@ -3586,3 +3586,109 @@ four whole-branch review rounds.
      nor the transcript records when a run ended, so a consumer that ticks elapsed to `endedAt ?? now`
      has nothing to stop at. Closer: an end instant the file half can defend (the last record of the
      run's own transcript is a *last activity*, not an end), and C4's dormancy as the second witness.
+
+## From C7.7 (Source Control and GitHub panel, `child/c7-scm-panel`)
+
+277. **A linked worktree's or a submodule's history changes outside the watched root.** Design §5
+     rests on "history changes only through `.git`, and `.git` is watched", which holds for an
+     ordinary repository and not for a linked worktree or a submodule: there `.git` is a *pointer
+     file* and the real HEAD, refs and reflogs live elsewhere, so an empty commit in a linked
+     worktree can generate no event beneath the watched root and the graph goes stale until the
+     user refreshes. `RepositoryWatch` follows the limitation deliberately rather than reaching for
+     a git command this leaf is not allowed to write (W7). Closer: a C7.3 reader that reports the
+     real git directory (`rev-parse --git-common-dir`), watched alongside the working tree — which
+     is a core capability decision, not a panel fix. Found by C7.7's whole-branch review.
+     Owner: C7.3, with C7.7 as first consumer.
+
+278. **`NoDefer` is carried as an API contract, not as a mechanism.** The plan named dropping
+     `kFSEventStreamCreateFlagNoDefer` as a mutation that must turn G1.5 red; measured on this
+     machine it does not — deliveries arrive in 11–14 ms with the flag and without it at a
+     0.5–1 s latency, and the deferral only shows at a 3 s latency, where it costs 1.79 s. The
+     one-second bound is bought by the latency sitting well under it. Recorded so a later reader
+     does not re-derive it and does not treat the mutation as an outstanding obligation.
+     Owner: C7.7.
+
+279. **The `gh` not-authenticated classification is written twice.** `GitHubModel` classifies a
+     `gh` failure into a message plus an optional `gh auth login` hint, duplicating C7.6's
+     `PullRequestURLResolver`, because panel targets cannot import each other. Two copies of one
+     rule diverge the first time either is edited. Design §8 anticipates the duplication and files
+     it rather than working around it. Closer: the classification belongs in `SourceControlCore`
+     beside the `ToolError` it reads. Owner: whichever leaf next needs a third copy.
+
+280. **The third copy of the git fixture builder, and now a fourth thing inside it.** Entry 232
+     named the duplication of a scratch guard, a repository builder and a recording runner across
+     test targets; C7.7 wrote the third copy, and added a *correct* argv verb extractor to it —
+     one that skips options taking a separate value (`-c key=value`, `-C`, `--git-dir`, …). The
+     first version of that extractor read `git -c diff.renameLimit=1000 status` as a
+     `diff.renameLimit=1000`, which would have made a G4 allowlist either fail spuriously or, as a
+     denylist, silently accept `git -c anything=x commit`. C7.3's own copy should be checked for
+     the same wrong reading. Closer: entry 232's `WorkbenchTestSupport` target. Owner: the next
+     leaf to add a copy.
+
+281. **`GitRepository`'s `name:` defaults to `"repo"`, so two fixtures in one scratch tree collide.**
+     The second `git init` builds its history on top of the first's, silently — it cost one real
+     red during C7.7's readout tests, presenting as a fixture reporting three lanes where two were
+     expected. Closer: default the name to a unique value, or have the initialiser refuse a
+     directory that already exists. Owner: whoever owns the shared fixture under entry 232.
+
+282. **A prefix `.commit` delivery costs up to five `git log` reads.** Design §7's ruling forbids
+     calling a prefix unique before the walk reaches its bound, and W7 leaves this leaf no
+     object-existence reader, so an abbreviated hash outside the window walks. If C7.3 shipped a
+     `rev-parse --verify` / `--disambiguate` wrapper the whole walk collapses to one lookup.
+     Owner: C7.3, with C7.7 as first consumer.
+
+283. **`deliveryRetries` is one.** A `.commit` delivery superseded twice — a repository being
+     written continuously — answers `.searchInterrupted` rather than the commit. Bounded by
+     design, since a click must not spend a repository's worth of `git log`, but it is a real if
+     rare second-best answer. Owner: C7.7.
+
+284. **A cancellation is recognised by comparing against a mapping, not by a tag.** `RepositoryError`
+     classifies a `ToolError` into a detail string and keeps no structural marker, so the model
+     identifies a cancelled read by comparing against the reader's own mapping of
+     `ToolError.cancelled`. It works and is pinned by a test; the honest shape is a case or a flag
+     on `RepositoryError`. Owner: C7.7.
+
+285. **`AppModel.filesSession(for:)` and `sourceControlSession(for:)` are the same six lines twice**,
+     differing only in a tab id and a cast; a third panel host makes it three. The generic that
+     removes the duplication needs `PanelTabSession` subtype resolution the host does not expose.
+     It belongs next to tracker 240, whose X7 amendment would touch both methods anyway.
+     Owner: C5's fence.
+
+286. **G4's source-level surface gate is scoped to two file names.** The scan that closes "a
+     `Button` written into a view body with no `Control` behind it" reads
+     `SourceControlPanelView.swift` and `GitHubPanelView.swift` by name through `#filePath`. A
+     third view file added to the panel directory is silently unscanned. The durable form is a scan
+     of every `*View.swift` in the directory, which needs a rule for what counts as a `Control`
+     door per file. Owner: C7.7, or whoever adds the third view.
+
+287. **The G4 surface gate is textual and models no indirection.** It cannot see a session captured
+     into a local (`let s = session; s.commit()`), an interactive element introduced by a helper
+     view type living in another file, or a mutating action added *inside* `Control.perform` — that
+     last one remains the enum inventory's job. It closes the mutation it was written for and is
+     not a proof about rendered SwiftUI; a body walk would need an inspection facility this
+     repository does not have. Owner: C7.7.
+
+288. **The live `gh` leg names a public repository through `GH_REPO`.** It runs in a scratch tree
+     and reads only, but it remains network- and account-dependent; if CI ever runs with a token,
+     that token's rate limit is spent here. Owner: C7.7.
+
+289. **`gh pr checks`' documented exit code 8 still has no live confirmation** — this leaf's live
+     leg ran and reached no repository with a check in flight, so entry 118 stays open and is
+     restated here as C7.7's own unfinished business rather than left on C7.3's row. The behaviour
+     is asserted against an authored document and a stub. Owner: C7.7 or whoever next runs the
+     live leg while CI is in flight somewhere.
+
+290. **Four workers in one worktree cannot each show a test failing first.** A task that lands its
+     tests before its implementation makes `swift test` unbuildable for every sibling, so two of
+     C7.7's four Wave A tasks took their failing-first evidence in a throwaway copy of the package.
+     The evidence is sound; the shape is not, and it also cost several later runs to sibling
+     compile breaks. Closer: a worktree per parallel task, or a rule that tests and implementation
+     land in one commit. Owner: whoever dispatches the next parallel wave.
+
+291. **A user's brand-new file appears in the working-tree row but not in its file list.** The row
+     is driven by `git status` (which sees untracked files) and the list by `git diff HEAD` (which
+     does not), so an unstaged new file makes the panel say the tree is dirty and then shows a list
+     that does not contain it. Both halves are correct about their own question — §6 keeps them
+     apart deliberately — but the asymmetry is real and a human tester will meet it at G1's leg.
+     Closer: list untracked paths from the status alongside the diff, marked as untracked.
+     Owner: C7.7.
