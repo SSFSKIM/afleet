@@ -65,7 +65,7 @@ final class ComposerMountTests: XCTestCase {
     private func makeColumn(_ rig: Rig,
                             selecting session: SessionID = LaunchFixtures.sessionA)
     async throws -> (app: AppModel, column: ChannelColumnView) {
-        let app = AppModel(sequence: rig.sequence)
+        let app = AppModel(registry: RowRegistry(), sequence: rig.sequence)
         await app.launch()
         let workspace = try XCTUnwrap(app.route.workspace, "the launch reached no workspace to draw")
         app.shell.select(session)
@@ -393,7 +393,7 @@ final class ComposerMountTests: XCTestCase {
     /// Deliberate break: drop the generation guard from `ComposerRegistry.prefill(_:for:from:)`.
     func testAForkHandedOffAfterAWorkspaceRebindIsDropped() async throws {
         let rig = try makeRig()
-        let app = AppModel(sequence: rig.sequence)
+        let app = AppModel(registry: RowRegistry(), sequence: rig.sequence)
         await app.launch()
         let workspace = try XCTUnwrap(app.route.workspace, "the launch reached no workspace")
         let key = ChannelKey(configHome: LaunchFixtures.directoryURL(rig.configHome), session: LaunchFixtures.sessionA)
@@ -421,7 +421,7 @@ final class ComposerMountTests: XCTestCase {
     /// and not about a handoff that stopped working.
     func testAForkHandedOffWithinTheSameWorkspacePrefillsAndSelects() async throws {
         let rig = try makeRig()
-        let app = AppModel(sequence: rig.sequence)
+        let app = AppModel(registry: RowRegistry(), sequence: rig.sequence)
         await app.launch()
         let key = ChannelKey(configHome: LaunchFixtures.directoryURL(rig.configHome), session: LaunchFixtures.sessionA)
         app.composers.lifecycle = ComposerLifecycleDouble()
@@ -448,7 +448,7 @@ final class ComposerMountTests: XCTestCase {
     /// Deliberate break: assign `existing.draft = text` with no check on what the draft holds.
     func testAForkPrefillKeepsWhatTheUserTypedIntoThatForksComposer() async throws {
         let rig = try makeRig()
-        let app = AppModel(sequence: rig.sequence)
+        let app = AppModel(registry: RowRegistry(), sequence: rig.sequence)
         await app.launch()
         let key = ChannelKey(configHome: LaunchFixtures.directoryURL(rig.configHome), session: LaunchFixtures.sessionA)
         app.composers.lifecycle = ComposerLifecycleDouble()

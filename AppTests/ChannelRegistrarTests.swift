@@ -273,7 +273,7 @@ final class ChannelRegistrarTests: XCTestCase {
         let coordinators = CoordinatorLog()
         let sequence = try Self.sequence(tree: tree, configHome: scratch.root, fleet: FleetDouble(),
                                          index: StubIndex(persisted: nil, built: built))
-        let model = AppModel(sequence: sequence, coordinatorFactory: { _ in
+        let model = AppModel(registry: RowRegistry(), sequence: sequence, coordinatorFactory: { _ in
             let coordinator = StoppableCoordinatorDouble()
             coordinators.built.append(coordinator)
             return coordinator

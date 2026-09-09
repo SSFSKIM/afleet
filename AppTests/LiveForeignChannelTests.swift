@@ -189,8 +189,14 @@ final class LiveForeignChannelTests: XCTestCase {
 
     // MARK: - The app's environment, and the child's
 
+    // **Internal rather than private, from C6.1's G5 onward.** The second live gate in this tree
+    // resumes a child under the same scratch home by the same rules — the inherited
+    // `CLAUDE_CODE_CHILD_SESSION` marker turns session registration off, and a home spelled two
+    // ways is two homes — and a copy of these four helpers beside it would be a second set of
+    // rules to keep in step with the engine. One definition, two gates.
+
     /// The login shell's environment with `CLAUDE_CONFIG_DIR` pointed at the scratch home.
-    private static func appEnvironment(configHome: URL) async throws -> ResolvedEnvironment {
+    static func appEnvironment(configHome: URL) async throws -> ResolvedEnvironment {
         let resolved = await LaunchSequence.resolveLoginShellEnvironment()
         var variables = resolved.variables
         variables["CLAUDE_CONFIG_DIR"] = configHome.path(percentEncoded: false)
@@ -202,7 +208,7 @@ final class LiveForeignChannelTests: XCTestCase {
     /// terminal of a real shape, and **not one** `CLAUDE_*` or `ANTHROPIC_*` variable inherited from
     /// whatever started this test. See the note at the spawn: one of those markers turns session
     /// registration off entirely.
-    private static func childEnvironment(configHome: URL, resolved: ResolvedEnvironment) -> [String: String] {
+    static func childEnvironment(configHome: URL, resolved: ResolvedEnvironment) -> [String: String] {
         var variables: [String: String] = [:]
         for name in ["PATH", "HOME", "SHELL", "USER", "LOGNAME", "LANG", "TMPDIR"] {
             if let value = resolved.variables[name] { variables[name] = value }
@@ -215,14 +221,14 @@ final class LiveForeignChannelTests: XCTestCase {
     // MARK: - Reading the child's own record
 
     /// The engine's registry record for a pid, read (never written) from the scratch home.
-    private static func registryRecord(home: URL, pid: pid_t) -> RegistryRecord? {
+    static func registryRecord(home: URL, pid: pid_t) -> RegistryRecord? {
         let file = home.appending(path: "sessions/\(pid).json")
         guard let data = ClaudeJSONReader.read(file) else { return nil }
         return RegistryRecord.decode(data)
     }
 
     /// Polls `body` every 100 ms until it answers or `deadline` passes.
-    private static func poll<T: Sendable>(upTo deadline: Duration,
+    static func poll<T: Sendable>(upTo deadline: Duration,
                                           _ body: @Sendable () async -> T?) async throws -> T? {
         let clock = ContinuousClock()
         let start = clock.now
@@ -233,10 +239,10 @@ final class LiveForeignChannelTests: XCTestCase {
         return await body()
     }
 
-    private static func ms(_ duration: Duration) -> Int { Int(duration / .milliseconds(1)) }
+    static func ms(_ duration: Duration) -> Int { Int(duration / .milliseconds(1)) }
 
     /// The coordinator the launch built. A single-owner box; every access is on the main actor.
-    private final class ModelBox: @unchecked Sendable {
+    final class ModelBox: @unchecked Sendable {
         @MainActor var value: FleetCoordinator?
         init() {}
     }
@@ -375,7 +381,7 @@ final class RecordingAppFleet: AppFleet {
 ///
 /// `posix_spawn` rather than `Process`, so the test owns the child outright and can wait on the pid
 /// it started.
-private final class PseudoTerminalChild {
+final class PseudoTerminalChild {
     let pid: pid_t
     private let master: Int32
     private var reaped = false

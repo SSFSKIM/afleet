@@ -51,23 +51,17 @@ TESTS = ROOT / "AppTests"
 ALLOWLIST: dict[str, str] = {
     # Seams whose caller is a later child.
     "registerPaneRunner": "X7's seam for C7's Terminal leaf, which is the caller and has not landed",
-    # Contract Y1 and Y4's skeleton: the two members a C6 leaf fills, landed ahead of the leaves
-    # so four worktrees build one target (`docs/doperpowers/specs/2026-09-07-c6-conversation-surface.md`).
-    "register": "filled by C6.1 and C6.3 — RowRegistry.register(kind:builder:) is the row slot each "
-                "leaf claims its kinds through, and no production code registers until one does. The "
-                "check keys on a bare name and `register` is declared elsewhere under App/ too, so it "
-                "would not be flagged today; the entry records the intent, not an exemption in force",
-    "retains": "filled by C6.3 Task 8 — RetractionRegistry.retains(_:) is D11's render-time filter "
-               "and the channel's list is its caller; the list mounts at Task 8, which removes this "
-               "entry with the mount",
-    "show": "filled by C6.4 — AgentNavigating.show(run:in:) is contract Y4's seam, called by C6.1's "
-            "agent chip once that leaf lands",
-    "agentNavigation": "filled by C6.4 — the composition root installs Y4's no-op so C6.1's chip has "
-                       "something to call; the call site arrives with C6.1",
-    "edit": "filled by C6.1 — ComposerModel.edit(_:) is the *Edit* affordance's landing point, and "
-            "the affordance itself is a row action on a past user message, which is C6.1's "
-            "App/Timeline/. C6.2 owns the request, the refusal reading and the fork fallback; it "
-            "cannot own the button without editing another leaf's files",
+    # Contract Y1 and Y4's skeleton entries — `register`, `show` and `agentNavigation` — were
+    # retired 2026-09-09 by C6.1 Task 4, which is the leaf that supplies all three call sites:
+    # `AppModel.init` claims the eleven row kinds through `RowRegistry.register(kind:builder:)`, and
+    # the `Agent` chip calls `AgentNavigating.show(run:in:)` on the `agentNavigation` the composition
+    # root installs. An allowlist entry outlives its reason silently, so they are removed rather
+    # than re-worded. `edit` was retired 2026-09-09 by C6.1 Task 7 for the same reason: contract Y6's
+    # *Edit* row action on a past user message is `ComposerModel.edit(_:)`'s production caller.
+    # `retains` was retired 2026-09-09 by C6.1 Task 8, which is the mount its entry named:
+    # `TimelineListView.retained(_:by:)` filters the channel's rows through
+    # `RetractionRegistry.retains(_:)` before the table is handed them, so D11's render-time filter
+    # has a production caller.
     # Requirements of a FleetKit protocol, called by FleetKit and never by App/.
     "confirm": "a `StrategyUI` requirement (FleetKit). `StrategyExecutor.run` calls it through the "
                "`ui:` the composer hands itself in as, so its caller is outside App/ by construction "

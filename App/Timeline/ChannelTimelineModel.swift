@@ -6,7 +6,7 @@ import FleetKit
 
 // MARK: - The header
 
-/// The four things spec §8 puts above the placeholder timeline — origin, presence, banner and
+/// The four things spec §8 puts above the timeline — origin, presence, banner and
 /// system item — plus the title the index already knows, read off the row's `ChannelState`.
 ///
 /// A value rather than a set of accessors on the model, so the header a test asserts on is the
@@ -19,18 +19,24 @@ struct ChannelHeader: Hashable, Sendable {
     var presence: Presence?
     var banner: ChannelBanner?
     var systemItem: SystemItem?
+    /// The row's `gitBranch`, which C3's index reads from the transcript's own `gitBranch` field
+    /// (child spec §10). It rides on the header rather than being read off the row at the readout,
+    /// because the column already watches this value and calls `adopt` on every change to it: a
+    /// branch that moves under a selected channel therefore moves on screen, with no second watcher
+    /// and no edit to a file another leaf owns.
+    var branch: String?
 
     var glyph: OriginGlyph? { origin.map(OriginGlyph.init) }
 
     init(title: String = "No channel selected", origin: ChannelOrigin? = nil, presence: Presence? = nil,
-         banner: ChannelBanner? = nil, systemItem: SystemItem? = nil) {
+         banner: ChannelBanner? = nil, systemItem: SystemItem? = nil, branch: String? = nil) {
         self.title = title; self.origin = origin; self.presence = presence
-        self.banner = banner; self.systemItem = systemItem
+        self.banner = banner; self.systemItem = systemItem; self.branch = branch
     }
 
     init(row: ChannelRow) {
         self.init(title: row.title, origin: row.origin, presence: row.presence,
-                  banner: row.channelBanner, systemItem: row.systemItem)
+                  banner: row.channelBanner, systemItem: row.systemItem, branch: row.gitBranch)
     }
 }
 
@@ -147,10 +153,38 @@ final class ChannelTimelineModel {
 
     var items: [TimelineItem] { timeline.items }
 
-    /// What the placeholder draws, one row per item.
+    /// What the list draws, one row per item.
+    ///
+    /// **Superseded 2026-09-09 (C6.1 Task 4).** What stood here said "what the placeholder draws":
+    /// eleven of the thirteen kinds now resolve to a C6.1 row through contract Y1's registry, and
+    /// only `decision` and `sentFile` — C6.3's — still draw C5's placeholder.
     var rows: [TimelineRow] { timeline.items.map(TimelineRow.init) }
 
+    /// The reads a row makes of the timeline around it, rebuilt only when the items moved.
+    ///
+    /// **On the model for the reason `retraction` is.** The list builds one per body evaluation and
+    /// a body evaluates on every streaming publish, so the cache has to outlive the view value it is
+    /// read from — and the channel a reader switches away from and back to keeps the one it had.
+    var neighbourhood: TimelineNeighbourhood { neighbourhoods.neighbourhood(for: timeline) }
+
+    @ObservationIgnored let neighbourhoods = TimelineNeighbourhoodCache()
+
     private(set) var header = ChannelHeader()
+
+    /// What the header's readback strip draws (child spec §10): the branch, and the four values the
+    /// engine answers for. Replaced field by field as answers arrive, and never from a request this
+    /// app made — see `ChannelHeaderReadout`.
+    private(set) var readout = ChannelHeaderReadout()
+
+    /// What a settled refusal dialog took back on this channel (spec D11), and what the list filters
+    /// through before it draws.
+    ///
+    /// **On the model and not in the list's `@State`.** The column keys the timeline view by the
+    /// channel, so a switch away and back destroys the view value and builds a fresh one — while
+    /// this model, and the unfiltered items in it, are exactly what the registry retains. A registry
+    /// rebuilt with the view is empty, so every message a resolved dialog took back comes back on
+    /// screen and stays back: the dialog is settled, and nothing will retract them a second time.
+    @ObservationIgnored let retraction = RetractionRegistry()
 
     /// True once `open(_:)` has driven the ingestion; a channel switch away and back does not
     /// restart it, which is what the registry retains this object for.
@@ -188,6 +222,11 @@ final class ChannelTimelineModel {
     @ObservationIgnored private var ingestion: StreamIngestion?
     @ObservationIgnored private var effectsTask: Task<Void, Never>?
     @ObservationIgnored private var changesTask: Task<Void, Never>?
+    /// The readback loop, and whether anything has asked for one. Both are needed: a header that has
+    /// never been drawn asks the engine nothing, and a channel that had no process when the strip
+    /// was drawn is asked as soon as it has one.
+    @ObservationIgnored private var readbackTask: Task<Void, Never>?
+    @ObservationIgnored private var readbacksWanted = false
     /// The ingestion's own lifetime, owned here and not by whatever called `open`. See `open`.
     @ObservationIgnored private var openingTask: Task<Void, Never>?
 
@@ -211,6 +250,7 @@ final class ChannelTimelineModel {
         effectsTask?.cancel()
         changesTask?.cancel()
         openingTask?.cancel()
+        readbackTask?.cancel()
     }
 
     // MARK: - The header
@@ -220,8 +260,100 @@ final class ChannelTimelineModel {
     /// The header and the opening are separate concerns: origin, presence, banner and system item
     /// change under a channel that stays selected, and the read must not be restarted — or, worse,
     /// cancelled mid-flight — every time one of them does. The column calls this on every change to
-    /// those four fields and calls `open` once per channel.
-    func adopt(_ header: ChannelHeader) { self.header = header }
+    /// those fields and calls `open` once per channel.
+    ///
+    /// **Superseded 2026-09-09 (C6.1 Task 5).** What stood here said "those four fields": the branch
+    /// is a fifth, and the column's `onChange` compares the whole `ChannelHeader`, so a rebase under
+    /// a selected channel arrives here like any other change.
+    func adopt(_ header: ChannelHeader) {
+        self.header = header
+        readout.branch = header.branch
+        // A channel that was archived or connecting when the strip was first drawn has a process
+        // now, and this is the moment that becomes true. Nothing is armed on a timer, and nothing
+        // starts here for a channel whose header nobody has drawn.
+        beginReadbacks()
+    }
+
+    // MARK: - The header's readbacks
+
+    /// Asks the engine for the readbacks, and keeps asking after each turn. Called by
+    /// `HeaderReadoutView`'s `task`, which is what makes the strip's presence the thing that asks.
+    ///
+    /// Idempotent, and safe to call for a channel with no process: it records that the readbacks are
+    /// wanted and starts them when there is something to ask.
+    func startReadbacks() {
+        readbacksWanted = true
+        beginReadbacks()
+    }
+
+    /// One pass: `get_settings` for the model and the effort, the channel's retained handshake for
+    /// the mode, and `get_context_usage` for the meter.
+    ///
+    /// **Only for a channel with a live process**, and a refusal leaves the last readback standing —
+    /// each answer is folded in only when there is one, and nothing here retries (X5).
+    func refreshReadbacks() async {
+        guard let poller else { return }
+        if let settings = await poller.settings() { readout.apply(settings) }
+        if let context = await poller.contextUsage() { readout.context = context }
+    }
+
+    /// The poller for a channel that has a process to ask, and nil for one that has not.
+    private var poller: ReadbackPoller? {
+        guard let lifecycle, ReadbackPoller.hasLiveProcess(header.origin) else { return nil }
+        return ReadbackPoller(key: key, lifecycle: lifecycle)
+    }
+
+    /// Takes the opening readback and then one after each `result` frame — the one moment a turn is
+    /// known to have ended. **Not a timer**: nothing pushes the context meter (parity §41.15.4), and
+    /// an interval would ask a question of an idle channel over and over.
+    ///
+    /// **The permission mode is the exception, and it is pushed** (child spec §10, corrected
+    /// 2026-09-09). It is in no control answer: `get_settings` reports the model and the effort, the
+    /// handshake reports the mode the process launched with and is minted once, and a mode changed
+    /// mid-session — by a `/mode`, by an *exit plan mode* approval, by any host's
+    /// `set_permission_mode` — arrives on a `system/status` frame and nowhere else. So this loop
+    /// reads those frames as they pass and the readout follows them, rather than showing the launch
+    /// mode until a restart.
+    ///
+    /// The subscription is this model's own fan-out, which `events(of:)` documents as legal and is
+    /// how the ingestion and the Activity pump already share one channel. It ends when the channel
+    /// archives — the stream is finished then — and the task clears itself so a channel that comes
+    /// back up is asked again.
+    private func beginReadbacks() {
+        guard readbacksWanted, readbackTask == nil, !isTerminated, poller != nil, let lifecycle else { return }
+        let key = key
+        readbackTask = Task { @MainActor [weak self] in
+            // **Subscribed before the opening readback is taken, and not after it.** `events(of:)`
+            // registers a future-only fan-out — which is why `engineReports(of:)` exists at all —
+            // and the readback below is a round trip to a process that may be mid-turn. A mode
+            // change reported inside that window reaches whoever is listening at the time and is
+            // never reissued, so a subscription taken afterwards loses it and the header shows the
+            // launch mode until the next change, which on a quiet channel is never.
+            let stream = await lifecycle.events(of: key)
+            await self?.refreshReadbacks()
+            guard let stream else { self?.readbackTask = nil; return }
+            // A restart replaces the process under a channel this model outlives, and the mode a
+            // status frame reported belongs to the process that reported it: the precedence resets
+            // with the process, or the replacement's handshake is rejected for ever. The epoch is
+            // recorded on the readout rather than here, so it survives an archival that ends this
+            // subscription — see `ChannelHeaderReadout.observed(epoch:)`.
+            //
+            // **And the readbacks are re-taken on the spot.** The replacement's mode is in its own
+            // handshake, a handshake is not a turn end, and the poll below is the only other thing
+            // that would read one — so a replacement that runs no turn would leave the header naming
+            // the mode of a process that is gone.
+            for await event in stream {
+                guard let self, !self.isTerminated else { return }
+                if let seen = ReadbackPoller.epoch(of: event), self.readout.observed(epoch: seen) {
+                    await self.refreshReadbacks()
+                }
+                if let mode = ReadbackPoller.liveMode(event) { self.readout.apply(liveMode: mode) }
+                guard ReadbackPoller.isTurnEnd(event) else { continue }
+                await self.refreshReadbacks()
+            }
+            self?.readbackTask = nil
+        }
+    }
 
     // MARK: - Opening
 
@@ -240,7 +372,7 @@ final class ChannelTimelineModel {
     /// the caller's cancellation, so the read completes whatever the view does; only `close()`,
     /// which the registry owns, ends it.
     func open(_ row: ChannelRow) async {
-        header = ChannelHeader(row: row)
+        adopt(ChannelHeader(row: row))
         if let openingTask {
             // A second caller waits for the first rather than starting a second ingestion. Awaiting
             // a non-throwing task is not itself cancellable, so this is safe from a cancelled view.
@@ -305,7 +437,12 @@ final class ChannelTimelineModel {
             for await effect in ingestion.effects {
                 guard let self else { return }
                 guard !effect.changes.isEmpty else { continue }
-                await self.publish()
+                // Requested, not performed (§4). Deltas arrive as fast as the engine writes them and
+                // the read model is republished whole for each one; the coalescer turns a burst into
+                // one publish on a thirty-hertz trailing edge, and a lone delta after quiet into one
+                // publish 33 ms later. Everything downstream — the table, its diff, the row heights
+                // — costs what a publish costs, so this is the one place the rate is set.
+                self.coalescer.request()
             }
         }
 
@@ -349,7 +486,11 @@ final class ChannelTimelineModel {
     /// holds, so without this the channel would keep reading a file that is no longer there and a
     /// channel with no live tap would go quietly stale.
     func transcriptMoved(to path: URL) async {
-        guard let ingestion, transcriptPath != path else { return }
+        // `ingestion != nil` rather than a binding: since the rebind moved into
+        // `signal(.relocated:)` nothing here needs the actor itself, and a bound-but-unused value
+        // is a compiler warning, which the floor does not allow. The condition still matters — a
+        // model with no ingestion has nothing to relocate and must not raise the signal.
+        guard ingestion != nil, transcriptPath != path else { return }
         transcriptPath = path
         // **One call, not two.** C3's `signal(.relocated:)` performs the path rebind itself — it
         // calls `relocated(mainPath:)` and says so at its own definition — so raising the signal is
@@ -386,9 +527,11 @@ final class ChannelTimelineModel {
     /// workspace this model was built over.
     func close() {
         isTerminated = true
+        coalescer.cancel()
         openingTask?.cancel(); openingTask = nil
         effectsTask?.cancel(); effectsTask = nil
         changesTask?.cancel(); changesTask = nil
+        readbackTask?.cancel(); readbackTask = nil
         let ingestion = self.ingestion
         self.ingestion = nil
         Task { await ingestion?.close() }
@@ -416,9 +559,70 @@ final class ChannelTimelineModel {
         fanout.yield(next)
     }
 
+    /// The publish path's rate limiter, built here so its lifetime is this model's.
+    ///
+    /// It is `lazy` because it captures `self`: the closure is what a publish *is*, and a coalescer
+    /// that published something else would be measuring nothing.
+    @ObservationIgnored private lazy var coalescer = PublishCoalescer { [weak self] in
+        await self?.publish()
+    }
+
     /// The archived channel's tap: a sequence that is over before anybody reads it.
     private static func finishedEvents() -> AsyncStream<WireEvent> {
         AsyncStream { $0.finish() }
+    }
+}
+
+// MARK: - The thirty-hertz trailing edge
+
+/// One publish per thirty-hertz window, on the trailing edge (child spec §4).
+///
+/// **Why the model and not the renderer.** The renderer is handed a timeline and draws it; how often
+/// it is handed one is the model's to decide, and a burst of deltas that each republish the whole
+/// read model costs the table a diff and a reload apiece however cheap the row is.
+///
+/// **Trailing edge, and what that buys.** The first request of a quiet stream arms the window and
+/// the publish happens at its end, so every delta that arrived inside it is already in the read
+/// model the publish reads — the coalescer buffers nothing and can drop nothing. A hundred deltas
+/// inside one window are one publish; a single delta after quiet is one publish within the window's
+/// length. A leading edge would publish the first delta of a burst and then the state at the end of
+/// it, which is one publish more for no reader.
+@MainActor
+final class PublishCoalescer {
+
+    /// Thirty hertz, as §4 states it.
+    static let window = Duration.milliseconds(33)
+
+    private let window: Duration
+    private let publish: @Sendable () async -> Void
+    private var armed: Task<Void, Never>?
+
+    /// How many publishes this coalescer has performed. What a rate is asserted in.
+    private(set) var publishCount = 0
+
+    init(window: Duration = PublishCoalescer.window, publish: @escaping @Sendable () async -> Void) {
+        self.window = window
+        self.publish = publish
+    }
+
+    /// Asks for a publish. Cheap, synchronous and idempotent inside one window.
+    func request() {
+        guard armed == nil else { return }
+        armed = Task { [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(for: self.window)
+            guard !Task.isCancelled else { return }
+            self.armed = nil
+            self.publishCount += 1
+            await self.publish()
+        }
+    }
+
+    /// Drops a window that is still armed. The model's `close()` calls it: a publish landing after
+    /// the release would push a timeline at subscribers the release just finished.
+    func cancel() {
+        armed?.cancel()
+        armed = nil
     }
 }
 
