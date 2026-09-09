@@ -2447,3 +2447,330 @@ the gap between 141 and 157 is C6.1's and C6.2's reservations and is expected. (
      branch. Same class as 131/146/151/194: a seeding path whose order a busy host can change. Closer:
      the seeding test waits for delivery of the retained report rather than reading once. Owner: C6.2.
      Filed 2026-09-09 at C6.3's merge.
+## From C7.5 (Files panel, `child/c7-files-panel`)
+
+232. **Every leaf builds its own git and temporary-tree fixtures.** `FilesPanelTests/Support`
+     rebuilds a scratch-tree guard, a repository builder and a recording runner that
+     `SourceControlCoreTests/Support` already has, because test sources cannot be imported across
+     targets and neither belongs in a shipping module. Two copies of a guard is two places for it
+     to be wrong. Closer: a `WorkbenchTestSupport` library target the test targets depend on, or
+     the guard promoted into a module that ships. Owner: whichever of C7.4, C7.6 or C7.7 writes
+     the third copy.
+
+233. **Both sides of a diff are decoded as UTF-8 with replacement.** `DiffPairResolver` hands
+     Monaco strings, so a byte sequence that is not UTF-8 becomes U+FFFD and a save from that
+     buffer would not round-trip. Deliberate — refusing to show a diff of a file with one bad byte
+     is worse for the user — and the diff editor is read-only, so nothing writes it back today.
+     This is the contents half of entry 189, which is about path bytes. Closer: carry the raw
+     bytes beside the string and refuse the *editor* (not the diff) for a file that does not
+     round-trip. Owner: C7.7 when it renders diffs of arbitrary history.
+
+234. **`ToolRunning` cannot write to a `git` child's stdin.** `ToolJob` opens every child's
+     descriptor 0 on `/dev/null` and `run` has no stdin parameter, so any verb whose batch form is
+     `--stdin` is unavailable: C7.5's gitignore batch had to be respelled
+     `check-ignore --verbose --non-matching` and read by position (child spec Design §3). The
+     failure shape is the dangerous one — `--stdin` reads EOF and reports *nothing*, exit 0. Closer:
+     an optional `stdin: Data` on `ToolRunning.run` written and closed before the read loop.
+     Owner: C7.3's module, whichever leaf needs the second such verb.
+
+235. **What a `FileSnapshot` still costs, now that it is bounded.** *Closed in part at C7.5's fix
+     wave.* `FileSnapshot.read` now `stat(2)`s first and reads the contents only when the size or
+     the modification time moved, so a quiet poll tick over an open file is one `stat` and no
+     digest; and the read is bounded by `FileKind.maximumReadableBytes`, so a file above the panel's
+     cap has no snapshot rather than a 64 MiB one. What remains: (a) the shortcut cannot see a write
+     that keeps both the size and the modification time — a swap of the same number of bytes with
+     the time put back is a change no watcher on this file system observes for free, and the panel
+     will show the old buffer until something else moves; (b) a *real* change to a file just under
+     the cap is still a whole read and a SHA-256 on the main-actor opening path, so opening a 60 MiB
+     text file still blocks a frame. Closers: for (a), nothing short of a content check, so it is a
+     documented limit rather than a bug; for (b), read and digest off the main actor, or digest a
+     bounded prefix plus the size. Owner: C7.5's own follow-up, or the first leaf that opens a large
+     file and notices.
+
+236. **The Files tree does not follow the working tree.** §9.1's watcher sentence is about open
+     files, so a file the agent creates or deletes appears only on expansion, on *Refresh*, or
+     after a save. A user watching an agent scaffold a directory sees nothing move. Ruled out of
+     scope at this leaf's gate (Parent revision 3) rather than forgotten. Closer: one FSEvents
+     stream over the channel's cwd, coalesced, with the `node_modules` class of directory
+     excluded. Owner: a v1.1 Files follow-up.
+
+237. **A tab's link targets accumulate for the life of the tab.** `LinkRouterCapability` withdraws
+     by `PanelTabID`, so a panel cannot retract one channel's registration without retracting every
+     channel's. C7.5 registers a `.file` and a `.diff` target per channel and makes them hold the
+     session **weakly**, so a session the host evicted leaves an inert pair that stops claiming and
+     lets the router take W5's fallback — correct, but the registrations themselves stay on the
+     router until the tab is unregistered. A user who visits three thousand channels leaves six
+     thousand dead targets, each consulted on every `open`. Closer: a per-registration withdrawal
+     token on `LinkRouterCapability`, which is an X7 change no gate needed here. Owner: C7.6 and
+     C7.7 register per channel too; the first one that measures the resolution cost.
+
+238. **Nothing in X7 tells a panel session it is being released.** `PanelTabSession` has no
+     teardown member and `PanelHostModel` releases a session by dropping the reference — under LRU
+     pressure, on `unregister`, and when a channel leaves the index. C7.5 answers it with a `deinit`
+     that spawns a flush of whatever its store still holds pending, which covers the persisted
+     document but cannot call a main-actor method: an edit recorded in the session and not yet
+     handed to the store is still lost, and watchers are stopped only because they were made inert
+     when released rather than because anything asked them to stop. Every later panel with a
+     process, a socket or a buffer behind it has the same gap and a worse consequence. Closer:
+     `func willRelease() async` on `PanelTabSession`, awaited by the host before it drops the slot.
+     Owner: C5's fence, raised by C7.5; C7.4's panes are the case that will force it.
+
+239. **An atomic save carries the file's mode and nothing else.** Writing a temporary and
+     `rename`ing it installs a fresh inode, so the destination's owner, group and any ACL entries
+     are replaced by the saving process's. The mode is carried because losing it has a visible
+     consequence (an executable script stops being executable); ownership and ACLs are not, and on
+     a shared checkout a save can quietly drop a collaborator's access or an explicit deny. Found by
+     C7.5's merge panel, ruled out of scope: a faithful replace needs `copyfile(3)` with
+     `COPYFILE_ACL | COPYFILE_XATTR` onto the temporary, or an exchange primitive. Closer: that
+     call, once someone edits a file whose ACL matters. Owner: C7.5's follow-up.
+
+240. **`LinkRouterCapability.open` does not say which channel the link came from.** Every channel's
+     Files session registers a `.file` and a `.diff` target with the same tab and specificity, and
+     `LinkRouter.mostSpecific` compares specificity and tab order — never channel identity. So the
+     registry alone cannot deliver a link to the session it came from. C5 recorded the same gap in
+     `HostLinkRouter` ("`LinkRouterCapability.open(_:from:)` carrying the channel would remove the
+     case altogether, and that is an X7 amendment"); C7.5 mitigates it by registering **once per
+     tab** and routing to the channel the panel is presenting, which is right for a click the user
+     just made and wrong for a link delivered to a channel that is not on screen. Closer: the X7
+     amendment of C7.5's Parent revision 4 — the capability carries the originating `ChannelKey`
+     and `LinkTarget` may match on it. Owner: C5's fence; C7.6 and C7.7 register per channel too.
+
+241. **Re-baselining the editor after a save can overwrite a keystroke.** W4's vocabulary is closed
+     and `readBuffer` deliberately leaves the dirty flag alone, so the only way to tell Monaco "this
+     is the saved state now" is `setText` — which replaces the buffer. A character typed between the
+     `saveRequested` that captured the text and the `setText` that acknowledges it is lost. The
+     alternative is worse and is why the trade was made: without the acknowledgement the editor stays
+     dirty in its own eyes, `reportDirty` fires only on a transition, and every subsequent edit is
+     invisible to the host — including to the watcher's refresh, which would replace them all. Found
+     by C7.5's second merge round. Closer: a `setBaseline` message on the bridge that resets
+     `savedVersionId` without touching the model, which is a W4 amendment. Owner: C7.2's contract,
+     whichever leaf next opens it.
+
+242. **A panel session cannot capture its buffer when its view unmounts.** `dismantleNSView` detaches
+     the surface, and the only way to obtain the text is a `save` round trip through a web view that
+     is already going away. So text typed and never stashed by a switch, a toggle or a diff is lost
+     on a bare remount. Everything a *user action* triggers stashes first; this is the path with no
+     action in it. Found by C7.5's second merge round. Closer: a `dirty` event carrying the text, or
+     a periodic stash while a buffer is dirty. Owner: C7.5's follow-up.
+
+243. **Cmd+S resolves the main window's channel, not the focused one.** *Closed at C7.5's fix
+     wave D: the pop-out scene publishes its identity as a focused scene value, and the Save item
+     resolves both its target and its enablement against the key window through it.*
+     `AppModel.filesSaveTarget` read `PanelHostModel.selectedChannel` and `selected`, which
+     describe the main window; `PoppedOutPanelScene` keeps its own channel and does not update
+     them. With a Files pop-out
+     focused, the menu item's enabled state and its action both speak about the main window's
+     channel. The pop-out's own *Save* button is unaffected. Found by C7.5's second merge round.
+     Closer: the host tracking which scene is key, which is C5's fence. Owner: C5.
+
+244. **The save's containment check and its temporary creation are two moments.** The config-home
+     refusal resolves the destination and then `atomicallyWrite` creates a temporary by pathname; an
+     ancestor directory swapped for a symlink in between redirects the temporary into the protected
+     directory, and the pre-rename revalidation checks contents rather than containment. The threat
+     is a racing local writer on the user's own machine — the class C7.3 ruled out of scope twice as
+     entry 191. Found by C7.5's second merge round. Closer: descriptor-relative creation (`openat`
+     from a descriptor on the validated parent). Owner: whichever leaf makes 191 worth closing.
+
+245. **The suppressed clean report is keyed on a path, not on a surface.** When the session replaces
+     a buffer it records the path whose `dirty:false` it caused, so the bridge's own clean report
+     does not drop an unsaved marker the user still owns. The record is retired only by a real
+     `dirty:true`. That is exact for `bridge.js` as written — `reportDirty` fires on transitions, so
+     a clean report can only follow a dirty one — but it is an assumption about another module's
+     behaviour rather than something this session enforces, and with several surfaces attached there
+     is no per-surface accounting. Found by C7.5's fix wave for the second merge round. Closer:
+     either the bridge tagging a host-caused transition, which is a W4 shape change, or per-surface
+     expectations here. Owner: C7.5's follow-up, or C7.2's contract if the bridge answers it.
+
+246. **`FilesPanelTests` builds fixtures that duplicate no other target, and is now the leaf's
+     largest suite.** 149 of the package's 383 tests live in one target with a private git fixture
+     builder, a scratch-tree guard and a recording runner (entry 232's duplication), plus real PDFs,
+     PNGs and MP4 containers generated per test. Nothing is wrong with it; it is slow enough
+     (~15 s of the package's ~33 s) that the next leaf to add to it should know where the time goes
+     before adding more. Closer: share the fixtures per entry 232 and build the media corpus once
+     per suite rather than once per test. Owner: C7.7, which will add to this target.
+
+336. **A presentation can wait out the stash bound before it draws.** A file switch over a dirty
+     buffer is a `save` round trip, and a second switch arriving while the first is outstanding now
+     waits for the same answer rather than racing it — correct, and up to `stashTimeout` (two
+     seconds) of a panel that has not redrawn, with nothing on screen saying why. Found by C7.5's
+     fix wave A for the third merge round. Closer: a pending marker on the tab the presentation is
+     heading for, which is a view change; or a shorter bound, which trades a slow editor's captures
+     for responsiveness. Owner: C7.7, which draws the tab strip.
+
+337. **Two windows can hold two different unsaved buffers, and only one of them can win.** The
+     session holds one text per open file, so ownership follows the surface that last reported the
+     file dirty. If the user genuinely types in both windows, the second `dirty` report takes
+     ownership and the first window's edits are overwritten by the `setText` that follows the next
+     save. Fixing the *cursor* half of this (entry: fix wave A) removed the case where a window
+     that typed nothing could take the buffer; the divergent case remains and cannot be closed
+     without a per-surface buffer or a bridge command that reads a buffer without saving it. Found
+     by C7.5's fix wave A. Closer: a `readBuffer` in W4 that answers per surface, which is an
+     amendment to C7.2's contract. Owner: C7.2's contract, whichever leaf next opens it.
+
+338. **A retired buffer request is kept until an editor answers it, and the queue is capped by a
+     number.** `saveRequested` carries no request id, so replies are correlated positionally: an
+     expired request stays in the queue so its late answer can be recognised as belonging to a
+     request that is over. An editor that never answers therefore accumulates entries, and the cap
+     that stops that is 32 — a number chosen because an editor silent across that many requests is
+     not going to answer any of them, not because anything measured it. Found by C7.5's fix wave A.
+     Closer: a request id on the wire, which is the W4 amendment entry 241 also wants. Owner:
+     C7.2's contract.
+
+339. **The one-read fix for the buffer and its baseline has no failing test of its own.** The
+     window it closes is an atomic replacement landing between two reads of one path, which cannot
+     be driven deterministically without a test-only injection seam in the read path — judged worse
+     than the bug it would prove. What is tested is the new API's contract: the snapshot and the
+     bytes it was taken from are the same bytes. Found by C7.5's fix wave A. Closer: a seam in
+     `FileSnapshot` that a test can suspend, if a second such race ever needs proving. Owner:
+     whichever leaf next needs to test a file-system race.
+341. **A watched symbolic link polls for the life of the watch, and its source can sit on a stale
+     inode.** `FileWatch` now keeps the stat poll armed beside the vnode source whenever the path is
+     a link, because `open(2)` follows it and the source therefore watches the target's inode —
+     which a retarget or a removal of the link never touches. Two costs follow. The poll is the only
+     thing carrying such a path, so a change is observed at the poll interval rather than
+     immediately; and after a retarget the source stays armed on the *previous* target's inode,
+     holding an `O_EVTONLY` descriptor on a file nothing is interested in until the watch ends.
+     Neither is wrong — the poll delivers, and the descriptor is released with the watch. Closer:
+     re-arm from the tick when a symlinked path's observation moves, which needs the source's
+     current inode to compare against. Owner: C7.5's follow-up. Found by C7.5's fix wave B.
+
+342. **`FileTree`'s listing cache is keyed by the exact `URL` value a caller passed.** A URL from
+     `contentsOfDirectory` carries a trailing slash for a directory and may resolve `/tmp` to
+     `/private/tmp`, so a hand-built `root.appending(path: "src")` is a *different* key from the
+     `src` node's own `url`. Every caller today walks by node — the column, and `refreshAll` over
+     the cache's own keys — so nothing is currently wrong; a future caller that constructs a URL
+     for `refresh(_:)` or `children(of:)` would silently enumerate a second time or refresh
+     nothing. Closer: normalise on the way into `loaded`. Owner: whichever leaf next adds a caller
+     that names a directory rather than walking to it. Found by C7.5's fix wave B.
+
+361. **The whole-path symlink question answers "no" for the system's own `/var` and `/tmp`
+     aliases.** `FileWatch` decides whether to keep the poll armed by asking whether resolving the
+     path changes it, and `resolvingSymlinksInPath` normalises those two prefixes away — so a file
+     whose *only* symlinked ancestor is one of them is left to the vnode source alone. Nobody
+     retargets `/var`, and the alternative (an `lstat(2)` per component) puts a stat loop under
+     every watch on a file in the temporary directory, which is where every test tree and a fair
+     number of scratch files live. Closer: ask per component and exempt the aliases by name, if a
+     case ever appears that needs it. Owner: C7.5's follow-up. Found by C7.5's fix wave D.
+
+362. **The channel a `.newWindow` delivery lands in is carried by one slot, so two such links in
+     flight at once can cross.** `PanelHostModel.lastPopOut` records the pop-out the router just
+     prepared and the Files tab resolves its channel from it, which is what stops a delivery from
+     following a window that has moved on. Two `.newWindow` opens overlapping — two Cmd-clicks
+     before the first delivery lands — leave the second's pop-out in that slot for both, and the
+     first file opens in the second's channel. The real closer is entry 240's X7 amendment: the
+     capability carrying the originating `ChannelKey` makes the delivery name its own channel and
+     the slot disappear. Owner: X7's amendment, whichever leaf opens it. Found by C7.5's fix wave D.
+
+343. **Two presentations dispatched concurrently cannot be ordered by intent.** The presentation
+     generation says which call claimed the surface last, and a call that has been dispatched but
+     has not run yet has claimed nothing — so a suspension taken *before* a presentation (opening a
+     file arms its watcher first) is checked against the last generation that actually reached the
+     surface rather than against a ticket. That answers the question that matters, but it is a
+     weaker order than intent: two calls that suspend before drawing can still resolve in either
+     order, and a watcher refresh landing in the same window is indistinguishable from a user
+     action. Closer: a single serialised presentation queue on the session, so intent order is
+     entry order — worth doing when a second panel needs the same shape. Owner: C7.5's follow-up.
+     Found by C7.5's fix wave C.
+
+344. **A stash's late answer is exempt from generation retirement by argument, not by
+     construction.** Every other request kind is retired when its presentation is superseded; a
+     stash is not, because its answer is a capture that a *newer* presentation may itself be
+     waiting on, and retiring it would leave that waiter to time out. What makes the exemption safe
+     is that a capture records only what the editor holds for a named buffer, checked against the
+     path and the buffer's revision. That is a proof about the operation rather than a restriction
+     on it, so a future capture that did more than record text would silently lose the guarantee.
+     Closer: a request id on the wire (entries 241, 338) would let a stash be retired without
+     stranding its observers. Owner: C7.2's contract.
+
+345. **`BufferState` fences the fields that were being mutated out of turn, and only those.** The
+     text, the baselines, the dirty flag, the owner and the cursor cannot be assigned from the
+     session; `hasConflict`, `keepsMine`, `isMissing`, `kind` and the markdown toggle still can,
+     because no defect has involved them. The boundary is therefore a judgment about where the
+     defects were, not a principle, and a new field of genuine buffer state added to `OpenFile`
+     rather than to `BufferState` would sit outside the fence without anything saying so. Closer:
+     move the remaining per-file flags behind operations too, once one of them earns it. Owner:
+     C7.5's follow-up, or C7.7 if it adds per-file state.
+
+366. **A file that grows past the cap keeps its old contents and is reported deleted.**
+     `FileWatch.evaluate` has one nil outcome: `FileSnapshot.readWithContents` answering nothing
+     becomes `.deleted`. But that read refuses a file *above the cap* exactly as it refuses one
+     that is gone, so a clean file the agent appends past `FileKind.maximumReadableBytes` reaches
+     the session as a deletion — the panel marks it missing and leaves the editor holding the
+     contents from before the growth, which are now neither the file nor a baseline anything can
+     be compared against. Closer: a distinct `.oversized` outcome that refreshes the file into the
+     unsupported preview, which is what opening it fresh would do. File: `FileWatch.swift`.
+     Owner: C7.5. Filed 2026-09-09 at C7.5's third review round (hard stop).
+
+367. **The MPEG signature mask rejects AAC's own ADTS header.** `FileKind.signature(of:)` tests
+     `bytes[1] & 0xE6 == 0xE2` for MPEG audio, and an ADTS frame begins `0xFF 0xF1` or `0xFF 0xF9`
+     — both of which mask to `0xE0`, not `0xE2`. So a `.aac` file passes the extension claim, is
+     put to the container veto, fails it and is drawn as opaque bytes rather than by the media
+     viewer. Nothing else in `mediaExtensions` is affected: the other AAC spellings carry an
+     `ftyp` box. Closer: a separate ADTS test beside the MPEG one, sync word plus layer bits, since
+     the two families do not share a mask. File: `FileKind.swift`. Owner: C7.5.
+     Filed 2026-09-09 at C7.5's third review round (hard stop).
+
+368. **A package cannot be a Quick Look file, because `FileKind.of` asks `stat(2)` first.** The
+     size guard is `regularFileSize(url)`, which answers `nil` for a directory, so the function
+     returns `.binary` before the extension is ever consulted — and `.rtfd`, the one entry in
+     `quickLookExtensions` that is a *bundle*, is unreachable from a tree row or a link even though
+     Quick Look draws it. The order is otherwise right: the cap has to come before the whole-file
+     read. Closer: package detection ahead of the regular-file guard, keyed on the extension and
+     the directory bit together, so only the bundle kinds take the branch. File: `FileKind.swift`.
+     Owner: C7.5. Filed 2026-09-09 at C7.5's third review round (hard stop).
+
+369. **The vnode source watches the file's inode, so a renamed ancestor is unobserved.** `open(2)`
+     resolves the whole path, and the source is armed on what it opened: renaming a regular parent
+     directory and putting a different directory at the old pathname leaves the watch reporting the
+     file the user is no longer looking at, and every change at the path on screen is invisible.
+     Entry 341 covers the symbolic-link half, which polls; this is the plain-directory half, which
+     does not, because the path resolves to itself and nothing arms the poll. Closer: watch the
+     path's ancestors, or keep a poll that compares the path's current inode with the watched one
+     and re-arms when they disagree. File: `FileWatch.swift`. Owner: C7.5.
+     Filed 2026-09-09 at C7.5's third review round (hard stop).
+
+370. **Two `.newWindow` preparations in flight can deliver one window's file into the other's
+     session.** `PanelHostModel.lastPopOut` is a single slot, so overlapping A and B pop-out
+     preparations leave B's window in it for both deliveries and A's file opens in B's channel —
+     where the next save writes it. This is entry 362 seen from the delivery side rather than the
+     channel side: same slot, same crossing, and the same closer, which is entry 240's X7
+     amendment carrying the originating `ChannelKey` on the delivery so the slot disappears.
+     File: `PanelHostModel` (C5) with `FilesTab.swift` as the consumer. Owner: C5/C7.2.
+     Filed 2026-09-09 at C7.5's third review round (hard stop).
+
+371. **A `.newWindow` delivery whose pop-out closed first opens the file in a hidden session.**
+     The delivery resolves its channel from the prepared pop-out, and when that window has gone by
+     the time the link lands the resolution falls back to the main window's selection — so the file
+     opens in a session no window is drawing, and the user sees nothing happen. A fallback is right
+     for a link that never named a window; it is wrong for one that named a window which is gone.
+     Closer: refuse the delivery outright when the prepared window is no longer there, which is the
+     same shape as fix wave D's "with a host, a lookup that answers nothing opens nothing".
+     File: `FilesTab.swift`. Owner: C7.5. Filed 2026-09-09 at C7.5's third review round (hard stop).
+
+372. **Cmd+S from a window that is not a Files scene saves the main window's buffer.**
+     `FilesSaveButton` reads the focused-scene value and treats its *absence* as "this is the main
+     window", because the main scene publishes nothing — so the shortcut fires from Settings, or
+     from any scene that sets no value, and writes whichever file the main window's Files tab has
+     selected. Entry 243 closed the pop-out half of this; the absent case is the other half.
+     Closer: the main scene publishes its own identity, and absence disables *Save* rather than
+     defaulting to a window. File: the app's Files commands. Owner: C7.5.
+     Filed 2026-09-09 at C7.5's third review round (hard stop).
+
+373. **`isDirty` hashes the whole buffer on every evaluation, on the main actor.** Dirtiness is
+     derived from the disk baseline (fix wave C), so a *clean* text buffer takes a SHA-256 over
+     `Data(text.utf8)` each time it is asked — and it is asked by the readout, by `save`, by the
+     watcher's policy and by every presentation, for a buffer of up to the 64 MiB cap, on the actor
+     that draws. Correct and unmeasured: nothing in the suite is large enough to show it. Closer:
+     cache the digest per revision on `BufferState`, since every mutation of the text already goes
+     through operations that could invalidate it. File: `FilesPanelSession.swift`. Owner: C7.5.
+     Filed 2026-09-09 at C7.5's third review round (hard stop).
+
+374. **A session that only ever showed a diff never disposes its two diff models.** `bufferPath`
+     is set by `open` alone, and `leaveDiffPane` refuses to send `gotoLine` without one — so a
+     channel whose Files tab was reached by a `.diff` link and dismissed with *Close diff* sends
+     nothing at all, and Monaco keeps both sides of the pair allocated until some later editor
+     activity replaces them. Harmless for a small pair and not for two large ones. Closer:
+     `leaveDiffPane` disposes regardless, which needs a command that is safe before the first
+     `open` — the guard exists because `gotoLine` is an `error` then. File:
+     `FilesPanelSession.swift`, with C7.2's vocabulary. Owner: C7.5.
+     Filed 2026-09-09 at C7.5's third review round (hard stop).
