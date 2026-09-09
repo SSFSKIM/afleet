@@ -3383,3 +3383,18 @@ needs more. Nothing above is renumbered.
      registers there will rediscover it — name the rule where Y3 is stated rather than in three
      tabs' comments. Owner: the C6 composite (Y3's wording). Raised by C6.4 Task 2.
 
+175. **The Agents tree's scroll position is not retained on the session, so a channel switch
+     returns the user to the top of the tree.** `AgentsModel` holds the disclosure set and reads
+     the open run from the app-scoped selection store, and `AgentOutline`
+     (`App/Agents/AgentTreeView.swift:103–140`) scrolls only on appearance and on a change of the
+     open run — nothing carries where the user had scrolled to. X7 makes a panel's session the
+     place per-channel state lives for the session's lifetime, and this is per-channel state that
+     does not live there: on a tall tree, switching away and back drops the user at the top of a
+     branch they were reading in the middle of. Bounded by what already survives — the two things
+     a user notices, the disclosure state and the selected run, are both on the session or the
+     store, and the run they had open is scrolled back to on appearance — which is why C6.4's fix
+     wave ruled it deferred rather than fixed. Closer: hold the outline's scroll offset (or the
+     id of the first visible row, which survives a tree that moved) on `AgentsModel` and restore
+     it on appearance, ahead of the open-run scroll. Owner: C6.4's successor, with the transcript
+     pane's own scroll retention, which has the same shape. Raised by Wave A review.
+
