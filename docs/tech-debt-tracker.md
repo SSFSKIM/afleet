@@ -4111,3 +4111,20 @@ needs more. Nothing above is renumbered.
      that has a substantive reason, re-word item 1 to "set only for fixtures a generator under
      `Tools/probe/synthetic/` builds, each saying so in its README", and read item 10 as the
      item that carries them. Owner: the architect, with C1's fixture rules.
+
+## From corrective/c6-recomp-decisions, 2026-09-10 (numbered from 428)
+
+428. **`ComposerModel.lastSeenUserMessageUUID` can name a subagent's message.**
+     `renderedUserMessages` is the merged timeline, and a subagent's stream carries user messages
+     of its own — the run's instructions — which sort after the main thread's newest prompt for as
+     long as the run is live. The rewind's `last_seen_user_message_uuid` is therefore, during a
+     live subagent run, a uuid on a stream the engine's main conversation does not hold. The probe
+     `spike_rewind_last_seen` measured that naming the wrong message refuses the rewind with
+     `"unseen later turn"`, and a refusal falls back to a fork — so the failure reads as *Edit*
+     silently preferring a fork whenever an agent is running, which is exactly the shape that
+     looks like a working feature. This corrective fixed the same read in `restoreLastPrompt`,
+     which is its own, and deliberately did not touch this one: the rewind is C6.2's contract,
+     with its own three-arm gate over the recorded legs, and moving it wants that gate re-run
+     against a recording that folds two streams. Closer: filter `renderedUserMessages` to
+     `StreamName.main` and re-run C6.2's rewind arms. Owner: C6.2's successor on the composer.
+     Raised by corrective/c6-recomp-decisions at its review's fix wave.

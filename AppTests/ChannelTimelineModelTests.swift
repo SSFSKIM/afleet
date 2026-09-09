@@ -289,6 +289,84 @@ final class ChannelTimelineModelTests: XCTestCase {
         XCTAssertEqual(actions.count, 0, "the retired dialog put \(actions.count) answer(s) on the wire")
     }
 
+    /// A process that dies under an open refusal dialog takes nothing back.
+    ///
+    /// `.exited` rewrites every pending decision to `.inert`, so a registry that read "not pending"
+    /// as "resolved" would evict the messages of a dialog nobody answered and nothing cancelled —
+    /// and the registry is the *channel's*, not the process's, so they would stay hidden through the
+    /// respawn with nothing left to un-hide them. §8.4 evicts on a resolution, and a process dying
+    /// is not one.
+    ///
+    /// Both directions in one fold: the dialog that goes `.inert` keeps its messages, and a second
+    /// dialog the binary cancelled before the exit loses its own — so a registry that simply stopped
+    /// evicting would fail the second half.
+    func testAPendingRefusalLosesNothingWhenTheProcessDies() throws {
+        let key = ChannelKey(configHome: URL(fileURLWithPath: "/tmp/invented-config-home-retraction"),
+                             session: LaunchFixtures.sessionA)
+        let stream = LogicalStream(configHome: key.configHome, sessionID: key.session, name: .main)
+        var reducer = WireReducer(stream: stream, slug: "invented-slug")
+
+        let cancelled = try Self.refusal(id: "invented-refusal-cancelled", retracting: ["invented-doomed-1"])
+        let orphaned = try Self.refusal(id: "invented-refusal-orphaned", retracting: ["invented-survivor-1"])
+        _ = reducer.apply(.request(cancelled))
+        _ = reducer.apply(.request(orphaned))
+        _ = reducer.apply(.requestCancelled(cancelled.id, .first))
+        _ = reducer.apply(.exited(.signal(9, stderrTail: ""), .first))
+
+        XCTAssertTrue(reducer.overlay.decisions[orphaned.id]?.state == .inert,
+                      "the surviving dialog did not go inert when the process died")
+
+        let registry = RetractionRegistry()
+        registry.observe(reducer.overlay, in: key)
+
+        XCTAssertTrue(registry.retains(Self.item(key: "invented-survivor-1", in: stream)),
+                      "a process dying took back the messages of a dialog nobody resolved")
+        XCTAssertFalse(registry.retains(Self.item(key: "invented-doomed-1", in: stream)),
+                       "the dialog the binary retired kept its messages")
+    }
+
+    /// D11's read costs one decode per dialog, not one per publish.
+    ///
+    /// `observe(_:in:)` runs on the thirty-hertz publish path and building a `DecisionCard` encodes
+    /// and re-decodes the whole request payload, so a scan of every settled dialog per publish would
+    /// grow the per-publish cost with the channel's entire dialog history — the growth §8.3 forbids,
+    /// and invisible from the eviction, which is idempotent either way.
+    func testTheRetractionReadsEachSettledDialogOnce() throws {
+        let key = ChannelKey(configHome: URL(fileURLWithPath: "/tmp/invented-config-home-retraction-cost"),
+                             session: LaunchFixtures.sessionA)
+        let stream = LogicalStream(configHome: key.configHome, sessionID: key.session, name: .main)
+        var reducer = WireReducer(stream: stream, slug: "invented-slug")
+        let settled = try Self.refusal(id: "invented-refusal-settled", retracting: ["invented-doomed-2"])
+        _ = reducer.apply(.request(settled))
+        _ = reducer.apply(.requestCancelled(settled.id, .first))
+
+        let registry = RetractionRegistry()
+        for _ in 0..<30 { registry.observe(reducer.overlay, in: key) }
+
+        XCTAssertEqual(registry.decodes, 1,
+                       "30 publishes over one settled dialog cost \(registry.decodes) decode(s), not 1")
+        XCTAssertFalse(registry.retains(Self.item(key: "invented-doomed-2", in: stream)),
+                       "the settled dialog's message survived the read")
+    }
+
+    /// A `refusal_fallback_prompt` naming the uuids it takes back: the recorded request with its
+    /// `retractedMessageUuids` replaced and re-keyed, so everything but the list under test is the
+    /// engine's and every identifier this suite states is invented (§11).
+    private static func refusal(id: String, retracting uuids: [String]) throws -> InboundRequest {
+        try FixtureRunner.request("dialog-refusal-fallback", subtype: "request_user_dialog", id: id,
+                                  overrides: ["payload": ["originalModel": "invented-original",
+                                                          "fallbackModel": "invented-fallback",
+                                                          "retractedMessageUuids": uuids]])
+    }
+
+    /// A timeline item the registry can be asked about, keyed by a record uuid.
+    private static func item(key: String, in stream: LogicalStream) -> TimelineItem {
+        .userMessage(UserMessageItem(id: ItemID(stream: stream, key: key),
+                                     provenance: Provenance(stream: stream, origin: .wire),
+                                     text: "an invented message",
+                                     promptUUID: key))
+    }
+
     /// The keys of the message rows this channel holds, in the fold's order.
     private static func messageKeys(of model: ChannelTimelineModel) -> [String] {
         model.rows.compactMap { row in

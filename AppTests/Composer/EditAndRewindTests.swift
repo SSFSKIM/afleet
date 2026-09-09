@@ -420,6 +420,50 @@ final class EditAndRewindTests: XCTestCase {
         await rig.finish()
     }
 
+    /// Which message the restore takes, over a list the fold could hand it.
+    ///
+    /// **A subagent's stream carries user messages of its own** — the run's instructions — and they
+    /// sort into the merged timeline after the main thread's newest prompt for as long as the run is
+    /// live. Restoring one of those would put another agent's errand in the field and call it the
+    /// user's words. A replayed message is excluded for the same reason: an `--agent` opening prompt
+    /// is the engine's and not this user's.
+    ///
+    /// Asserted over `lastHumanPrompt(in:)` rather than through the rig, because the committed
+    /// recording the rig opens folds one stream: a fold with no subagent in it cannot be shown to
+    /// pick the wrong stream, and writing a second transcript to prove a selection rule would
+    /// exercise the ingestion instead of the rule. The rig arm above is what holds the production
+    /// path down.
+    func testTheRestoreTakesTheMainStreamsNewestNonReplayPrompt() throws {
+        let main = Self.prompt(key: "u-invented-main-1", text: "the prompt the user typed", stream: .main)
+        let replayed = Self.prompt(key: "u-invented-main-2", text: "an invented replayed prompt",
+                                   stream: .main, isReplay: true)
+        let subagent = Self.prompt(key: "u-invented-agent-1", text: "an invented subagent errand",
+                                   stream: .agent(taskID: "invented-task-1"))
+
+        let chosen = try XCTUnwrap(ComposerModel.lastHumanPrompt(in: [main, replayed, subagent]),
+                                   "the restore chose nothing from a list holding a main-stream prompt")
+        XCTAssertTrue(chosen.id.key == main.id.key,
+                      "the restore took a message that is a replay or another stream's")
+
+        // The negative floor: a list with nothing of the user's own restores nothing rather than
+        // falling back to whatever is newest.
+        XCTAssertTrue(ComposerModel.lastHumanPrompt(in: [replayed, subagent]) == nil,
+                      "the restore fell back to a replayed or a subagent message")
+    }
+
+    /// One rendered user message on a named stream. Every identifier is invented (§11).
+    private static func prompt(key: String, text: String, stream name: StreamName,
+                               isReplay: Bool = false) -> UserMessageItem {
+        let stream = LogicalStream(configHome: URL(fileURLWithPath: "/tmp/invented-config-home"),
+                                   sessionID: LaunchFixtures.sessionA,
+                                   name: name)
+        return UserMessageItem(id: ItemID(stream: stream, key: key),
+                               provenance: Provenance(stream: stream, origin: .wire),
+                               text: text,
+                               isReplay: isReplay,
+                               promptUUID: key)
+    }
+
     // MARK: - Nothing to fork from
 
     /// An edited message with no assistant record before it has no fork point: nothing is offered,

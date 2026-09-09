@@ -96,6 +96,10 @@ ALLOWLIST: dict[str, str] = {
     "whenChanged": "a test-only probe on FleetBrowserModel, named as one where it is declared",
     "whenSettled": "a test-only probe on ActivityModel, named as one where it is declared",
     "cursorsPersisted": "a test-only probe on ActivityModel, named as one where it is declared",
+    "decodes": "a cost readback on RetractionRegistry, named as one where it is declared. The "
+               "production path pays the cost — `observe(_:in:)` runs on every publish — "
+               "and nothing in the app reads the number; the suite reads it because a bound "
+               "nothing can count is a bound nothing can hold",
     # Deliberate, and argued where it is declared.
     "configChange": "named so a reader of the router knows the second hook id exists; the default "
                     "arm answers it and branching on it would be one more place to forget",

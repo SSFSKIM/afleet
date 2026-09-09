@@ -598,6 +598,47 @@ final class DialogCardTests: XCTestCase {
         }
     }
 
+    /// The correlation does not depend on the host's answer signal arriving before the engine's
+    /// frame.
+    ///
+    /// The signal and the engine's frames reach the fold by two independent asynchronous paths —
+    /// `DecisionAnswering` raises `decisionAnswered` once `perform` has returned, while the frame
+    /// comes up the wire — so neither side can promise the order. This arm is the far end of that:
+    /// the **whole recording is folded first**, every frame included, and only then is each overage
+    /// ask answered. A fold that remembered "the ask answered most recently" has nothing recorded
+    /// when any frame lands and loses all four; a fold that records the ask the engine *raised* is
+    /// unaffected, because that ordering is the engine's own.
+    func testTheConsentFallbackSurvivesTheAnswerSignalArrivingAfterTheFrame() async throws {
+        var reducer = WireReducer(stream: Self.stream, slug: "invented-slug")
+        var asks: [RequestID] = []
+        for event in try FixtureRunner.events("dialog-fable-overage") {
+            _ = reducer.apply(event)
+            guard case .request(let request) = event,
+                  case .requestUserDialog(let dialog) = request.payload,
+                  DecisionCard.DialogKind(rawValue: dialog.fields.dialogKind) == .overageConsent else { continue }
+            asks.append(request.id)
+        }
+        XCTAssertEqual(asks.count, 5, "the recording raised \(asks.count) overage dialogs, not 5")
+
+        // Every answer after every frame, which is the order this clause exists for.
+        for id in asks {
+            _ = reducer.apply(.decisionAnswered(id, outcome: .answered(summary: "consent")))
+        }
+
+        let frames = Self.consentFallbacks(try FixtureRunner.frames("dialog-fable-overage"))
+        XCTAssertEqual(frames.count, 4, "the recording carries \(frames.count) consent-fallback frames, not 4")
+
+        let (_, answering) = await hosted()
+        let context = InventedItems.context(key: Self.channel)
+        for (offset, frame) in frames.enumerated() {
+            let item = try XCTUnwrap(reducer.overlay.decisions[asks[offset + 1]],
+                                     "the fold dropped an answered overage ask")
+            let drawn = try Self.rowCardTexts(item, context, answering)
+            XCTAssertTrue(drawn.contains(frame.fields.content),
+                          "ask \(offset + 1)'s card lost its frame when the answer signal arrived late")
+        }
+    }
+
     /// What the timeline's own decision row draws for an item: the row mount's body, the card
     /// component it hosts, and that component's body. The descent is spelled out because reflection
     /// does not evaluate a stored view's `body` — a test that read the row's body alone would find

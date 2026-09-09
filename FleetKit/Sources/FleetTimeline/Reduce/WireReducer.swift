@@ -55,11 +55,21 @@ public struct WireReducer: Sendable {
     /// retaining answers for the life of the fold.
     public static let retainedAnswerLimit = 64
 
-    /// The overage-consent dialog this fold last saw answered, and the one a
-    /// `system/model_consent_fallback` frame belongs to. Nil until an overage ask is answered, and
+    /// The overage-consent dialog this fold last saw **raised**, and the one a
+    /// `system/model_consent_fallback` frame belongs to. Nil until an overage ask arrives, and
     /// dropped on process replacement with the rest of the overlay: the request id belongs to the
     /// process that issued it.
-    private var lastAnsweredOverageConsent: RequestID?
+    ///
+    /// **Raised and not answered, because the answer does not arrive on this stream.** The host's
+    /// `decisionAnswered` signal and the engine's frames reach this fold by two independent
+    /// asynchronous paths, so "the ask answered most recently" is not a fact the fold can order: a
+    /// frame folded before the signal would attach to the *previous* ask and put one card's outcome
+    /// on another. The ask and its frame are both the engine's own output in the engine's own order,
+    /// and the engine waits for an answer before raising the next ask — so the last ask raised is
+    /// the one the frame concerns, whatever the host's timing does. Attaching to an ask still
+    /// pending is harmless: `DecisionCard.reading` draws the frame only once the card has stopped
+    /// waiting.
+    private var lastRaisedOverageConsent: RequestID?
 
     /// The `dialog_kind` an overage-consent ask carries. It is `DecisionItem.title` for a dialog —
     /// `title(of:)` puts the kind there — so this is a comparison and not a second decode of the
@@ -85,7 +95,7 @@ public struct WireReducer: Sendable {
         self.epoch = .first
         self.pendingDeliveries = 0
         self.retainedAnswers = []
-        self.lastAnsweredOverageConsent = nil
+        self.lastRaisedOverageConsent = nil
         rebuild()
     }
 
@@ -147,7 +157,6 @@ public struct WireReducer: Sendable {
                 retain(outcome, for: id)
             } else {
                 setDecision(id) { $0.state = .answered(outcome: outcome.label) }
-                noteOverageConsentAnswer(id)
             }
 
         case .rewound(let toUUID):
@@ -159,7 +168,7 @@ public struct WireReducer: Sendable {
             preview = nil
             outstandingPrompts = []
             retainedAnswers = []
-            lastAnsweredOverageConsent = nil
+            lastRaisedOverageConsent = nil
 
         case .relocated(let mainPath):
             if let (resolved, kind) = TranscriptPath.resolve(mainPath, under: stream.configHome),
@@ -434,10 +443,11 @@ public struct WireReducer: Sendable {
             banner(.modelFallback, text: f.content, at: now)
             // §8.4: the frame *is* the answered overage card's outcome, in the engine's own words.
             // The banner alone is the channel-level notice; the card is the surface the user
-            // pressed, and the frame carries no request id — the engine correlates it by the answer
-            // it followed, which is the only correlation available here too.
-            if let answered = lastAnsweredOverageConsent {
-                setDecision(answered) { $0.consentFallback = f }
+            // pressed. The frame carries no request id, so it is correlated with the last overage
+            // ask this fold saw the engine raise — the one ordering that is entirely the engine's
+            // and cannot be reordered by when the host's answer signal happens to arrive.
+            if let raised = lastRaisedOverageConsent {
+                setDecision(raised) { $0.consentFallback = f }
             }
 
         case .mirrorError(let f):
@@ -470,23 +480,15 @@ public struct WireReducer: Sendable {
             id: id, timestamp: now, provenance: provenance(), requestID: request.id, kind: kind,
             title: Self.title(of: request.payload), toolUseID: Self.toolUseID(of: request.payload),
             agentID: Self.agentID(of: request.payload), state: state, payload: request.raw)
+        // The ask the next `model_consent_fallback` belongs to, recorded where the engine raises it
+        // — the only ordering the fold owns. `title` *is* the `dialog_kind` for a dialog
+        // (`title(of:)` puts it there), so this is a string compare and not a second decode.
+        if kind == .dialog, Self.title(of: request.payload) == Self.overageConsentDialogKind {
+            lastRaisedOverageConsent = request.id
+        }
         if state == .pending, let retained {
             setDecision(request.id) { $0.state = .answered(outcome: retained.label) }
-            noteOverageConsentAnswer(request.id)
         }
-    }
-
-    /// Remembers the overage-consent dialog an answer has just settled, so the
-    /// `system/model_consent_fallback` frame that follows can be attached to it.
-    ///
-    /// **The most recent answer and not a scan of the overlay.** A session can raise the ask many
-    /// times, and a settled decision carries no instant of its own — so a reducer that looked for
-    /// "an answered overage card" would attach every frame to whichever id sorted first. The engine
-    /// emits the frame directly after the answer it concerns, which is exactly what this records.
-    private mutating func noteOverageConsentAnswer(_ id: RequestID) {
-        guard let decision = overlay.decisions[id], decision.kind == .dialog,
-              decision.title == Self.overageConsentDialogKind else { return }
-        lastAnsweredOverageConsent = id
     }
 
     private mutating func setDecision(_ id: RequestID, _ body: (inout DecisionItem) -> Void) {

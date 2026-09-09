@@ -46,11 +46,30 @@ extension ComposerModel {
     /// was up is looking at words the restore would silently replace, and the prompt they would
     /// lose is the one still visible in the conversation above.
     ///
-    /// The text is the newest rendered user message's, because that is the message the refused
-    /// turn was for — the engine reads the same thing out of its transcript.
+    /// The text is the newest **main-stream** user message's, because that is the message the
+    /// refused turn was for — the engine restores the last human-typed message of the conversation
+    /// (`cli.pretty.js:523721`, whose predicate takes a human-origin user message and rejects the
+    /// synthetic ones).
+    ///
+    /// **The stream filter is what makes it the user's prompt.** `renderedUserMessages` is the
+    /// merged timeline, and a subagent's stream carries user messages of its own — the run's
+    /// instructions, which the user never typed and which sort after the main thread's newest
+    /// prompt for as long as the run is live. Restoring one of those would put another agent's
+    /// errand in the field and call it the user's words. `isReplay` goes for the same reason: a
+    /// replayed `--agent` opening prompt is the engine's, not this user's.
     func restoreLastPrompt() {
-        guard draft.isEmpty, let last = renderedUserMessages.last else { return }
+        guard draft.isEmpty, let last = Self.lastHumanPrompt(in: renderedUserMessages) else { return }
         draft = last.text
+    }
+
+    /// Which of the rendered user messages the restore takes: the newest on the **main** stream that
+    /// is not a replay.
+    ///
+    /// A function over the list rather than a filter spelled inside `restoreLastPrompt`, because the
+    /// choice is the whole of what this behaviour is and a choice buried in a mutation is a choice
+    /// no test can put a disagreeing list in front of.
+    static func lastHumanPrompt(in messages: [UserMessageItem]) -> UserMessageItem? {
+        messages.last { $0.id.stream.name == .main && !$0.isReplay }
     }
 
     /// *Edit* on one rendered user message.
