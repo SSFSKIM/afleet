@@ -119,11 +119,27 @@ final class AgentNodeDecisionTests: XCTestCase {
         let elsewhere = DecisionCardView(card: node.card, presentation: .compact, in: rig.key,
                                          answering: activity)
 
+        let raced = Pressed()
         await rig.lifecycle.duringPerform {
-            await MainActor.run { try? Self.press("Allow once", in: elsewhere) }
+            await MainActor.run {
+                try? Self.press("Allow once", in: elsewhere)
+                raced.note()
+            }
         }
         try Self.press("Allow once", in: node)
         await rig.settle(actions: 1)
+        XCTAssertTrue(raced.did, "the competing press never happened, so nothing raced the first answer")
+
+        // **Sampled after the competing attempt has finished, and not when the first one started.**
+        // The double records a `perform` before it awaits its interlude, so a count read at that
+        // moment is one whether the second host sent or not: two reservation sets would both reach
+        // the wire and the test would still see a single answer at the instant it looked. An answer
+        // releases its request when it settles, from whichever set it was claimed in, so waiting for
+        // both to be quiet is waiting for the race to be over.
+        let quiet = await AgentNodeActionTests.settle {
+            rig.reservations.inFlight.isEmpty && activity.inFlight.isEmpty
+        }
+        XCTAssertTrue(quiet, "an answer was still on the wire after the budget ran out")
 
         let actions = await rig.lifecycle.actions
         let answers = actions.filter { if case .answer = $0 { true } else { false } }
@@ -274,6 +290,15 @@ final class AgentNodeDecisionTests: XCTestCase {
             var timeline: ChannelTimeline
             init(_ timeline: ChannelTimeline) { self.timeline = timeline }
         }
+    }
+
+    /// Whether the competing press happened at all. A flag and not a count: what matters is that
+    /// the second host pressed **inside** the window the reservation is held in, and a test that
+    /// assumed it did would be asserting about a race that never ran.
+    @MainActor
+    private final class Pressed {
+        private(set) var did = false
+        func note() { did = true }
     }
 
     /// What the channel's fold was told. The signal and the channel, and nothing derived from either:
