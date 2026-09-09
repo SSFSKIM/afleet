@@ -286,7 +286,16 @@ public final class TerminalPanelSession: PanelTabSession {
     /// teardown that persisted its own emptying would hand the channel back with no shell and no
     /// selection — the user's saved setup destroyed by the act of putting it away. A user closing
     /// a pane is the only thing that removes it from the document.
+    ///
+    /// Which is why it **waits for the closes already standing** before it puts anything away. A
+    /// close suspends while its child is torn down, and a teardown that emptied `panes` inside
+    /// that suspension left it with no pane to find and nothing to persist — the shell the user
+    /// had explicitly closed still in the document, to be restored the next time the channel
+    /// opened. The two rules are not in tension once they are ordered: the user's removal is
+    /// written by the close that was already in flight, and the teardown still writes nothing of
+    /// its own.
     func tearDown() async {
+        for close in closes.values { await close.value }
         isReleased = true
         paneCountDidChange = nil
         pendingClose = nil

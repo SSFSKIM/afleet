@@ -173,6 +173,46 @@ final class TerminalSessionRegistryTests: XCTestCase {
         XCTAssertEqual(writesAfter, writesBefore, "writes=\(writesAfter - writesBefore) after the release")
     }
 
+    /// The other side of the same rule: a teardown writes nothing of its own, and a close the
+    /// *user* asked for is a removal from the channel's document however the session ends.
+    ///
+    /// A close suspends while its child is torn down, and a release arriving inside that
+    /// suspension used to clear `panes` and mark the session released first — so the close came
+    /// back, failed to find its pane, and persisted nothing. The shell the user had explicitly
+    /// closed was still in the document, waiting to be restored. The two rules are reconciled by
+    /// ordering rather than by trading one away: the teardown lets the closes already standing
+    /// finish, and only then puts the session away.
+    func testACloseStandingWhenTheSessionIsTornDownStillLeavesTheDocument() async throws {
+        let registry = TerminalSessionRegistry()
+        let store = PaneTestContext.RecordingStore()
+        let home = try PaneTestChild.temporaryDirectory()
+        let elsewhere = try PaneTestChild.temporaryDirectory()
+        directories.append(contentsOf: [home, elsewhere])
+        let fixture = PaneTestContext.fixture(session: SessionID(), cwd: home, store: store)
+        let session = registry.session(for: fixture.context)
+        session.openShellPane(cwd: home)
+        let closing = session.openShellPane(cwd: elsewhere)
+        session.restoreOnce()
+        await session.settlePersistence()
+
+        let close = Task { await session.close(closing) }
+        await Task.yield()
+        await Task.yield()
+        registry.release()
+        await registry.settleRelease()
+        await close.value
+        await session.settlePersistence()
+
+        let written = try await store.read(
+            TerminalPanelState.self,
+            key: TerminalPanelState.storeKey(for: fixture.key)
+        )
+        let document = try XCTUnwrap(written, "the channel's document is gone")
+        XCTAssertEqual(document.panes.count, 1, "panes=\(document.panes.count)")
+        XCTAssertEqual(document.panes.first?.cwd, home.path,
+                       "the document kept the shell the user closed and dropped the one they left")
+    }
+
     func testTheRunnerPlacesAPaneInTheChannelTheContextNames() async throws {
         let registry = TerminalSessionRegistry()
         let jade = try fixture()
