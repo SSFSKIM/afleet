@@ -83,6 +83,11 @@ public final class TerminalPane {
     @ObservationIgnored private var pty: PTYProcess?
     @ObservationIgnored private var readLoop: Task<Void, Never>?
     @ObservationIgnored private var isClosed = false
+    /// The one teardown, held so every later caller awaits it instead of walking back out through
+    /// `isClosed`. The pane and not the session is where this belongs: `close()` is reached from
+    /// the session's coalesced close, from its `tearDown()`, and from `restart(_:)`, and only the
+    /// pane sees all three.
+    @ObservationIgnored private var teardown: Task<Void, Never>?
     @ObservationIgnored private var hasFiredTermination = false
     @ObservationIgnored private var hasReportedExitToSurface = false
     @ObservationIgnored private var observedTermination: PTYTermination?
@@ -157,13 +162,30 @@ public final class TerminalPane {
 
     /// Ends the pane: the child, the loop and the renderer's notion of a live process.
     ///
-    /// Idempotent, because a user closing a pane that is already exiting is ordinary. The loop is
-    /// awaited rather than abandoned so that nothing feeds the surface after it has been told the
-    /// process ended — which is only bounded because cancelling the loop leaves its
+    /// Idempotent, because a user closing a pane that is already exiting is ordinary — and
+    /// *coalesced*, because idempotent is not the same promise: a second caller that returned on
+    /// the flag alone would return before the child was hung up, the loop cancelled or the surface
+    /// disposed of, and would then report an exit for a pane still in the middle of ending. Every
+    /// caller awaits the one teardown, whichever path reached it first.
+    ///
+    /// The loop is awaited rather than abandoned so that nothing feeds the surface after it has
+    /// been told the process ended — which is only bounded because cancelling the loop leaves its
     /// `awaitFeedCapacity()` wait (tracker 93).
     public func close() async {
+        if let teardown {
+            await teardown.value
+            return
+        }
         guard !isClosed else { return }
         isClosed = true
+        // Strongly captured on purpose: a pane deallocated mid-teardown would otherwise leave the
+        // child and the loop behind. The cycle it makes is released when the task completes.
+        let teardown = Task { @MainActor in await self.performTeardown() }
+        self.teardown = teardown
+        await teardown.value
+    }
+
+    private func performTeardown() async {
         surface.onInput = nil
         surface.onResize = nil
         let pty = self.pty

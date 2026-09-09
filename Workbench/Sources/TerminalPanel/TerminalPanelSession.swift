@@ -63,9 +63,13 @@ public final class TerminalPanelSession: PanelTabSession {
     /// for it. `nil` until the first render — or the first pane — asks (see ``restoreOnce()``).
     @ObservationIgnored private var restoration: Task<Void, Never>?
     /// The closes in flight, by pane. A second close of one pane joins the first and mutates
-    /// nothing: `TerminalPane.close()` marks itself closed before it awaits its teardown, so by
-    /// the time a second call returned there would be no live child left to tell the two apart —
-    /// and both would be holding a position in `panes` from before the suspension.
+    /// nothing: both would otherwise be holding a position in `panes` from before the suspension,
+    /// so the second would remove a neighbour and report a second exit for one request.
+    ///
+    /// It is kept even though `TerminalPane.close()` now coalesces its own teardown, because the
+    /// two guard different things: the pane's coalescing is about the child, the loop and the
+    /// surface, and this is about *this session's* stack, its selection and its one exit per pane.
+    /// It is also what `restart(_:)` and ``tearDown()`` read to know a close is still standing.
     @ObservationIgnored private var closes: [ObjectIdentifier: Task<Void, Never>] = [:]
     /// The pane the standing question is about, held by reference because the confirmation value
     /// carries only its identity.

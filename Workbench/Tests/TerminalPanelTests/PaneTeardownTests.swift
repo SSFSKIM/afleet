@@ -128,4 +128,37 @@ final class PaneTeardownTests: XCTestCase {
         XCTAssertEqual(pane.surface.outstandingFeedByteCount, 0,
                        "backlog=\(pane.surface.outstandingFeedByteCount) bytes-after-disposal")
     }
+
+    /// Two closes of one pane, from two different paths, and both of them wait for the one
+    /// teardown. The pane marks itself closed before it awaits anything, so a second caller used
+    /// to walk straight back out through that guard while the child, the read loop and the
+    /// surface were all still standing — and `TerminalPanelSession.tearDown()`, which calls
+    /// `pane.close()` directly rather than through the session's own coalescing, is exactly that
+    /// second caller. It then reported an exit for a pane that had not finished ending.
+    func testASecondCloseFromAnotherPathReturnsOnlyAfterTheOneTeardownHasFinished() async throws {
+        let directory = try PaneTestChild.temporaryDirectory()
+        defer { PaneTestChild.remove(directory) }
+        let pane = TerminalPane()
+        pane.start(PaneRequest(
+            executable: URL(filePath: "/bin/sh"),
+            arguments: ["-c", PaneTestChild.selfTerminating(after: 30, "sleep 30")],
+            cwd: directory,
+            environment: ["PATH": "/usr/bin:/bin"],
+            purpose: .command
+        ))
+        guard case let .running(pid) = pane.state, let child = PaneTestChild.identity(ofChild: pid) else {
+            XCTFail("state=\(pane.state) expected=running")
+            return
+        }
+
+        // The first path closes and suspends inside the teardown; the second arrives while it is
+        // there, which is the whole of the race.
+        let first = Task { await pane.close() }
+        await Task.yield()
+        await pane.close()
+
+        XCTAssertFalse(PaneTestChild.isRunning(child), "child=still-running-when-the-second-close-returned")
+        XCTAssertFalse(pane.hasRunningReadLoop, "read-loop=still-running-when-the-second-close-returned")
+        await first.value
+    }
 }
