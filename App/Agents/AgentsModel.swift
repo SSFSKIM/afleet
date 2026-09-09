@@ -69,10 +69,25 @@ final class AgentsModel: PanelTabSession {
         if collapsed.contains(run) { collapsed.remove(run) } else { collapsed.insert(run) }
     }
 
-    init(channel: ChannelKey, timelines: @escaping TimelineReach, store: AgentSelectionStore) {
+    /// What a node's actions go out by (gate G3, contract Y5). Nil for a pane built before a launch
+    /// reached a workspace: the tree still reads, and there is nothing to act on it with.
+    ///
+    /// `@ObservationIgnored` on the **reference**, which is not the same as ignoring the object: the
+    /// actions are `@Observable` in their own right, so a body that reads a banner or an offer is
+    /// invalidated by that object rather than by this session's own tracking.
+    @ObservationIgnored let actions: AgentNodeActions?
+
+    init(channel: ChannelKey, timelines: @escaping TimelineReach, store: AgentSelectionStore,
+         actions: AgentNodeActions? = nil) {
         self.channel = channel
         self.timelines = timelines
         self.store = store
+        self.actions = actions
+        // §8.4's `{backgrounded: false}` arm: the engine has said the registry row the panel read is
+        // stale, and a reply is not a publish — the cache's key cannot see it. Dropping the held read
+        // is the whole of "refresh" for a derivation, and wiring it here is what stops the next body
+        // being answered from the snapshot the engine has just contradicted.
+        actions?.refresh = { [reads] in reads.invalidate() }
     }
 
     /// The tree, as this pane reads it. A channel with no model has no fold and therefore no tree,

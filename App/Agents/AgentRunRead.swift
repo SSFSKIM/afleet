@@ -59,8 +59,15 @@ struct AgentRunRead: Hashable, Sendable {
         var parentIDs: [AgentRunID: AgentRunID] = [:]
         contents.reserveCapacity(tree.nodes.count)
         childIDs.reserveCapacity(tree.nodes.count)
+        // C3's registry mirror, as the nodes' backgrounding eligibility and nothing else. §8.8 offers
+        // *Move to background* only while a run is in the foreground and the mirror knows it, and the
+        // mirror is the only thing that can answer that. It travels on `ChannelTimeline`, in the same
+        // snapshot as the tree and the items, so a node's offer cannot come from a publish the rows
+        // around it never saw.
+        let mirror = timeline.registry
         for (id, node) in tree.nodes {
             contents[id] = AgentNodeContent(node: node,
+                                            entry: mirror.entries[id],
                                             isParked: tree.isParked(id),
                                             waitingCount: waiting[id] ?? 0)
             childIDs[id] = tree.children(of: id)
@@ -113,10 +120,21 @@ struct AgentRunRead: Hashable, Sendable {
     struct Source: Equatable, Sendable {
         let agents: AgentRunTree?
         let decisions: [RequestID: DecisionItem]
+        /// The registry mirror's third of the read — **as `TaskCardEligibility` and never as the
+        /// mirror itself** (contract Y2, tracker 321's rule).
+        ///
+        /// `RegistryEntry.lastFrameAt` is stamped by every `task_progress` heartbeat, so a key over
+        /// the whole mirror would rebuild the tree's read several times a second for a chatty agent
+        /// and change nothing a node draws. `TaskCardEligibility` is the middle the task card
+        /// already settled on: a run appearing, finishing, being moved to the background or losing
+        /// its tool-use id changes it, and a heartbeat does not. Reusing that value rather than
+        /// writing a second one is what keeps the two hosts' answers from drifting apart.
+        let eligibility: TaskCardEligibility
 
         init(_ timeline: ChannelTimeline) {
             agents = timeline.agents
             decisions = timeline.overlay.decisions
+            eligibility = TaskCardEligibility(timeline.registry)
         }
     }
 
@@ -155,6 +173,14 @@ final class AgentRunReadCache {
 
     private var key: AgentRunRead.Source?
     private var cached = AgentRunRead(timeline: ChannelTimeline())
+
+    /// Drops the held read, so the next access builds one from the timeline as it now stands.
+    ///
+    /// The one caller is §8.4's `{backgrounded: false}` arm: the engine has said the registry row the
+    /// panel was reading is stale, and the cache's key cannot see that — the reply is not a publish.
+    /// Nothing is fetched, because the read is derived; what changes is that the derivation stops
+    /// being answered from a snapshot the engine has contradicted.
+    func invalidate() { key = nil }
 
     func read(of timeline: ChannelTimeline) -> AgentRunRead {
         let key = AgentRunRead.Source(timeline)

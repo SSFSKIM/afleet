@@ -112,11 +112,7 @@ struct AgentOutline: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(rows, id: \.id) { row in
-                        AgentNodeRow(content: row.content,
-                                     isSelected: selected == row.id,
-                                     disclosure: row.disclosure,
-                                     toggle: { model.toggle(row.id) },
-                                     select: { model.select(row.id) })
+                        Self.view(of: row, in: model, selected: selected)
                             .id(AgentTreeView.identity(of: row.id))
                     }
                 }
@@ -125,6 +121,22 @@ struct AgentOutline: View {
             .onAppear { bring(selected, into: scroll) }
             .onChange(of: selected) { _, run in bring(run, into: scroll) }
         }
+    }
+
+    /// One row's view, as the outline builds it.
+    ///
+    /// Named rather than written inline in the `ForEach` because `Mirror` does not enter a closure:
+    /// a row built inside the body is a row nothing can be asked about, and what §8.8 offers on a
+    /// node — *Stop*, *Move to background*, the run's transcript and its id — is exactly the kind of
+    /// thing that has to be assertable as *offered by the outline* rather than as constructed by a
+    /// test. This is the one expression both the body and an assertion go through.
+    static func view(of row: AgentTreeView.Row, in model: AgentsModel, selected: AgentRunID?) -> AgentNodeRow {
+        AgentNodeRow(content: row.content,
+                     isSelected: selected == row.id,
+                     disclosure: row.disclosure,
+                     toggle: { model.toggle(row.id) },
+                     select: { model.select(row.id) },
+                     actions: model.actions)
     }
 
     private func bring(_ run: AgentRunID?, into scroll: ScrollViewProxy) {

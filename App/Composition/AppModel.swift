@@ -471,8 +471,13 @@ final class AppModel: FilesTabHost {
             // app-scoped and outlives a launch — the registry closure reads whichever workspace
             // `bindWorkspace` last attached, and the selection store is the same one either way.
             if !panels.isRegistered(.agents) {
+                // The lifecycle is the tab's third app-scoped object, and it is Y3's second reason
+                // for registering here at all: §8.8's node actions are X5 requests — `stop_task`,
+                // `background_tasks`, `.stopEverything`, `.backgroundAll` — and there is no fleet to
+                // send them by anywhere earlier.
                 let agents = AgentsTab(timelines: { [timelines] key in timelines.model(for: key).timeline },
-                                       selection: agentSelection)
+                                       selection: agentSelection,
+                                       lifecycle: workspace.fleet)
                 do {
                     try panels.register(agents)
                 } catch {

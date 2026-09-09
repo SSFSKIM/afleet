@@ -27,10 +27,16 @@ final class AgentsTab: PanelTab {
 
     private let timelines: AgentsModel.TimelineReach
     private let selection: AgentSelectionStore
+    /// X5, for the node actions of §8.8 (contract Y5). Nil before a launch reaches a workspace: a
+    /// pane that reads runs and offers no action on them is the honest state for a tab with no fleet
+    /// behind it, and it is the state each action's own guard already answers for.
+    private let lifecycle: (any LifecycleAPI)?
 
-    init(timelines: @escaping AgentsModel.TimelineReach, selection: AgentSelectionStore) {
+    init(timelines: @escaping AgentsModel.TimelineReach, selection: AgentSelectionStore,
+         lifecycle: (any LifecycleAPI)? = nil) {
         self.timelines = timelines
         self.selection = selection
+        self.lifecycle = lifecycle
     }
 
     /// Available for every channel (child spec D10). A channel with no runs and a channel whose
@@ -39,7 +45,8 @@ final class AgentsTab: PanelTab {
     func isAvailable(in context: ChannelContext) -> Bool { true }
 
     func makeSession(for context: ChannelContext) -> any PanelTabSession {
-        AgentsModel(channel: context.key, timelines: timelines, store: selection)
+        AgentsModel(channel: context.key, timelines: timelines, store: selection,
+                    actions: lifecycle.map { AgentNodeActions(lifecycle: $0, channel: context.key) })
     }
 
     func makeView(session: any PanelTabSession, context: ChannelContext,

@@ -318,6 +318,17 @@ enum InventedAgents {
                 "session_id": .string(session.description)])
     }
 
+    /// The frame a run **ends** by: C3 folds a node's terminal status from `task_notification` and
+    /// from nothing else, so a test about a finished run sends one rather than setting a field.
+    static func taskNotification(taskID: String, status: String,
+                                 summary: String = "an invented result") -> TaskNotification {
+        decode(["type": .string("system"), "subtype": .string("task_notification"),
+                "task_id": .string(taskID), "status": .string(status),
+                "output_file": .string(""), "summary": .string(summary),
+                "uuid": .string("aaaaaaaa-3333-4333-8333-aaaaaaaaaaaa"),
+                "session_id": .string(session.description)])
+    }
+
     static func taskProgress(taskID: String, summary: String, lastToolName: String) -> TaskProgress {
         decode(["type": .string("system"), "subtype": .string("task_progress"),
                 "task_id": .string(taskID), "description": .string("an invented step"),

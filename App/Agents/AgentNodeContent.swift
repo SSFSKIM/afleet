@@ -37,8 +37,21 @@ struct AgentNodeContent: Hashable, Sendable, Identifiable {
     /// Pending decisions the engine is waiting on *for this run*, as a count (§11: a count, never a
     /// request id).
     let waitingCount: Int
+    /// The `tool_use_id` `background_tasks` names for this run, non-nil **exactly** when §8.8 offers
+    /// *Move to background* for it (gate G3).
+    ///
+    /// The clause is `TaskCardModel.isEligible(_:)` over C3's registry mirror rather than a second
+    /// reading of it (contract Y2): the run is running, in the foreground, of a kind the engine can
+    /// move, and the mirror holds a tool-use id to name in the request. It is decided here, where the
+    /// content is built, so every drawing site inherits one answer.
+    ///
+    /// **The mirror's id and not the node's**, though on a well-formed run they are the same value:
+    /// the mirror's row is what the engine matches the request against, while the node's field is
+    /// C3's record of the call that spawned the run. Nil for every run the mirror does not hold,
+    /// which is what makes the action absent rather than refused.
+    let backgroundToolUseID: String?
 
-    init(node: AgentRunNode, isParked: Bool, waitingCount: Int) {
+    init(node: AgentRunNode, entry: RegistryEntry?, isParked: Bool, waitingCount: Int) {
         self.id = node.id
         self.agentType = node.agentType.map(TextSanitiser.sanitise)
         self.description = TextSanitiser.sanitise(node.description)
@@ -53,5 +66,6 @@ struct AgentNodeContent: Hashable, Sendable, Identifiable {
         self.startedCount = node.startedCount
         self.isParked = isParked
         self.waitingCount = waitingCount
+        self.backgroundToolUseID = TaskCardModel.isEligible(entry) ? entry?.toolUseID : nil
     }
 }
