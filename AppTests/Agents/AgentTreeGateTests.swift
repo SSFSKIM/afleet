@@ -232,6 +232,27 @@ final class AgentTreeGateTests: XCTestCase {
                                         now: content.elapsedOrigin.addingTimeInterval(90))
         XCTAssertNotEqual(first, later, "a 90-second tick does not move the label, so this proves nothing")
 
+        // And the tick is *scheduled*, not merely formattable: a running run's ticker holds one
+        // periodic schedule and that schedule delivers a second apart. Without this clause a ticker
+        // that drew the span once and never again passes everything else here, because a label
+        // computed twice by a test says nothing about whether anything ever recomputes it.
+        let running = ViewTree.values(of: PeriodicTimelineSchedule.self,
+                                      in: ElapsedTicker(origin: content.elapsedOrigin, endedAt: nil).body)
+        XCTAssertEqual(running.count, 1,
+                       "a running run's ticker holds \(running.count) periodic schedule(s), not 1")
+        let entries = Array(try XCTUnwrap(running.first, "the ticker holds no schedule")
+            .entries(from: content.elapsedOrigin, mode: .normal).prefix(3))
+        XCTAssertEqual(entries.count, 3, "the schedule offered \(entries.count) entry(s) of the 3 asked for")
+        let span = (entries.last?.timeIntervalSince(content.elapsedOrigin)).map { Int($0.rounded()) } ?? -1
+        XCTAssertTrue(span > 0 && span <= 3,
+                      "the ticker's third scheduled tick is \(span) second(s) after the run began")
+        // A finished run has a fixed span and is drawn with no schedule at all.
+        let finished = ViewTree.values(of: PeriodicTimelineSchedule.self,
+                                       in: ElapsedTicker(origin: content.elapsedOrigin,
+                                                         endedAt: content.elapsedOrigin.addingTimeInterval(5)).body)
+        XCTAssertEqual(finished.count, 0,
+                       "a finished run's ticker still holds \(finished.count) periodic schedule(s)")
+
         // And the change is one leaf's, not the row's: the row hosts exactly one ticker and draws no
         // span of its own.
         let row = AgentNodeRow(content: content, isSelected: false, disclosure: .expanded,
@@ -240,6 +261,55 @@ final class AgentTreeGateTests: XCTestCase {
                        "the row hosts \(ViewTree.values(of: ElapsedTicker.self, in: row).count) elapsed ticker(s), not 1")
         XCTAssertEqual(ViewTree.values(of: String.self, in: row).filter { $0 == first || $0 == later }.count, 0,
                        "the row computed an elapsed span of its own, so a tick invalidates the outline")
+    }
+
+    /// A tick delivered to a **mounted** ticker redraws the leaf and moves nothing on the tree.
+    ///
+    /// The clause above reads the schedule off the view value; this one lets a real second pass over
+    /// a drawn tree in a window and asks what changed. The frame the panel draws moves — the span is
+    /// a second longer — while the outline's rows and the read behind them are the values they were.
+    /// That is D7's whole claim: the clock reaches one label, and the tree is invalidated only by the
+    /// tree moving.
+    ///
+    /// The run's origin is the wall clock rather than the invented epoch, because a run that started
+    /// years ago draws a span that moves once a minute and this test waits one second.
+    func testAMountedTickRedrawsTheLeafAndNotTheTree() throws {
+        let started = Date()
+        let timeline = ChannelTimeline(agents: InventedAgents.treeOfRoots(1, at: started))
+        let pane = AgentsModel(channel: PanelFixtures.key(11), timelines: { _ in timeline },
+                               store: AgentSelectionStore())
+        let read = pane.read
+        let before = AgentTreeView.visibleRows(read: read, collapsed: []).map { AgentTreeView.identity(of: $0.id) }
+        XCTAssertEqual(before.count, 1, "the outline pinned \(before.count) row identity(s) for 1 run")
+
+        let hosting = NSHostingView(rootView: AgentTreeView(model: pane))
+        let moved: Bool = FrameTimeHarness.hosted(hosting, size: NSSize(width: 420, height: 240)) { window in
+            window.layoutIfNeeded()
+            hosting.layoutSubtreeIfNeeded()
+            let first = Self.drawnFrame(of: hosting)
+            // A whole second of the main run loop, so the schedule the mounted ticker armed fires.
+            RunLoop.current.run(until: Date().addingTimeInterval(1.5))
+            hosting.layoutSubtreeIfNeeded()
+            let second = Self.drawnFrame(of: hosting)
+            return first != nil && second != nil && first != second
+        }
+
+        XCTAssertTrue(ElapsedTicker.label(origin: started, now: started)
+                        != ElapsedTicker.label(origin: started, now: Date()),
+                      "less than a whole second passed while the tree was mounted, so nothing was due")
+        XCTAssertTrue(moved, "the mounted tree drew the same frame across a whole second, so no tick reached it")
+
+        let after = AgentTreeView.visibleRows(read: pane.read, collapsed: []).map { AgentTreeView.identity(of: $0.id) }
+        XCTAssertTrue(before == after, "the tick moved a row identity")
+        XCTAssertTrue(pane.read == read, "the tree itself moved across the tick, so nothing above is about the clock")
+    }
+
+    /// What the hosted view is drawing, as bytes. Compared, never printed, and never written (X9).
+    @MainActor
+    private static func drawnFrame(of view: NSView) -> Data? {
+        guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return nil }
+        view.cacheDisplay(in: view.bounds, to: rep)
+        return rep.tiffRepresentation
     }
 
     // MARK: - §11

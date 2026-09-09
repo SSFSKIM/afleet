@@ -231,13 +231,18 @@ enum InventedAgents {
     }
 
     /// One tree holding `count` top-level runs, started in order, with invented ids.
-    static func treeOfRoots(_ count: Int) -> AgentRunTree {
+    ///
+    /// `at` is the runs' elapsed origin. It defaults to the invented epoch — a fixed instant, so
+    /// nothing that reads the tree depends on when the suite ran — and a test about elapsed passes
+    /// the wall clock instead, because a run that started years ago draws a span that moves once a
+    /// minute and a test about one second would never see it change.
+    static func treeOfRoots(_ count: Int, at started: Date = epoch) -> AgentRunTree {
         var tree = tree()
         for index in 0..<count {
             tree.apply(taskStarted: taskStarted(taskID: "task_invented000\(index)",
                                                 toolUseID: "toolu_invented000\(index)",
                                                 agentType: "an-invented-agent", depth: 1),
-                       at: epoch)
+                       at: started)
         }
         return tree
     }
