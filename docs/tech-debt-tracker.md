@@ -1968,6 +1968,10 @@ numbered from 321. Nothing above is renumbered.
      between is a description or summary that changes without the status changing. Found at C6.1
      Task 8. Closer: the card model takes the item as an observed input rather than a snapshot, so
      the host replaces the value and not the object. Owner: C6.3, whose model it is.
+    Round 3 scalpel-1#3 restates it after wave E: the seam's identity now carries the capability but
+    still not `description`/`summary`, so same-status `task_progress` updates never reach the retained
+    `TaskCardModel.item`; `makeTaskCard` installs no item-update path. The closer is an update path on
+    the model, not a wider identity (a rebuild drops a refusal banner and an in-flight request).
 
 323. **Two Workbench suites carry run-to-run state and fail after a crashed test host, and one of
      them says why in its own arithmetic.** Both reddened once at C6.1 Task 8, in the run
@@ -2746,6 +2750,9 @@ the merge; one (asynchronous highlighting never redrawing the row) is already 33
     so no key is new. Either way the bottom-pinned viewport keeps its old row and the reader sees a
     jump. The fix reconciles anchors by message identity instead of by key novelty
     (`TimelineTableController`, the anchor transfer). Round 2 scalpel-1#2.
+    Round 3 scalpel-1#2 adds the case where *another* preview is present: successive nil-ID previews
+    share `preview:streaming`, so the held anchor resolves to the new preview below the completed
+    block and an unpinned reader is moved past it. Same fix.
 
 334. **A changed task's cached height is dropped, and the fresh measurement can be the card's
     placeholder, not the card.** `applyItems` removes the height; `height(of:)` measures a fresh host
@@ -2795,6 +2802,11 @@ the merge; one (asynchronous highlighting never redrawing the row) is already 33
     between them pairs the old process's settings with the replacement's handshake, and
     `refreshReadbacks` publishes the pair unchecked. Have `engineReports` carry the epoch and drop a
     pair whose halves disagree. Round 2 scalpel-5#4.
+    Round 3 scalpel-5#3 and 5#5 widen this: the opening `refreshReadbacks` of a re-subscription does
+    not reconcile the retained epoch (wave G reconciles only on later events), so a replacement whose
+    handshake preceded the re-subscription and then stays idle keeps the old mode; and
+    `refreshReadbacks` checks eligibility before its awaits and publishes without revalidating the
+    process afterwards. Both close with the epoch on `EngineReports`.
 
 **Residue of waves D–G (2026-09-09), filed by the architect at the stitch: 380–383.**
 
@@ -2803,6 +2815,8 @@ the merge; one (asynchronous highlighting never redrawing the row) is already 33
     `plain(link)`, so `[**bold** guide](…)` keeps the destination and loses the emphasis inside the
     label. Route `Markdown.Link` through `inline` and lay the link attributes over the child runs.
     Round 2 scalpel-4#5's remaining half.
+    Round 3 sweep#3: the `Heading` branch is `plain(heading)` with a font attribute too, so a link
+    inside a heading is unclickable. Same fix, same place.
 
 381. **`pruneHosts` and `refreshHostedRoots` still walk the whole row list per publish.** Wave F took
     the concatenation out of every per-row reader (10,005 cached height queries on a 2,001-row table
@@ -2810,6 +2824,9 @@ the merge; one (asynchronous highlighting never redrawing the row) is already 33
     and, when the context changed, a dictionary of the same size. Removing that wants a maintained
     key→index map on the controller, which needs one assignment point for `itemRows`. Per-publish,
     not per-query, so it is bounded by the publish rate.
+    Round 3 scalpel-2#2: before its unchanged-return, `applyItems` builds every `RenderedRow`, maps
+    both key arrays and compares the historical items, so a preview-only publish still does
+    history-sized main-thread work. The same maintained index closes it.
 
 382. **`ChannelTimelineModel.rows` and `items` re-merge and re-sort both halves of the timeline on
     every body evaluation.** The neighbourhood no longer pays this (wave F's cache), but the row
@@ -2821,3 +2838,37 @@ the merge; one (asynchronous highlighting never redrawing the row) is already 33
     fresh `TimelineEditState`, `RetractionRegistry` and `DecisionReservations` per call, so the
     identity half of `differs` reports a change whatever the cwd does; the test would pass with
     `cwd` removed from the comparison. Wave E's capability test pins all three (the pattern to copy).
+
+**Final review round (2026-09-09, round 3, the hard stop): 394–397.** Eighteen P2, none P1; two §12
+gaps fixed by wave H (a file link's display string and the agent chip's title/headline were drawn
+unsanitised), ten already filed above (322, 330, 333–335, 376–381, extended where the round widened
+them), four new below. Numbers 384–393 are C7.4's; C6.1 continues from 394.
+
+394. **`TaskCardView` can keep the model it was first given after the replacement arrives.** On a status
+    change the row assigns the new identity to the view while still supplying the old `card`; the
+    `.task` then replaces `card` without the identity changing again, so the child's
+    `@State(initialValue:)` retains the first model. With `makeTaskCard`'s empty registry it can go on
+    showing *Running* and *Stop* after completion (the action fails as `notOwned`/not-running, a dead
+    button). Key the view's identity by the card's own identity (`ObjectIdentifier`) rather than by
+    the item. Round 3 scalpel-3#1.
+
+395. **The streaming split treats the last blank line as a container boundary.** `consumeClosedBlocks`
+    settles at a blank line, so an ordered list whose items arrive across appends is parsed as two
+    lists each starting at 1, and a continuation paragraph loses its list context; the durable
+    `MarkdownBody` reparses the whole source and is right, the settled preview rows are not. Keep a
+    list open across a single blank line when the next non-blank line continues it. Round 3
+    scalpel-4#3 (377 is the same split's fence rule).
+
+396. **A channel subscribed while connecting gets no readbacks until its first turn ends.** The
+    opening `refreshReadbacks` runs at once; a request sent before the process is running is refused
+    (or, if X5's connecting queue holds it, answered late — to be verified against `ProcessHandle
+    .send(_:uuid:)`), `observed(epoch:)` is false for the first epoch so the handshake triggers no
+    retry, and the live task blocks `adopt(.ready)` from opening another subscription. Retry the
+    opening readback on the handshake. Round 3 scalpel-5#1.
+
+397. **The reopen trigger is lost while the old subscription drains.** Archival finishes the stream,
+    but buffered events or an awaited refresh keep `readbackTask` non-nil while the channel reopens;
+    `beginReadbacks` rejects the trigger, and when the drain ends the task only clears itself without
+    rechecking a live channel, so readbacks stop for good on that channel. The existing test masks it
+    by calling `startReadbacks` repeatedly. Re-check liveness when the task ends. First corrective
+    after the merge (C6 recomposition). Round 3 scalpel-5#4.
