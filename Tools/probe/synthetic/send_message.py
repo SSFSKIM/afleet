@@ -450,8 +450,9 @@ What a recording should still settle, none of it about the shapes above:
 **`verify` may warn that the account name appears in `frames.ndjson`.** On a machine whose
 account name is an ordinary English word, the scanner's own caveat applies: the only hit here is
 that word inside the engine's stopped-by-user refusal template, which is the same on every
-machine. Nothing in this fixture came off anybody's home directory. Item 4 of `REVIEW.md` asks a
-reviewer to judge exactly this, and the judgement is that it identifies nobody.
+machine. Nothing in this fixture came off anybody's home directory. Item **2** of `REVIEW.md` —
+the identity grep — asks a reviewer to judge exactly this, and the judgement is that it
+identifies nobody. (Item 4 is `redaction.json`, which this fixture satisfies separately.)
 
 The `Agent` tool round that really precedes each `task_started` is deliberately **absent**: its
 result is engine copy about a spawn this fixture does not depict, and no arm reads it. What the
