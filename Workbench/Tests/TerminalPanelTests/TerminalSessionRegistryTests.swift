@@ -111,6 +111,68 @@ final class TerminalSessionRegistryTests: XCTestCase {
         XCTAssertFalse(fresh === session, "a released session was handed out again")
     }
 
+    /// A teardown is not a user action, and the document is the channel's rather than this
+    /// session's. Releasing the registry through the user-close path persisted every removal as it
+    /// went, so the last write a rebound workspace left behind named no shell and no selection —
+    /// the channel's saved setup, overwritten by the act of putting it away.
+    func testReleasingTheRegistryLeavesTheChannelsSavedShellsInTheDocument() async throws {
+        let registry = TerminalSessionRegistry()
+        let store = PaneTestContext.RecordingStore()
+        let directory = try PaneTestChild.temporaryDirectory()
+        directories.append(directory)
+        let id = SessionID()
+        let fixture = PaneTestContext.fixture(session: id, cwd: directory, store: store)
+        let session = registry.session(for: fixture.context)
+        session.openShellPane()
+        session.openShellPane()
+        session.restoreOnce()
+        await session.settlePersistence()
+
+        registry.release()
+        await registry.settleRelease()
+        await session.settlePersistence()
+
+        let written = try await store.read(
+            TerminalPanelState.self,
+            key: TerminalPanelState.storeKey(for: fixture.key)
+        )
+        let document = try XCTUnwrap(written, "the channel's document is gone")
+        XCTAssertEqual(document.panes.count, 2, "panes=\(document.panes.count)")
+        XCTAssertEqual(document.selected, 1, "selected=\(String(describing: document.selected))")
+    }
+
+    /// The read of the W6 document is a suspension the release runs straight through. A session
+    /// released inside it must come back to nothing: opening the saved shells after its owner has
+    /// gone leaves children nobody accounts for, spawned after `settleRelease()` had already said
+    /// the teardown was done.
+    func testASessionReleasedInsideItsDocumentReadOpensNothing() async throws {
+        let registry = TerminalSessionRegistry()
+        let store = PaneTestContext.RecordingStore()
+        let directory = try PaneTestChild.temporaryDirectory()
+        directories.append(directory)
+        let id = SessionID()
+        let fixture = PaneTestContext.fixture(session: id, cwd: directory, store: store)
+        try await store.write(
+            TerminalPanelState(panes: [PersistedPane(cwd: directory.path)], selected: 0),
+            key: TerminalPanelState.storeKey(for: fixture.key)
+        )
+        let writesBefore = await store.writtenKeys.count
+        let session = registry.session(for: fixture.context)
+
+        await store.holdReads()
+        session.restoreOnce()
+        await store.awaitHeldRead()
+        registry.release()
+        await registry.settleRelease()
+        await store.releaseHeldRead()
+        await session.settleRestore()
+        await session.settlePersistence()
+
+        XCTAssertTrue(session.panes.isEmpty, "panes=\(session.panes.count)")
+        let writesAfter = await store.writtenKeys.count
+        XCTAssertEqual(writesAfter, writesBefore, "writes=\(writesAfter - writesBefore) after the release")
+    }
+
     func testTheRunnerPlacesAPaneInTheChannelTheContextNames() async throws {
         let registry = TerminalSessionRegistry()
         let jade = try fixture()

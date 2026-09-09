@@ -70,6 +70,14 @@ public final class TerminalPanelSession: PanelTabSession {
     /// The pane the standing question is about, held by reference because the confirmation value
     /// carries only its identity.
     @ObservationIgnored private var paneAwaitingClose: TerminalPane?
+    /// Whether this session has been torn down. A released session writes nothing, restores
+    /// nothing and spawns nothing, whenever the read it is suspended in comes back: its owner has
+    /// gone, so a pane opened from here is a child nobody is left to close.
+    @ObservationIgnored private var isReleased = false
+    /// The teardown of whatever session held this channel before, if one is still finishing. The
+    /// read waits for it, because two sessions writing one key with nothing between them is the
+    /// one ordering the document's single-writer rule does not cover.
+    @ObservationIgnored var precedingWork: Task<Void, Never>?
 
     /// The three states of the one document read, in order. They exist because the read is a
     /// suspension the rest of the session goes on running through.
@@ -263,6 +271,35 @@ public final class TerminalPanelSession: PanelTabSession {
         schedulePersist()
     }
 
+    /// Ends every pane because the session itself is going — `AppModel.bindWorkspace` rebinding,
+    /// or a context from another workspace arriving for this channel.
+    ///
+    /// It differs from ``close(_:)`` in the one way that decides the channel's next launch:
+    /// **nothing is written**. The W6 document belongs to the channel and not to this session, so a
+    /// teardown that persisted its own emptying would hand the channel back with no shell and no
+    /// selection — the user's saved setup destroyed by the act of putting it away. A user closing
+    /// a pane is the only thing that removes it from the document.
+    func tearDown() async {
+        isReleased = true
+        paneCountDidChange = nil
+        pendingClose = nil
+        paneAwaitingClose = nil
+        let ending = panes
+        panes = []
+        selectedIndex = nil
+        for pane in ending {
+            await pane.close()
+            // Still owed: C4 is waiting on the id of every X5-originated pane, and a workspace
+            // going away does not make that pane's exit stop having happened.
+            reportExitIfOwed(by: pane)
+        }
+        // The writes the user's own actions had already scheduled are let land, and are awaited
+        // here rather than abandoned: what a caller may not be left with after `settleRelease()`
+        // is a write of this session's still in flight, racing the session that replaces it.
+        await persistence?.value
+        persistence = nil
+    }
+
     // MARK: W6
 
     /// Reopens the shell panes the document records, or one shell pane when there is nothing to
@@ -281,9 +318,16 @@ public final class TerminalPanelSession: PanelTabSession {
     /// pane request triggers is only there to make the write safe, and a panel that opened a shell
     /// nobody asked for in a channel nobody is looking at would be spawning on its own initiative.
     private func restore(openingDefaultPane: Bool) async {
-        guard reading == .pending else { return }
+        guard reading == .pending, !isReleased else { return }
         reading = .reading
+        // The session this channel had before this one, if its teardown is still landing. Reading
+        // in front of its last write would restore a document a moment older than the truth.
+        await precedingWork?.value
         let document = try? await context.store.read(TerminalPanelState.self, key: storeKey)
+        // Released inside the read. `reading` is deliberately left short of `.done`, so nothing
+        // this session is asked for afterwards can write either: a teardown that has already been
+        // settled must not be followed by panes, children or a document.
+        guard !isReleased else { return }
         // Read after the suspension: whatever the session did during it is what the document is
         // being reconciled with, and it is that state — not the empty one this began in — that
         // decides whether there is a tab to fill and a selection to leave alone.
@@ -345,7 +389,7 @@ public final class TerminalPanelSession: PanelTabSession {
         // an empty document over the channel's saved shells — and a mutation standing inside the
         // read would race the reconciliation. Both wait for the same moment; ``restore`` ends by
         // asking for this write again.
-        guard reading == .done else { return }
+        guard reading == .done, !isReleased else { return }
         let shellPanes = panes.enumerated().filter { $0.element.request == nil }
         let document = TerminalPanelState(
             panes: shellPanes.map { PersistedPane(cwd: $0.element.spawn?.cwd.path) },

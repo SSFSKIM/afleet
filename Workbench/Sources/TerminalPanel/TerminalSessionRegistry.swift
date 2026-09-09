@@ -69,6 +69,10 @@ public final class TerminalSessionRegistry {
             self?.updateRetention(of: session, for: key)
         }
         entries[key] = Entry(session: session, retained: nil)
+        // Whatever teardown is in flight for this channel — the one two lines above, or a release
+        // — is work this session's document read has to stand behind. The teardown writes nothing
+        // itself; what it settles are the writes the session it is ending had already scheduled.
+        session.precedingWork = releasing
         return session
     }
 
@@ -99,10 +103,7 @@ public final class TerminalSessionRegistry {
         let previous = releasing
         releasing = Task { @MainActor in
             await previous?.value
-            for session in sessions {
-                session.paneCountDidChange = nil
-                for pane in session.panes { await session.close(pane) }
-            }
+            for session in sessions { await session.tearDown() }
         }
     }
 
