@@ -207,10 +207,18 @@ extension TimelineRenderContext {
     /// item's status alone, and a `taskRun` item is read out of the transcript — so a colleague's
     /// session shows a running task as readily as ours does. Nil for a channel afleet does not own,
     /// and the row then draws its reading, which is exactly what it draws for an archived one.
+    /// **`refresh` is wired to this channel's own neighbourhood.** §8.4's `{backgrounded: false}` arm is
+    /// the engine saying the entry the card was reading is stale or ineligible, and the card then takes
+    /// whatever the timeline now says the run is. Left at its default the closure answers nil and the
+    /// card keeps the item and the mirror it was built with, which is the reading the engine has just
+    /// contradicted. It reads the neighbourhood — the same snapshot the row itself came from — so the
+    /// card cannot be handed a run from a publish the rows around it never saw.
     @MainActor
     func makeTaskCard(_ item: TaskRunItem) -> TaskCardModel? {
         guard offersTaskCard, let lifecycle else { return nil }
-        return TaskCardModel(item: item, registry: neighbourhood.registry, lifecycle: lifecycle, channel: key)
+        let card = TaskCardModel(item: item, registry: neighbourhood.registry, lifecycle: lifecycle, channel: key)
+        card.refresh = { [taskRuns = neighbourhood.taskRuns, taskID = item.taskID] in taskRuns[taskID] }
+        return card
     }
 
     /// Whether a task on this channel gets a card at all — the gate above, named so that the row
@@ -231,6 +239,10 @@ struct TimelineNeighbourhood {
     /// Every tool call in the channel, by its `tool_use_id`. A cluster expands through this and an
     /// `Agent` chip finds its parallel siblings through it.
     var toolCalls: [String: ToolCallItem] = [:]
+
+    /// Every task run in the channel, by its `task_id` — what a card re-reads when the engine
+    /// contradicts the item it was built with (§8.4's `{backgrounded: false}` arm).
+    var taskRuns: [String: TaskRunItem] = [:]
 
     /// The timestamp of the item before each item, by `ItemID.key`.
     ///
@@ -262,6 +274,7 @@ struct TimelineNeighbourhood {
         var previous: Date?
         for item in items {
             if case .toolCall(let call) = item { toolCalls[call.toolUseID] = call }
+            if case .taskRun(let run) = item { taskRuns[run.taskID] = run }
             if let previous { precedingTimestamps[item.id.key] = previous }
             previous = item.timestamp ?? previous
         }

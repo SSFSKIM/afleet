@@ -103,6 +103,45 @@ final class TaskCardBackgroundingTests: XCTestCase {
         XCTAssertTrue(card.offersStop)
     }
 
+    // MARK: - §8.4's `{backgrounded: false}` arm
+
+    /// **A `{backgrounded: false}` answer refreshes the card from the timeline.**
+    ///
+    /// That body is the engine saying the entry the card was reading is stale or ineligible: the action
+    /// goes and the card takes whatever the timeline now says the run is (§8.4, item 61's first arm).
+    /// `TaskCardModel.refresh` is how it takes it, and the row's host left it at its default — a closure
+    /// that answers nil — so the card kept the item it was built with and went on drawing a finished
+    /// run's opening description.
+    ///
+    /// The row is built from a **stale** item on purpose: that is the gap the arm exists for, and the
+    /// card holds its item by value (tracker 322), so the timeline can hold a newer one.
+    func testABackgroundedFalseAnswerRefreshesTheRowsCardFromTheTimeline() async throws {
+        let control = ControlDouble()
+        await control.stage(.success(.object(["backgrounded": .bool(false)])))
+
+        var settled = Self.run(Self.runID)
+        settled.status = .completed
+        settled.summary = "an invented outcome"
+        let timeline = ChannelTimeline(durable: DurableProjection(items: [.taskRun(settled)]),
+                                       registry: Self.mirrorWithRunningAgent())
+        let context = InventedItems.context(neighbourhood: TimelineNeighbourhoodCache().neighbourhood(for: timeline),
+                                            lifecycle: control)
+
+        // What the row mounted with: the run as it read while it was still going.
+        let card = try XCTUnwrap(context.makeTaskCard(Self.run(Self.runID)))
+        XCTAssertTrue(card.offersMoveToBackground, "the arm under test is only reachable from the action")
+
+        await card.moveToBackground()
+        await card.whenIdle()
+
+        XCTAssertEqual(card.item.status, .completed,
+                       "the card kept the reading the engine had just contradicted")
+        XCTAssertEqual(card.item.summary, "an invented outcome",
+                       "the card drew the opening description of a run the timeline says is over")
+        XCTAssertFalse(card.offersMoveToBackground, "the action survived the engine's refusal of it")
+        XCTAssertNil(card.banner, "a success body raises no banner")
+    }
+
     /// **The mirror travels on the published read model and not beside it.** The neighbourhood cache is the
     /// one place a `ChannelTimeline` becomes what a row reads, so a mirror that never got onto the timeline
     /// would arrive here empty however the card was built.
