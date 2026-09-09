@@ -72,10 +72,14 @@ final class TaskCardBackgroundingTests: XCTestCase {
         XCTAssertTrue(unknown.offersStop, "the item's own status still drives Stop, which needs no mirror")
     }
 
-    /// **Contract Y2: the two hosts of this card offer the same action on the same run.** The Thread tab
-    /// builds `TaskCardModel` with the pump's mirror; the row builds it through the context. Same
-    /// component, same mirror, same answer — which is only assertable now that the row has a mirror at all.
-    func testTheRowAndTheThreadTabAgree() throws {
+    /// **The row's card is the model the mirror alone decides.** Two models over one mirror — the row's,
+    /// built through the context, and one built directly — agree about every run, so nothing the context
+    /// does on the way in changes the answer §8.4's clause gives.
+    ///
+    /// It is deliberately **not** named for contract Y2. No production site builds `ThreadAnchor.task`
+    /// yet, so a `TaskCardModel` a test constructs is not "the Thread tab": the tab's own host path is
+    /// asserted in the case below, which is the one that can catch that host drifting.
+    func testTheRowsCardMatchesAModelBuiltDirectlyOverTheSameMirror() throws {
         let mirror = Self.mirrorWithRunningAgent()
         let lifecycle = LifecycleDouble()
         let key = ChannelKey(configHome: InventedItems.stream.configHome, session: InventedItems.stream.sessionID)
@@ -86,10 +90,39 @@ final class TaskCardBackgroundingTests: XCTestCase {
         for taskID in [Self.runID, "task_invented_absent_01"] {
             let item = Self.run(taskID)
             let row = try XCTUnwrap(context.makeTaskCard(item))
-            let thread = TaskCardModel(item: item, registry: mirror, lifecycle: lifecycle, channel: key)
-            XCTAssertEqual(row.offersMoveToBackground, thread.offersMoveToBackground,
-                           "the two hosts of one card disagree about \(taskID)")
-            XCTAssertEqual(row.entry?.id, thread.entry?.id)
+            let direct = TaskCardModel(item: item, registry: mirror, lifecycle: lifecycle, channel: key)
+            XCTAssertEqual(row.offersMoveToBackground, direct.offersMoveToBackground,
+                           "two models over one mirror disagree about \(taskID)")
+            XCTAssertEqual(row.entry?.id, direct.entry?.id)
+        }
+    }
+
+    /// **Contract Y2 at the second host: the Thread tab draws the row's card, and the same action on it.**
+    ///
+    /// The tab's real path — `ThreadModel.open(.task(…))` and the `TaskCardView` `ThreadView` mounts for
+    /// that anchor — is what this drives, with the model the *row* built. So the assertion is about two
+    /// hosts of one card and not about a value this test assembled: if the tab ever drew its own reading
+    /// of a task instead of hosting the card, or hosted it without its actions, this fails.
+    func testTheThreadTabHostsTheRowsCardWithTheSameAction() throws {
+        let mirror = Self.mirrorWithRunningAgent()
+        let lifecycle = LifecycleDouble()
+        let key = ChannelKey(configHome: InventedItems.stream.configHome, session: InventedItems.stream.sessionID)
+        let context = InventedItems.context(neighbourhood: Self.neighbourhood(carrying: mirror),
+                                            lifecycle: lifecycle, key: key)
+        let tab = ThreadModel(channel: key, lifecycle: lifecycle)
+
+        for (taskID, expected) in [(Self.runID, true), ("task_invented_absent_01", false)] {
+            let item = Self.run(taskID)
+            let card = try XCTUnwrap(context.makeTaskCard(item), "the row built no card for \(taskID)")
+            tab.open(.task(card))
+
+            let hosted = try XCTUnwrap(ViewTree.values(of: TaskCardView.self, in: ThreadView(model: tab).body).first,
+                                       "the task thread hosts no task card")
+            let offered = ViewTree.button("Move to background", in: hosted.body) != nil
+            XCTAssertEqual(offered, card.offersMoveToBackground,
+                           "the Thread tab drew a different action from the card it was handed")
+            XCTAssertEqual(offered, expected, "the mirror's own answer for \(taskID) is not what was drawn")
+            XCTAssertNotNil(ViewTree.button("Stop", in: hosted.body), "a running task offered no Stop")
         }
     }
 
