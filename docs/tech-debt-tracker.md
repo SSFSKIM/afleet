@@ -2448,3 +2448,170 @@ C6.1's and C6.2's reservations and is expected.
      branch. Same class as 131/146/151/194: a seeding path whose order a busy host can change. Closer:
      the seeding test waits for delivery of the retained report rather than reading once. Owner: C6.2.
      Filed 2026-09-09 at C6.3's merge.
+
+262. **A cancelled `awaitFeedCapacity()` waiter can leave one identifier behind.** The
+    cancellation handler and the normal return race at the end of a wait: `forgetWaiter` can clear
+    the record just before the racing `onCancel` inserts it, leaving one `UUID` in
+    `cancelledWaiters` for the life of the surface. Harmless — identifiers are minted per call, so a
+    stale entry can never refuse a future waiter — and bounded by the number of waits cancelled at
+    exactly that instant. Closer: have the cancellation path record only while the wait is
+    registered, or clear the set when the queue drains. Owner: C7.4, or C7.1 if the adapter's
+    waiter is reworked.
+263. **`FloodTests.testMainActorStallDoesNotDuplicateOutstandingDelivery` fails under full-suite
+    load.** Seen once during C7.4's T1 with 2097156 bytes against 2097152 — four bytes, the shape of
+    the pty echoing the test's own `"go\n"` release write. It touches no surface code, passed alone
+    three times and passed in both later full runs. Closer: subtract the release write's echo, or
+    send it down a path the child does not echo. Owner: C7.1's file.
+264. **`.failed`'s synthetic 127 is indistinguishable from a child that really exited 127.** The
+    panel reports `PaneSpawn.unexecutableExitCode` when a spawn never executed, because C4 is
+    waiting on the request's id and a hatch whose pane never started would otherwise leave its
+    channel released for ever (child spec Design §2). A child that exits 127 on its own is reported
+    identically. Accepted: X5's re-adoption keys on the event, not the number. Closer: a reason
+    field on `PaneExit`, which is X5's shape and a parent revision. Owner: C7.4 with the architect.
+265. **`PersistedPane.cwd` records where a shell pane was spawned, never where it is.** W6 asks for
+    cwd overrides and a pane opened at an explicit directory restores there, but a shell the user
+    `cd`s in restores where it started. Closer: OSC 7, or reading the child's cwd from the kernel;
+    neither exists below the pane today. Owner: C7.4.
+266. **A restored or restarted shell pane keeps nothing but its directory.** No scrollback, no shell
+    history reuse, and the pane bar labels panes by purpose alone, so two shell panes in one channel
+    are indistinguishable and cannot be reordered. Deliberate for v1 — the composite defers "split
+    panes and pane layouts beyond a stack" — and recorded so the next leaf does not read the
+    minimal bar as finished. Closer: a per-pane title from the child's own reporting, and a
+    scrollback the restore can replay. Owner: C7.4.
+267. **`PaneReadout` carries a hand-written signal-name table.** A signalled child is named
+    (`SIGKILL`) rather than numbered (137), which is the point, but the mapping is a switch in the
+    panel rather than `strsignal(3)`. A signal the table does not know falls back to its number.
+    Closer: `strsignal`, with the table kept only for the names it renders differently. Owner: C7.4.
+268. **The view claim is unwitnessed against a real second window.** `PaneSurfaceHost` re-registers
+    a claimant on every remount, and correctness rests on identity-checked withdrawal rather than on
+    ordering, which is right — but every assertion about it is model-level. A real pop-out has never
+    been driven. Closer: the human leg in G4.3, or a UI test that opens the second window. Owner:
+    C7.4's human gate.
+269. **The Background job row now carries four link buttons.** *Adopt*, *Attach*, *Logs* and *Stop*
+    sit in one sidebar row with no layout work; §9.5 asks for the verbs and not for a menu, but the
+    row is getting wide. Closer: a menu, or icons with help text. Owner: C5's sidebar with C7.4.
+270. **A job pane refused for want of a channel reads as a generic failure.** The sidebar's banner
+    for a row that can name no channel does not distinguish that case from any other lifecycle
+    refusal; only the trust banner's `noChannelContext` sentence says what actually happened.
+    Closer: one sentence per refusal in the sidebar, the way `PrecommitModel` already does. Owner:
+    C7.4.
+271. **Exit reports leave through an unstructured `Task`, so nothing can await one.**
+    `TerminalPanelSession.report` hands each `PaneExit` to a detached task; no caller and no test can
+    await delivery, so "exactly one exit" is only assertable by polling until the count agrees with
+    itself. Without that quiescence loop C7.4's double-report mutation would have passed, which is
+    the shape of a test that cannot fail. Production consequence is small — C4 is an actor and the
+    per-pane identity guard preserves ordering — but the seam is untestable by construction. Closer:
+    an awaitable report, or a session-level barrier the tests can use. Owner: C7.4.
+272. **The close path's reported exit code depends on a race with the read loop.** `close()` tears
+    the child down, cancels the loop, then reads `pane.state`: whether the loop observed the
+    termination first decides between the child's real status and the synthetic `128 + SIGHUP`. Both
+    are true statements about an instant, and X5 keys on the event rather than the number, so this is
+    recorded rather than fixed. Closer: read the termination the pty layer observed rather than the
+    pane's rendered state. Owner: C7.4.
+273. **`PanelRig.shellPath` and `LaunchFixtures.environment` each hardcode the same shell.** One of
+    the two should read the other; today a change to either leaves the pair disagreeing and only a
+    shell-pane test would notice. Closer: the rig reads the fixture. Owner: C7.4's test support.
+274. **`ChannelHeaderActionsModel.explanation(of:)` says a channel "was not handed off".** By the
+    time `handOff()` reaches the host, X5 has already released the channel — the pane simply never
+    opened. The inaccuracy predates C7.4 and now appears in two refusal arms rather than one.
+    Closer: say what did not happen, which is that no pane opened. Owner: C6.2's file.
+275. **`AfleetStoreKeys.window` is declared in `App/` and read nowhere in `App/`.** Found while
+    C7.4's live leg was tripping `check-app-wiring.py`: the check keys on bare names, so a
+    test-local identifier named `window` had been masking it. Either it is unwired window-state
+    persistence or it is dead. Closer: wire it or delete it. Owner: C5.
+276. **`check-app-wiring.py` keys on bare member names.** An unrelated test-local identifier can
+    surface or mask a finding about a declaration it has nothing to do with; entry 275 is a concrete
+    instance. The script's own docstring already concedes the limitation. Closer: key on the
+    declaring type as the X7 drift checker learned to. Owner: C5's tool.
+346. **A pane the user never looks at cannot report its child's exit while its renderer is full.**
+    The pane consumes output and termination through one event loop and waits on
+    `awaitFeedCapacity()` between deliveries. An unattached surface holds its backlog until a
+    surface attaches (C7.1 tracker 298), so once 1 MiB is outstanding the loop stops and cannot
+    reach `.ended`, even though `PTYProcess` has already observed the child's status. For a hatch
+    whose pane is never rendered — the request names a channel the window is not showing — the exit
+    report, and with it X5's re-adoption, waits for the tab to be opened or the pane to be closed.
+    Not fixed here because every cheap fix is wrong: a deadline on the wait defeats C7.1's
+    "nothing is dropped" backpressure, and the honest fix needs a seam the adapter does not expose.
+    Closer: publish attachment on `GhosttyTerminalSurface`, or give the pane a termination observer
+    independent of the output stream. Owner: C7.4 with C7.1.
+347. **A channel removed from the index leaves its Terminal session holding live children.**
+    `TerminalSessionRegistry` retains a session while it has panes, which is what keeps a pane alive
+    across the host's LRU eviction; but `FleetCoordinator.release` and the host's `releaseChannel`
+    tell the registry nothing, so a channel that leaves the index keeps its panes and their children
+    for the life of the process. C7.4 closed the workspace-reset half inside its own fence; this
+    half needs a host seam the leaf was not authorised to add. Closer: a channel-release callback
+    from `PanelHostModel.releaseChannel` into the registry. Owner: C7.4 with C5.
+348. **A workspace rebind during a pane handoff discharges through the wrong lifecycle.** The
+    header awaits its *original* `lifecycle.openInTerminal()`, but its pane-runner closure holds the
+    host, and `bindWorkspace` replaces that host's lifecycle and contexts. A delivery that lands
+    after the rebind reports — or discharges — through the replacement, and the original
+    supervisor's `pendingHatch` is never cleared. Not fixed, because the rebind that causes it
+    discards that supervisor's whole fleet in the same act: nothing observable outlives it today.
+    The reasoning is what makes this safe, so it is recorded rather than trusted to memory — a
+    future rebind that reused a fleet would make it a live defect. Closer: carry the lifecycle the
+    request was minted by, or refuse a delivery whose world has moved. Owner: C7.4 with C5.
+349. **A pane request delivered across a workspace release cannot be recognised as stale.**
+    `TerminalPaneRunner.run` hops to the main actor holding a `ChannelContext`; a release can
+    intervene before the session is made. The registry's staleness check compares the identity of
+    the context's `store`, but `ScopedStore` is not class-bound and the production
+    `WorkbenchScopedStore` is a struct, so the check answers "same world" rather than answering
+    falsely — it stands *behind* `bindWorkspace`'s release, not in front of it. Closer: a
+    first-class world token on `ChannelContext`, which is a `PanelHostAPI` change and a parent
+    revision. Owner: C7.4 with C5.
+350. **The composer's Escape and Shift+Tab reach the window while a terminal pane has focus.**
+    `ComposerShortcutBar` stays mounted beside the panel and binds both keys unconditionally, and
+    the renderer's `performKeyEquivalent` returns false for ordinary non-Command keys it has not
+    bound — so Escape in a pane can interrupt a turn instead of reaching the child, and Shift+Tab
+    can cycle permission mode instead of completing. It makes a full-screen TUI in a pane
+    (`claude --resume`, an editor) misbehave in a way that reads as the pane being broken. Not fixed
+    in C7.4: the shortcut bar is C6.2's, and suppressing it needs a focus signal that crosses the
+    two children. Closer: the composer's shortcuts stand down while the panel holds first
+    responder. Owner: C6.2 with C7.4; escalated to the architect at C7.4's merge.
+351. **`continueStopped()` signals a process-group number it read across an actor hop.** The pane
+    re-checks its own state and its pty before signalling (round three's fix), but not the pty
+    layer's ownership gate, which closes before the reap; the pane learns of `.ended` later, through
+    the output stream. A stopped child that exits inside that window could see the signal land on a
+    reused group number. Narrow — it needs a stop, an exit and a pid reuse inside one hop — and
+    §7.8's rule is what makes it worth recording anyway. Closer: a resume that the pty layer
+    performs under its own ownership gate, rather than a number handed out to a caller. Owner:
+    C7.4 with C7.1.
+352. **A persistence write can outlive the session that scheduled it.** `schedulePersist` captures
+    the store, the document and the preceding task without retaining the session, and an *empty*
+    session loses the registry's strong retention, so host eviction can discard it while a write is
+    still pending. A replacement session waits on the released flag, which ordinary eviction never
+    sets, so a restore can read in front of the old session's last write. Bounded — the document is
+    small, the window is one actor hop, and both sessions write the same channel's own key — but it
+    is a two-writer path W6's per-tab key was meant to end. Closer: a per-key write barrier the
+    registry owns rather than one chained inside a session. Owner: C7.4.
+353. **A job pane for an unvisited channel depends on the caller seeding the host's context.** The
+    ruled seam has the caller name the channel and the host resolve it, and the host can only
+    resolve a channel it has rendered or been told a cwd for. C7.4's sidebar path supplies the cwd
+    it knows, so *Attach* and *Logs* work for a job whose channel the window has never shown; a
+    caller that cannot name a cwd still refuses. Recorded because the dependency is not obvious
+    from the seam's shape and the next caller will meet it. Closer: `run(_:for:)` taking the cwd, or
+    the host resolving a channel through the fleet's own row. Owner: C7.4 with C5.
+354. **Quit does not know a Terminal pane is running.** `QuitGuard.forApp` is built from the fleet
+    and the composers; `FleetQuitTermination.quitChannels` filters to owned channels, and a shell
+    pane has no fleet entry at all. So §7.4's Quit asks about turns and background tasks and says
+    nothing about a pane with a live child, app termination closes the pty descriptors without
+    awaiting any pane teardown, and the alert's own advice — that *Open in terminal* is how you keep
+    a conversation — is wrong for the pane it hands you to. No state is corrupted (a relaunch
+    re-evaluates every channel from the registry) and the children are afleet's own, so §7.8 is not
+    breached; what is missing is the warning. Closer: the quit guard asks the session registry
+    whether any pane holds a live child, and the sentence names it. Owner: C6.2's `QuitGuard` with
+    C7.4; escalated to the architect at C7.4's merge.
+355. **Four residues the fourth review round named and this leaf did not take**, each real, each
+    needing a seam or a decision that is not C7.4's alone. (a) *Attach* or *Logs* for a channel the
+    window is not showing starts an **invisible** pane: the host selects the Terminal tab, but the
+    panel column still derives its channel from `shell.focus`, so nothing brings that channel into
+    view. Whether pressing *Attach* should navigate is a product decision, which is why it is filed
+    rather than chosen. (b) After `/cd`, a channel's new shells still open in the old directory:
+    `ComposerRegistry.adoptDirectory` rebuilds the host's context, but the retained session holds
+    the context it was made with and `openShellPane` takes no override. Closer: a context refresh a
+    retained session can observe. (c) A shell opened while the initial document read is still in
+    flight is lost if a release lands in that window — `schedulePersist` skips mutations until the
+    read is `.done`, and `tearDown` deliberately writes nothing. (d) A dismantled container that no
+    longer owns the surface returns before it unregisters, so a later relinquish can hand the
+    surface to it instead of to a host that is still mounted. (c) and (d) are the same family as
+    entries 346 and 352: ordering under teardown, where each fix has revealed the next. Owner:
+    C7.4 with C5 for (a) and (b).
