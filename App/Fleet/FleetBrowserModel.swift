@@ -541,6 +541,18 @@ final class FleetBrowserModel {
         return nil
     }
 
+    /// The working directory a job's pane channel can be built from, so a caller that has named a
+    /// channel can also make it *resolvable*.
+    ///
+    /// The panel host holds a context only for a channel it has rendered, and drops it again under
+    /// LRU pressure. A job's channel is very often neither: the sidebar's Background section is
+    /// full of channels no window has ever shown. The row's own directory comes first, because it
+    /// is the channel's; the job's is the fallback for a channel with no row — an exec job's, and
+    /// a job whose session left the index.
+    func paneCWD(for job: JobEntry, in channel: ChannelKey) -> URL? {
+        row(channel.session)?.cwd ?? job.cwd
+    }
+
     /// A job action that failed after X5 had already answered — the pane could not be placed. It
     /// reads as the same sentence any other refusal on the row does.
     func noteJobFailure(_ job: JobEntry, _ error: any Error) {

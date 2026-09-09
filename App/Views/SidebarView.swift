@@ -128,9 +128,18 @@ struct SidebarView: View {
     /// **And the host's refusal is a banner too** (§10). `run(_:for:)` throws when no Terminal leaf
     /// holds a runner or when the host cannot resolve the named channel — both are things the user
     /// should read on the row that asked, not errors travelling into a channel.
+    ///
+    /// **Naming a channel means making it resolvable.** The host can build a context only for a
+    /// channel it has been given a working directory for, and it forgets both when LRU pressure
+    /// evicts one — so a job in a channel no window has shown, or has stopped showing, would be
+    /// refused for want of a directory the caller is holding. This is the caller, so it names that
+    /// too. With no directory to name, the host's refusal stands exactly as it did.
     static func openJobPane(_ job: JobEntry, verb: JobPaneVerb,
                             browser: FleetBrowserModel, panels: PanelHostModel) async {
         guard let channel = browser.paneChannel(for: job, inView: panels.selectedChannel) else { return }
+        if panels.context(for: channel) == nil, let cwd = browser.paneCWD(for: job, in: channel) {
+            _ = panels.context(for: channel, cwd: cwd)
+        }
         let request: PaneRequest?
         switch verb {
         case .attach: request = await browser.attach(job)

@@ -50,15 +50,18 @@ final class TerminalPanelWiringTests: XCTestCase {
     /// ever opened. It now travels to `PanelHost.run(_:for:)` **unchanged, `id` included** — a
     /// re-minted id is the one mutation C4 cannot see, because it discards an exit for an id it is
     /// not waiting on and says nothing — and into the channel the row names.
+    ///
+    /// **Nothing seeds the host's context here.** A background job's channel is a channel no
+    /// window has shown; seeding one was the test standing in for a step the app does not take,
+    /// and every one of these assertions passed over a path that could not run in the app.
     func testAttachRunsTheRequestItWasGivenInTheChannelTheRowNames() async throws {
         let rig = try await WiringRig()
         defer { rig.stop() }
         let runner = rig.replaceTerminalRunner()
         let session = WiringFixtures.session(7)
-        let job = WiringFixtures.job("jattach", session: session)
+        let job = WiringFixtures.job("jattach", session: session, cwd: rig.cwd)
         let staged = WiringFixtures.request(purpose: .attach(job.short), cwd: rig.cwd)
         await rig.lifecycle.stagePane(.success(staged))
-        _ = rig.app.panels.context(for: ChannelKey(configHome: rig.configHome, session: session), cwd: rig.cwd)
 
         await SidebarView.openJobPane(job, verb: .attach, browser: rig.browser, panels: rig.app.panels)
 
@@ -75,16 +78,15 @@ final class TerminalPanelWiringTests: XCTestCase {
     // MARK: - Group 3: *Logs*
 
     /// §9.5 and §17 C7 both name *Logs* as a pane, and it is the same verb as *Attach* over a
-    /// different X5 request.
+    /// different X5 request — and, like *Attach*, over a channel nothing has rendered.
     func testLogsGoesThroughTheLifecycleAndThenTheHost() async throws {
         let rig = try await WiringRig()
         defer { rig.stop() }
         let runner = rig.replaceTerminalRunner()
         let session = WiringFixtures.session(9)
-        let job = WiringFixtures.job("jlogs", session: session)
+        let job = WiringFixtures.job("jlogs", session: session, cwd: rig.cwd)
         let staged = WiringFixtures.request(purpose: .logs(job.short), cwd: rig.cwd)
         await rig.lifecycle.stagePane(.success(staged))
-        _ = rig.app.panels.context(for: ChannelKey(configHome: rig.configHome, session: session), cwd: rig.cwd)
 
         await SidebarView.openJobPane(job, verb: .logs, browser: rig.browser, panels: rig.app.panels)
 
@@ -135,6 +137,25 @@ final class TerminalPanelWiringTests: XCTestCase {
         let channels = await runner.channels
         XCTAssertEqual(channels, [rig.key], "the exec job's pane did not land in the channel in view")
         XCTAssertNil(rig.browser.jobBanners[job.short.rawValue], "a placed pane left a refusal on the row")
+    }
+
+    /// And the refusal is unchanged where there is genuinely no directory to name: a job whose
+    /// channel nothing has rendered and whose roster entry carries no working directory cannot be
+    /// made resolvable, so the host refuses and the row says so.
+    func testAJobWhoseChannelHasNoDirectoryAnywhereStillRefusesOnTheRow() async throws {
+        let rig = try await WiringRig()
+        defer { rig.stop() }
+        let runner = rig.replaceTerminalRunner()
+        let session = WiringFixtures.session(11)
+        let job = WiringFixtures.job("jnocwd", session: session)
+        let staged = WiringFixtures.request(purpose: .attach(job.short), cwd: rig.cwd)
+        await rig.lifecycle.stagePane(.success(staged))
+
+        await SidebarView.openJobPane(job, verb: .attach, browser: rig.browser, panels: rig.app.panels)
+
+        XCTAssertNotNil(rig.browser.jobBanners[job.short.rawValue], "the host refused without saying so")
+        let received = await runner.received
+        XCTAssertEqual(received.count, 0, "a pane opened in a channel the host could not resolve")
     }
 
     // MARK: - Group 5: Cmd+Shift+T
@@ -247,9 +268,9 @@ private enum WiringFixtures {
 
     /// A background job. `session` nil is the exec job, which has no session at all — the case the
     /// channel-naming rule exists for.
-    static func job(_ short: String, session: SessionID?) -> JobEntry {
+    static func job(_ short: String, session: SessionID?, cwd: URL? = nil) -> JobEntry {
         JobEntry(short: JobShort(rawValue: short), state: "working", kind: "bg",
-                 sessionID: session, cwd: nil, name: nil)
+                 sessionID: session, cwd: cwd, name: nil)
     }
 }
 
