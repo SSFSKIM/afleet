@@ -323,7 +323,8 @@ final class AgentNodeActionTests: XCTestCase {
         await rig.settleConfirm()
         rig.model.actions?.answerPending()
         await rig.settle(actions: 1)
-        _ = await Self.settle { rig.model.actions?.banner != nil }
+        let noted = await Self.settle { rig.model.actions?.banner != nil }
+        XCTAssertTrue(noted, "the refused action left no banner before the budget ran out")
 
         XCTAssertTrue(rig.model.actions?.backgroundingDisabled == true,
                       "a refusal that arrived through Background all left backgrounding available")
@@ -369,7 +370,8 @@ final class AgentNodeActionTests: XCTestCase {
         let expected = try XCTUnwrap(rig.model.transcriptURL(of: Rig.runID), "the tree composed no transcript path")
 
         try press("Open Transcript File", on: Rig.runID, in: rig)
-        _ = await Self.settle { await rig.links.opened.isEmpty == false }
+        let raised = await Self.settle { await rig.links.opened.isEmpty == false }
+        XCTAssertTrue(raised, "the press raised no link before the budget ran out")
 
         let opened = await rig.links.opened
         XCTAssertEqual(opened.count, 1, "one press raised \(opened.count) link(s)")
@@ -483,20 +485,27 @@ final class AgentNodeActionTests: XCTestCase {
 
         /// Waits for the round trip a button press started. Counted rather than timed: the press
         /// starts a `Task`, and a test that waited a duration would be asserting about the scheduler.
-        func settle(sends: Int) async {
-            _ = await AgentNodeActionTests.settle { await self.lifecycle.sent.count >= sends }
-            _ = await AgentNodeActionTests.settle { self.model.actions?.inFlight != true }
+        func settle(sends: Int, file: StaticString = #filePath, line: UInt = #line) async {
+            let arrived = await AgentNodeActionTests.settle { await self.lifecycle.sent.count >= sends }
+            XCTAssertTrue(arrived, "the press sent fewer than \(sends) control request(s) before the budget ran out",
+                          file: file, line: line)
+            let finished = await AgentNodeActionTests.settle { self.model.actions?.inFlight != true }
+            XCTAssertTrue(finished, "the request never left the wire, so the round trip did not settle",
+                          file: file, line: line)
         }
 
         /// The same, for the half of Y5 that goes out as a `LifecycleAction`.
-        func settle(actions count: Int) async {
-            _ = await AgentNodeActionTests.settle { await self.lifecycle.actions.count >= count }
+        func settle(actions count: Int, file: StaticString = #filePath, line: UInt = #line) async {
+            let performed = await AgentNodeActionTests.settle { await self.lifecycle.actions.count >= count }
+            XCTAssertTrue(performed, "fewer than \(count) action(s) were performed before the budget ran out",
+                          file: file, line: line)
         }
 
         /// Waits for the confirm to be raised. *Stop everything* takes the fleet's census first, so
         /// the dialog appears one suspension after the button was pressed.
-        func settleConfirm() async {
-            _ = await AgentNodeActionTests.settle { self.model.actions?.pending != nil }
+        func settleConfirm(file: StaticString = #filePath, line: UInt = #line) async {
+            let raised = await AgentNodeActionTests.settle { self.model.actions?.pending != nil }
+            XCTAssertTrue(raised, "no confirm was waiting before the budget ran out", file: file, line: line)
         }
 
         /// One running, foreground agent run — the shape §8.4 makes *Move to background* available
@@ -575,6 +584,11 @@ final class AgentNodeActionTests: XCTestCase {
     /// and a spin that never ends turns a failing assertion into a suite that never reports. The
     /// budget is a count of scheduler turns rather than a duration, so it decides nothing about
     /// speed; what it bounds is the failure.
+    ///
+    /// **Every caller asserts the answer.** A wait whose outcome is discarded turns a handler that
+    /// sends the right request and then stays in flight for ever into a passing test: the assertions
+    /// after it read a surface that has settled by accident or not at all, and the one fact that
+    /// says which — whether the wait was fulfilled — was thrown away.
     @MainActor
     static func settle(until condition: @MainActor () async -> Bool, turns: Int = 20_000) async -> Bool {
         for _ in 0..<turns {

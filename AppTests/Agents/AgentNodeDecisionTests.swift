@@ -147,7 +147,8 @@ final class AgentNodeDecisionTests: XCTestCase {
         let card = try XCTUnwrap(Self.decisions(of: Self.runID, in: rig)?.cards.first, "the node drew no card")
         try Self.press("Allow once", in: card)
         await rig.settle(actions: 1)
-        _ = await AgentNodeActionTests.settle { rig.raised.signals.isEmpty == false }
+        let raised = await AgentNodeActionTests.settle { rig.raised.signals.isEmpty == false }
+        XCTAssertTrue(raised, "the answer raised nothing on the fold before the budget ran out")
 
         XCTAssertEqual(rig.raised.signals.count, 1, "the answer raised \(rig.raised.signals.count) signal(s)")
         guard case .decisionAnswered(let id, let outcome)? = rig.raised.signals.first else {
@@ -169,7 +170,8 @@ final class AgentNodeDecisionTests: XCTestCase {
         let card = try XCTUnwrap(Self.decisions(of: Self.runID, in: rig)?.cards.first, "the node drew no card")
         try Self.press("Allow once", in: card)
         await rig.settle(actions: 1)
-        _ = await AgentNodeActionTests.settle { rig.model.answering?.banner != nil }
+        let noted = await AgentNodeActionTests.settle { rig.model.answering?.banner != nil }
+        XCTAssertTrue(noted, "the refused answer left no banner before the budget ran out")
 
         XCTAssertEqual(rig.raised.signals.count, 0,
                        "a refused answer raised \(rig.raised.signals.count) signal(s) on the fold")
@@ -245,8 +247,10 @@ final class AgentNodeDecisionTests: XCTestCase {
             published.timeline.overlay.decisions[id]?.state = .answered(outcome: DecisionOutcome.allowed.label)
         }
 
-        func settle(actions count: Int) async {
-            _ = await AgentNodeActionTests.settle { await self.lifecycle.actions.count >= count }
+        func settle(actions count: Int, file: StaticString = #filePath, line: UInt = #line) async {
+            let performed = await AgentNodeActionTests.settle { await self.lifecycle.actions.count >= count }
+            XCTAssertTrue(performed, "fewer than \(count) action(s) were performed before the budget ran out",
+                          file: file, line: line)
         }
 
         /// Two runs at the top level, so "this node and not its sibling" is a thing the tree can be
