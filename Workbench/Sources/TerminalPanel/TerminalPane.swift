@@ -66,6 +66,12 @@ public final class TerminalPane {
     /// (spec Design §8). The claim moves the view and touches nothing below it.
     public let viewClaim = PaneViewClaim()
 
+    /// The keyboard this pane owes its first host. A pane exists because something asked for it,
+    /// and the first container mounted over it is the one that answers that asking; a container
+    /// built afterwards — a pop-out opening, or the main window's host rebuilt when it closes —
+    /// answers the window system and leaves the focus where the user put it.
+    public let focusDebt = PaneFocusDebt.owedOnce()
+
     /// Whether there is still a child to lose, which is what decides that closing this pane asks
     /// first. A pane already torn down, or whose child ended on its own, has nothing to ask about.
     public var hasLiveChild: Bool {

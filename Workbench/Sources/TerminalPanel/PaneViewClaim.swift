@@ -55,3 +55,39 @@ public final class PaneViewClaim {
         claimants.last == claimant
     }
 }
+
+/// Whether the first host that mounts over a pane is owed the keyboard — and it is owed **once**.
+///
+/// Taking the focus is a property of *why a container exists*, which is the one thing a container
+/// cannot see. A pane a person asked for — the shell pane they opened, the request they ran, the
+/// restart they pressed — is a pane they mean to type into, so the first container mounted over it
+/// takes the keyboard. Every container after that exists for a reason of the window system's own.
+///
+/// The debt is the **pane's**, because a claim outlives containers and a container does not outlive
+/// a pop-out. While a popped-out window holds the claim the main host draws the statement and drops
+/// its container, so when the pop-out closes what SwiftUI builds is a *new* main-window
+/// representable: there is no surviving container to recognise, and a rule written about one let
+/// that new host take the focus out of the composer the user was typing in.
+@MainActor
+public final class PaneFocusDebt {
+
+    private var isOwed: Bool
+
+    private init(isOwed: Bool) { self.isOwed = isOwed }
+
+    /// A pane that exists because a person asked for it.
+    public static func owedOnce() -> PaneFocusDebt { PaneFocusDebt(isOwed: true) }
+
+    /// A pane nobody is owed the keyboard for.
+    public static func settled() -> PaneFocusDebt { PaneFocusDebt(isOwed: false) }
+
+    /// Whether the debt still stands. Diagnostic: it exists so "the first host took it and the
+    /// next one did not" is an assertion rather than a recollection.
+    public var isStanding: Bool { isOwed }
+
+    /// Takes the debt if it stands, and leaves it settled either way.
+    public func claim() -> Bool {
+        defer { isOwed = false }
+        return isOwed
+    }
+}

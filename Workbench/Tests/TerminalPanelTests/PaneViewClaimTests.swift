@@ -171,7 +171,7 @@ final class PaneViewClaimTests: XCTestCase {
     /// one, and a container only ever removes a view it is still holding.
     func testEachRepresentableTakesItsOwnContainerAndTheOutgoingOneLeavesTheIncomingAlone() {
         let surface = GhosttyTerminalSurface()
-        let representable = PaneSurfaceView(surface: surface)
+        let representable = PaneSurfaceView(surface: surface, focus: .owedOnce())
 
         let outgoing = representable.makeContainer()
         let incoming = representable.makeContainer()
@@ -217,7 +217,7 @@ final class PaneViewClaimTests: XCTestCase {
     /// SwiftUI makes: it still owes the focus, and pays it when the window arrives.
     func testAHostAdoptingBeforeItHasAWindowStillTakesTheKeyboardWhenOneArrives() {
         let surface = GhosttyTerminalSurface()
-        let representable = PaneSurfaceView(surface: surface)
+        let representable = PaneSurfaceView(surface: surface, focus: .owedOnce())
 
         let container = representable.makeContainer()
         XCTAssertTrue(container.owesSurfaceFocus, "a host that took the surface did not ask for the focus")
@@ -240,7 +240,7 @@ final class PaneViewClaimTests: XCTestCase {
     /// window is not somewhere the pane can be seen, and the hand-off passes over it.
     func testAnOutgoingContainerHandsTheSurfaceToTheHostThatStillStands() {
         let surface = GhosttyTerminalSurface()
-        let representable = PaneSurfaceView(surface: surface)
+        let representable = PaneSurfaceView(surface: surface, focus: .owedOnce())
         let root = NSView(frame: NSRect(x: 0, y: 0, width: 1_200, height: 700))
         let surviving = representable.makeContainer()
         let outgoing = representable.makeContainer()
@@ -336,7 +336,7 @@ final class PaneViewClaimTests: XCTestCase {
     /// two hosts still standing, and the older of them must not take it.
     func testTheHandOffGoesToTheNewestHostThatStillStands() {
         let surface = GhosttyTerminalSurface()
-        let representable = PaneSurfaceView(surface: surface)
+        let representable = PaneSurfaceView(surface: surface, focus: .owedOnce())
         let root = NSView(frame: NSRect(x: 0, y: 0, width: 1_200, height: 700))
         let older = representable.makeContainer()
         let newer = representable.makeContainer()
@@ -358,7 +358,7 @@ final class PaneViewClaimTests: XCTestCase {
     /// drawing the pane drew nothing at all.
     func testAHostDismantledEarlierIsNotHandedTheSurface() {
         let surface = GhosttyTerminalSurface()
-        let representable = PaneSurfaceView(surface: surface)
+        let representable = PaneSurfaceView(surface: surface, focus: .owedOnce())
         let root = NSView(frame: NSRect(x: 0, y: 0, width: 1_200, height: 700))
         let surviving = representable.makeContainer()
         let dismantled = representable.makeContainer()
@@ -382,7 +382,7 @@ final class PaneViewClaimTests: XCTestCase {
     /// nothing draws while the window that is still showing the tab shows an empty pane.
     func testAHostInNoWindowIsNotHandedTheSurface() {
         let surface = GhosttyTerminalSurface()
-        let representable = PaneSurfaceView(surface: surface)
+        let representable = PaneSurfaceView(surface: surface, focus: .owedOnce())
         let root = NSView(frame: NSRect(x: 0, y: 0, width: 1_200, height: 700))
         let surviving = representable.makeContainer()
         // Registered over the same surface and never put in a window — the newest entry in the
@@ -400,6 +400,67 @@ final class PaneViewClaimTests: XCTestCase {
                       "the surface was handed to a host that is in no window")
     }
 
+    /// A pane returning from a closed pop-out owes the user nothing.
+    ///
+    /// The previous rule protected a surviving *container*, and after a pop-out there is none: while
+    /// the popped-out window held the claim the main host drew the statement and dropped its
+    /// container, so what SwiftUI builds when the pop-out closes is a **new** main-window
+    /// representable — and its `makeContainer()` is the focus-taking adoption. The user was typing
+    /// in the composer and the next keystroke went into a live client.
+    ///
+    /// Walked through the real claim path rather than two containers by hand: the main host
+    /// registers, the pop-out registers over it, the pop-out withdraws, and the claim returns.
+    func testAPaneReturningFromAClosedPopOutDoesNotTakeTheComposersKeyboard() throws {
+        let pane = TerminalPane()
+        let surface = pane.surface
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 1_200, height: 700))
+        // Stands for whatever the user is typing in; in the app it is the composer, which this
+        // target may not import.
+        let composer = NSTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 100))
+        root.addSubview(composer)
+        window = PaneTestChild.window(around: root)
+
+        // The user opens the pane. The main window's host registers a claim and mounts a container,
+        // and that container is the one the pane owes the keyboard to.
+        let mainHost = PaneClaimHolder()
+        mainHost.register(for: pane)
+        let mainRepresentable = PaneSurfaceView(surface: surface, focus: pane.focusDebt)
+        let opened = mainRepresentable.makeContainer()
+        root.addSubview(opened)
+        XCTAssertEqual(opened.focusHandoffCount, 1, "the pane the user opened never took the keyboard")
+
+        // The tab is popped out: the pop-out's host takes the claim, so the main host draws the
+        // statement instead — which is SwiftUI dismantling its container.
+        let poppedOutHost = PaneClaimHolder()
+        poppedOutHost.register(for: pane)
+        XCTAssertFalse(mainHost.holdsView(of: pane), "the main window still claims to draw a popped-out pane")
+        let poppedOutRepresentable = PaneSurfaceView(surface: surface, focus: pane.focusDebt)
+        let poppedOut = poppedOutRepresentable.makeContainer()
+        root.addSubview(poppedOut)
+        PaneSurfaceView.dismantleNSView(opened, coordinator: mainRepresentable.makeCoordinator())
+        opened.removeFromSuperview()
+
+        // And the user goes back to the composer while the pop-out is up.
+        window?.makeFirstResponder(composer)
+        XCTAssertTrue(window?.firstResponder === composer,
+                      "the test did not reach the pop-out with the focus in the composer")
+
+        // The pop-out closes. Its host withdraws, its container is dismantled, the claim comes back
+        // to the main host — and SwiftUI builds that host a container it never had.
+        poppedOutHost.withdraw()
+        PaneSurfaceView.dismantleNSView(poppedOut, coordinator: poppedOutRepresentable.makeCoordinator())
+        poppedOut.removeFromSuperview()
+        XCTAssertTrue(mainHost.holdsView(of: pane), "the claim did not return when the pop-out closed")
+        let returned = mainRepresentable.makeContainer()
+        root.addSubview(returned)
+
+        XCTAssertTrue(surface.view.superview === returned,
+                      "the returning pane was not attached to the main window's new host")
+        XCTAssertTrue(window?.firstResponder === composer,
+                      "a pane returning from a closed pop-out took the composer's keyboard")
+        XCTAssertEqual(returned.focusHandoffCount, 0, "handoffs=\(returned.focusHandoffCount)")
+    }
+
     /// The hand-off is not the user asking for this pane. A pop-out closing while the user is
     /// typing in the composer moves the surface back to the main window's host, and a host that
     /// asked for the keyboard on the way in would send the next keystrokes into a live client.
@@ -408,7 +469,7 @@ final class PaneViewClaimTests: XCTestCase {
     /// view and leaves the keyboard exactly where the user put it.
     func testAHandOffToASurvivingHostLeavesTheKeyboardWhereItWas() {
         let surface = GhosttyTerminalSurface()
-        let representable = PaneSurfaceView(surface: surface)
+        let representable = PaneSurfaceView(surface: surface, focus: .owedOnce())
         let root = NSView(frame: NSRect(x: 0, y: 0, width: 1_200, height: 700))
         // Stands for whatever the user is typing in; in the app it is the composer, which this
         // target may not import.
@@ -455,7 +516,7 @@ final class PaneViewClaimTests: XCTestCase {
     /// and a host mounted while nobody holds the view takes it back.
     func testAContainerRemovesOnlyAViewItStillHoldsAndRepairsAnUnheldOne() {
         let surface = GhosttyTerminalSurface()
-        let representable = PaneSurfaceView(surface: surface)
+        let representable = PaneSurfaceView(surface: surface, focus: .owedOnce())
         let container = representable.makeContainer()
 
         container.relinquish(surface.view)

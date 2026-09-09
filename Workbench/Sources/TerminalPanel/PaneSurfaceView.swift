@@ -20,7 +20,7 @@ struct PaneSurfaceHost: View {
     var body: some View {
         Group {
             if holder.holdsView(of: pane) {
-                PaneSurfaceView(surface: pane.surface)
+                PaneSurfaceView(surface: pane.surface, focus: pane.focusDebt)
             } else {
                 elsewhere
             }
@@ -124,18 +124,21 @@ final class PaneSurfaceContainer: NSView {
     private(set) var focusHandoffCount = 0
 
     /// Takes the surface view, from whichever container was holding it, **and takes the keyboard
-    /// with it**. This is the adoption that answers a person asking for this pane: SwiftUI makes a
-    /// container for it, and a pane the user asked for is a pane they mean to type into.
+    /// with it**: the adoption that answers a person asking for this pane.
     ///
-    /// The two arms below take the same view and leave the keyboard alone, because neither of them
-    /// is a request. A hand-off and a repair happen while the user is somewhere else entirely — the
+    /// Which adoption that is belongs to the pane rather than to this view — a container cannot see
+    /// why it was built, and after a pop-out closes the main window's host is a container built
+    /// fresh for a claim merely coming back (see ``PaneFocusDebt``).
+    ///
+    /// The other arms take the same view and leave the keyboard alone, because none of them is a
+    /// request. A hand-off and a repair happen while the user is somewhere else entirely — the
     /// composer, most often — and moving the focus there would send the next keystrokes into
     /// whatever the pane is running.
     func adopt(_ surfaceView: NSView) {
         adopt(surfaceView, takingFocus: true)
     }
 
-    private func adopt(_ surfaceView: NSView, takingFocus: Bool) {
+    fileprivate func adopt(_ surfaceView: NSView, takingFocus: Bool) {
         guard surfaceView.superview !== self else { return }
         surfaceView.removeFromSuperview()
         surfaceView.frame = bounds
@@ -248,6 +251,10 @@ struct PaneSurfaceView: NSViewRepresentable {
 
     let surface: GhosttyTerminalSurface
 
+    /// Whether the container this makes is answering a person. Held by the pane, so it survives
+    /// every container the pane's hosts build and drop (see ``PaneFocusDebt``).
+    let focus: PaneFocusDebt
+
     /// The surface, held so the static teardown — which is handed no representable — can name the
     /// view it is being asked to release.
     @MainActor
@@ -273,9 +280,12 @@ struct PaneSurfaceView: NSViewRepresentable {
 
     /// This representable's own container, holding the surface view. Named so that "each host gets
     /// its own" is an assertion rather than a claim about code SwiftUI alone can call.
+    ///
+    /// Whether it takes the keyboard is the pane's answer and not this container's: only the first
+    /// host mounted over a pane is answering the person who asked for it (see ``PaneFocusDebt``).
     func makeContainer() -> PaneSurfaceContainer {
         let container = PaneSurfaceContainer()
-        container.adopt(surface.view)
+        container.adopt(surface.view, takingFocus: focus.claim())
         return container
     }
 }
