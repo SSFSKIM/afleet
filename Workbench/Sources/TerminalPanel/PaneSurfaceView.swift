@@ -100,6 +100,17 @@ final class PaneClaimHolder {
 /// the container, and the container it is handed is not the one the view is missing from.
 final class PaneSurfaceContainer: NSView {
 
+    /// One container that has taken a surface view, and the view it took. Both weak: a container
+    /// SwiftUI has dropped is not a host anything may be handed back to.
+    private struct Mounted {
+        weak var container: PaneSurfaceContainer?
+        weak var surfaceView: NSView?
+    }
+
+    /// Every container currently standing over a surface, oldest first — the AppKit counterpart of
+    /// the claimant stack, and the only way an outgoing host can name the host that is still there.
+    private static var mounted: [Mounted] = []
+
     /// Takes the surface view, from whichever container was holding it. The newest host is the one
     /// the claim has just been given to, so taking it is what "this host draws the pane" means in
     /// AppKit terms.
@@ -109,6 +120,7 @@ final class PaneSurfaceContainer: NSView {
         surfaceView.frame = bounds
         surfaceView.autoresizingMask = [.width, .height]
         addSubview(surfaceView)
+        Self.record(self, over: surfaceView)
     }
 
     /// Takes it only while nobody holds it. This is the repair arm: a host that is still mounted
@@ -120,10 +132,41 @@ final class PaneSurfaceContainer: NSView {
     }
 
     /// Removes the surface view **only if this container is still the one holding it** — the whole
-    /// of the overlap rule: a host removes what it added, and never what its successor added.
+    /// of the overlap rule: a host removes what it added, and never what its successor added — and
+    /// then **hands it to whichever host is still standing**.
+    ///
+    /// The hand-off is the other ordering, and the repair arm alone does not cover it: a surviving
+    /// host laid out *before* this teardown saw the view held here and left it alone, correctly,
+    /// and there is no second update owed to it. Dropping the view there leaves the pane blank in
+    /// the window that still shows it, for as long as nothing else happens to redraw.
     func relinquish(_ surfaceView: NSView) {
         guard surfaceView.superview === self else { return }
         surfaceView.removeFromSuperview()
+        Self.forget(self)
+        Self.survivingHost(over: surfaceView)?.adopt(surfaceView)
+    }
+
+    /// The newest container other than this one that is standing over `surfaceView`, if any.
+    private static func survivingHost(over surfaceView: NSView) -> PaneSurfaceContainer? {
+        prune()
+        return mounted.last { $0.surfaceView === surfaceView }?.container
+    }
+
+    private static func record(_ container: PaneSurfaceContainer, over surfaceView: NSView) {
+        prune()
+        mounted.removeAll { $0.container === container }
+        mounted.append(Mounted(container: container, surfaceView: surfaceView))
+    }
+
+    private static func forget(_ container: PaneSurfaceContainer) {
+        mounted.removeAll { $0.container === container }
+    }
+
+    /// Drops the entries whose container or surface has been deallocated. There is no deinit to do
+    /// this from — a container SwiftUI drops without dismantling is released with nothing said —
+    /// so the list is swept whenever it is touched.
+    private static func prune() {
+        mounted.removeAll { $0.container == nil || $0.surfaceView == nil }
     }
 }
 

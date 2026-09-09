@@ -179,6 +179,30 @@ final class PaneViewClaimTests: XCTestCase {
                       "the outgoing host's teardown removed the view the incoming host holds")
     }
 
+    /// The reversed ordering, which the repair arm alone does not cover: the surviving host is
+    /// laid out **before** the outgoing one is dismantled.
+    ///
+    /// `updateNSView` only adopts a surface nobody holds, so a survivor that updates while the
+    /// outgoing container still has the view does nothing — and the outgoing container then takes
+    /// the view out with nobody left to notice, leaving the pane blank until some later update
+    /// that may never come. Relinquishing hands the view on instead of merely dropping it.
+    func testAnOutgoingContainerHandsTheSurfaceToTheHostThatStillStands() {
+        let surface = GhosttyTerminalSurface()
+        let representable = PaneSurfaceView(surface: surface)
+        let surviving = representable.makeContainer()
+        let outgoing = representable.makeContainer()
+
+        // The survivor is laid out first, while the outgoing container is still the one holding
+        // the view: it is not eligible to take it, and it does not.
+        surviving.adoptIfUnheld(surface.view)
+        XCTAssertTrue(surface.view.superview === outgoing, "the newest host does not hold the surface")
+
+        outgoing.relinquish(surface.view)
+
+        XCTAssertTrue(surface.view.superview === surviving,
+                      "the outgoing host left the pane attached to nothing")
+    }
+
     /// A container that has lost the surface to a newer host removes nothing when it goes away,
     /// and a host mounted while nobody holds the view takes it back.
     func testAContainerRemovesOnlyAViewItStillHoldsAndRepairsAnUnheldOne() {
