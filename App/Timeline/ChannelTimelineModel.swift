@@ -323,25 +323,20 @@ final class ChannelTimelineModel {
             let stream = await lifecycle.events(of: key)
             await self?.refreshReadbacks()
             guard let stream else { self?.readbackTask = nil; return }
-            // The epoch the events belong to. A restart replaces the process under a channel this
-            // model outlives, and the mode a status frame reported belongs to the process that
-            // reported it: the precedence resets with the process, or the replacement's handshake is
-            // rejected for ever. Monotone, so a straggler from the old process resets nothing.
+            // A restart replaces the process under a channel this model outlives, and the mode a
+            // status frame reported belongs to the process that reported it: the precedence resets
+            // with the process, or the replacement's handshake is rejected for ever. The epoch is
+            // recorded on the readout rather than here, so it survives an archival that ends this
+            // subscription — see `ChannelHeaderReadout.observed(epoch:)`.
             //
-            // **And the readbacks are re-taken on the spot.** Clearing the precedence only makes the
-            // replacement's handshake acceptable; the mode standing in the readout is still the
-            // replaced process's until something reads a new one. A handshake is not a turn end, and
-            // the poll below is the only other thing that would take one — so a replacement that
-            // runs no turn would leave the header naming a process that is gone.
-            var epoch: ProcessEpoch?
+            // **And the readbacks are re-taken on the spot.** The replacement's mode is in its own
+            // handshake, a handshake is not a turn end, and the poll below is the only other thing
+            // that would read one — so a replacement that runs no turn would leave the header naming
+            // the mode of a process that is gone.
             for await event in stream {
                 guard let self, !self.isTerminated else { return }
-                if let seen = ReadbackPoller.epoch(of: event) {
-                    if let epoch, seen > epoch {
-                        self.readout.processReplaced()
-                        await self.refreshReadbacks()
-                    }
-                    epoch = max(epoch ?? seen, seen)
+                if let seen = ReadbackPoller.epoch(of: event), self.readout.observed(epoch: seen) {
+                    await self.refreshReadbacks()
                 }
                 if let mode = ReadbackPoller.liveMode(event) { self.readout.apply(liveMode: mode) }
                 guard ReadbackPoller.isTurnEnd(event) else { continue }

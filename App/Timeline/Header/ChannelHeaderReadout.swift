@@ -99,16 +99,39 @@ struct ChannelHeaderReadout: Hashable, Sendable {
         modeIsLive = true
     }
 
-    /// The process behind this channel has been replaced — a restart, and a new epoch on the events.
+    /// The process these readbacks were taken from, as the events name it.
     ///
-    /// **The precedence is a claim about one process and it retires with that process.** The live
-    /// mode came from a `system/status` frame the exited engine sent; the replacement mints its own
-    /// handshake and reports nothing until something changes, so a precedence that never reset would
-    /// reject that handshake for ever and the header would show a mode nothing is running. The mode
-    /// itself is left standing rather than blanked: X5's rule is that a readback stands until a
-    /// newer one replaces it, and the next settings poll is what replaces this one.
-    mutating func processReplaced() {
+    /// **On the readout, and not on the subscription that observes it.** A subscription ends when
+    /// the channel archives and a later one starts from nothing, while this readout — and the live
+    /// precedence in it — is what the registry retains across both. An epoch held per subscription
+    /// makes the first event a new subscription sees its own baseline, so a live mode belonging to a
+    /// process that is already gone goes on outranking the replacement's handshake, at the opening
+    /// readback and at every settings poll after it. Recorded beside the mode it is a claim about,
+    /// it outlives the subscription with it.
+    private(set) var processEpoch: ProcessEpoch?
+
+    /// Records the process an event belongs to, and answers whether it is a **newer** one than these
+    /// readbacks were taken from — which is a restart, and the caller's cue to read them again.
+    ///
+    /// **The live precedence is a claim about one process and it retires with that process.** The
+    /// live mode came from a `system/status` frame the exited engine sent; the replacement mints its
+    /// own handshake and reports nothing until something changes, so a precedence that never reset
+    /// would reject that handshake for ever and the header would show a mode nothing is running.
+    ///
+    /// The mode itself is left standing rather than blanked: X5's rule is that a readback stands
+    /// until a newer one replaces it. Clearing the precedence is only half of that, which is why
+    /// this answers rather than returning nothing — a handshake is not a turn end, so a replacement
+    /// that runs no turn would keep the replaced process's mode until one arrives, which on an idle
+    /// channel is never. The reading itself belongs to the caller: it is a round trip, and this is a
+    /// value.
+    ///
+    /// The first epoch seen is a baseline and not a replacement, and the comparison is monotone, so
+    /// a straggler from the process before resets nothing.
+    mutating func observed(epoch: ProcessEpoch) -> Bool {
+        defer { processEpoch = max(processEpoch ?? epoch, epoch) }
+        guard let known = processEpoch, epoch > known else { return false }
         modeIsLive = false
+        return true
     }
 }
 
