@@ -2527,7 +2527,7 @@ C7.6's merge: `LinkTarget.popsOutForNewWindow` (default `true`) lets a target de
 the Browser's `.url` and `.pullRequest` targets do, and `.newWindow` on them opens the system
 browser, the skip taken in `LinkRouter.open` since the host hands `prepare` in before the registry
 resolves; and `PanelTab.makeView(session:context:surface:)` / `PanelHost.view(for:context:surface:)`
-take a `PanelSurface` — `.mainColumn` or `.poppedOutWindow(tab:channel:)` — with no default, because
+take a `PanelSurface` — `.panel` or `.poppedOutWindow(tab:channel:)` — with no default, because
 a tab that owns an `NSView` (the Browser's shared `WKWebView`s) must know which hierarchy is drawing
 it and which of several pop-outs; the web views follow the pop-out and the main column draws a
 "Showing in the Browser window" state with a way back.

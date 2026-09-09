@@ -1014,7 +1014,7 @@ retrospect.
   46 commits). Four `[parent-impact]`s applied: item 3 and W5 gain the browser exception
   with `LinkTarget.popsOutForNewWindow`; W1's `BrowserPanel` row gains `AfleetCore` and
   `SourceControlCore`; X7's `makeView` and `view(for:context:)` take a `PanelSurface`
-  (`.mainColumn` | `.poppedOutWindow(tab:channel:)`), no default, because a tab that owns an
+  (`.panel` | `.poppedOutWindow(tab:channel:)`), no default, because a tab that owns an
   `NSView` must know which hierarchy is drawing it. Advisory overturns: §9.4's quick-open and
   chrome detail as decided (feed limit, substring filter, Enter/Cmd-Enter, no web-search
   fallback); the inspector's mechanism; the URL bar's non-web schemes decided by the one
