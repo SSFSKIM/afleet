@@ -123,22 +123,30 @@ final class PaneSurfaceContainer: NSView {
     /// it exists so "adopting asks for the focus" is an assertion rather than a recollection.
     private(set) var focusHandoffCount = 0
 
-    /// Takes the surface view, from whichever container was holding it. The newest host is the one
-    /// the claim has just been given to, so taking it is what "this host draws the pane" means in
-    /// AppKit terms.
+    /// Takes the surface view, from whichever container was holding it, **and takes the keyboard
+    /// with it**. This is the adoption that answers a person asking for this pane: SwiftUI makes a
+    /// container for it, and a pane the user asked for is a pane they mean to type into.
+    ///
+    /// The two arms below take the same view and leave the keyboard alone, because neither of them
+    /// is a request. A hand-off and a repair happen while the user is somewhere else entirely — the
+    /// composer, most often — and moving the focus there would send the next keystrokes into
+    /// whatever the pane is running.
     func adopt(_ surfaceView: NSView) {
+        adopt(surfaceView, takingFocus: true)
+    }
+
+    private func adopt(_ surfaceView: NSView, takingFocus: Bool) {
         guard surfaceView.superview !== self else { return }
         surfaceView.removeFromSuperview()
         surfaceView.frame = bounds
         surfaceView.autoresizingMask = [.width, .height]
         addSubview(surfaceView)
         Self.record(self, over: surfaceView)
-        // A pane the user asked for is a pane they mean to type into, and the view moving here is
-        // the one moment that fact is knowable: nothing above this sees that the keyboard is still
-        // pointed at whatever it was pointed at before.
+        // The view moving here is the one moment the focus question is knowable: nothing above this
+        // sees that the keyboard is still pointed at whatever it was pointed at before.
         adoptedSurfaceView = surfaceView
-        owesSurfaceFocus = true
-        takeSurfaceFocus()
+        owesSurfaceFocus = takingFocus
+        if takingFocus { takeSurfaceFocus() }
     }
 
     override func viewDidMoveToWindow() {
@@ -161,7 +169,7 @@ final class PaneSurfaceContainer: NSView {
     /// laid out again never pulls it out of a newer one.
     func adoptIfUnheld(_ surfaceView: NSView) {
         guard surfaceView.superview == nil else { return }
-        adopt(surfaceView)
+        adopt(surfaceView, takingFocus: false)
     }
 
     /// Removes the surface view **only if this container is still the one holding it** — the whole
@@ -178,7 +186,7 @@ final class PaneSurfaceContainer: NSView {
         owesSurfaceFocus = false
         adoptedSurfaceView = nil
         Self.forget(self)
-        Self.survivingHost(over: surfaceView)?.adopt(surfaceView)
+        Self.survivingHost(over: surfaceView)?.adopt(surfaceView, takingFocus: false)
     }
 
     /// The newest container other than this one that is standing over `surfaceView`, if any.

@@ -252,6 +252,57 @@ final class PaneViewClaimTests: XCTestCase {
                       "the outgoing host left the pane attached to nothing")
     }
 
+    /// The hand-off is not the user asking for this pane. A pop-out closing while the user is
+    /// typing in the composer moves the surface back to the main window's host, and a host that
+    /// asked for the keyboard on the way in would send the next keystrokes into a live client.
+    ///
+    /// Only the adoption that answers a request for the pane takes the focus; this one takes the
+    /// view and leaves the keyboard exactly where the user put it.
+    func testAHandOffToASurvivingHostLeavesTheKeyboardWhereItWas() {
+        let surface = GhosttyTerminalSurface()
+        let representable = PaneSurfaceView(surface: surface)
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 1_200, height: 700))
+        // Stands for whatever the user is typing in; in the app it is the composer, which this
+        // target may not import.
+        let elsewhere = NSTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 100))
+        let surviving = representable.makeContainer()
+        let outgoing = representable.makeContainer()
+        root.addSubview(elsewhere)
+        root.addSubview(surviving)
+        root.addSubview(outgoing)
+        window = PaneTestChild.window(around: root)
+        window?.makeFirstResponder(elsewhere)
+        XCTAssertTrue(window?.firstResponder === elsewhere, "the test did not begin with the focus elsewhere")
+
+        outgoing.relinquish(surface.view)
+
+        XCTAssertTrue(surface.view.superview === surviving, "the hand-off did not reach the surviving host")
+        XCTAssertTrue(window?.firstResponder === elsewhere,
+                      "the hand-off took the keyboard out of what the user was typing in")
+        XCTAssertEqual(surviving.focusHandoffCount, 0, "handoffs=\(surviving.focusHandoffCount)")
+    }
+
+    /// And the repair arm is not a request either: a host putting back a view nobody holds is
+    /// answering a layout, not a person.
+    func testARepairingHostTakesTheSurfaceAndNotTheKeyboard() {
+        let surface = GhosttyTerminalSurface()
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 1_200, height: 700))
+        let elsewhere = NSTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 100))
+        let container = PaneSurfaceContainer(frame: NSRect(x: 0, y: 100, width: 600, height: 400))
+        root.addSubview(elsewhere)
+        root.addSubview(container)
+        window = PaneTestChild.window(around: root)
+        window?.makeFirstResponder(elsewhere)
+        XCTAssertTrue(window?.firstResponder === elsewhere, "the test did not begin with the focus elsewhere")
+
+        container.adoptIfUnheld(surface.view)
+
+        XCTAssertTrue(surface.view.superview === container, "the repair arm did not take the unheld view")
+        XCTAssertTrue(window?.firstResponder === elsewhere,
+                      "a host repairing an unheld view took the keyboard with it")
+        XCTAssertEqual(container.focusHandoffCount, 0, "handoffs=\(container.focusHandoffCount)")
+    }
+
     /// A container that has lost the surface to a newer host removes nothing when it goes away,
     /// and a host mounted while nobody holds the view takes it back.
     func testAContainerRemovesOnlyAViewItStillHoldsAndRepairsAnUnheldOne() {
