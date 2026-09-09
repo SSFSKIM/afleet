@@ -63,6 +63,23 @@ struct ReadbackPoller {
         return false
     }
 
+    /// The process an event belongs to, and nil for the three that name a request rather than a
+    /// process.
+    ///
+    /// A restart replaces the process under a channel model that outlives it, and the epoch is the
+    /// engine-side statement that it happened — carried on the handshake, on the exit and on every
+    /// frame in between, so a reader does not have to catch one particular event to notice.
+    static func epoch(of event: WireEvent) -> ProcessEpoch? {
+        switch event {
+        case .handshakeCompleted(_, let epoch), .sessionIdentityResolved(_, let epoch),
+             .frame(_, let epoch), .requestCancelled(_, let epoch), .hostToolInvoked(_, let epoch),
+             .stderr(_, let epoch), .exited(_, let epoch):
+            epoch
+        case .request, .policyAnswered, .unansweredDialog:
+            nil
+        }
+    }
+
     /// The permission mode a `system/status` frame reported, or nil for a frame that reports none
     /// (child spec §10, corrected 2026-09-09).
     ///

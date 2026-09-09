@@ -61,6 +61,15 @@ struct ChannelHeaderReadout: Hashable, Sendable {
     /// `result` frame and never on a timer.
     var context: ContextUsage?
 
+    /// Parity §41.8's `autoScrollEnabled`, from the answer's `effective` map — the merged settings
+    /// files, which is where the reader's own preference lives. True until an answer says otherwise,
+    /// which is both the engine's default and what its own renderer does.
+    var autoScrollEnabled = true
+
+    /// Parity §41.17's `syntaxHighlightingDisabled`, inverted so the field reads as what it does. It
+    /// is an accessibility choice for some readers rather than a debug switch, so it is honoured.
+    var syntaxHighlightingEnabled = true
+
     /// True while the engine has answered nothing at all. What an archived channel looks like: the
     /// branch alone.
     var isEngineSilent: Bool { model == nil && mode == nil && effort == nil && context == nil }
@@ -70,6 +79,10 @@ struct ChannelHeaderReadout: Hashable, Sendable {
     mutating func apply(_ settings: SettingsReadback) {
         model = settings.model
         effort = settings.effort
+        // Whole-value for the same reason as the two above: `effective` is the merged settings
+        // files, so a key no file sets is absent, and absent means the engine's own default.
+        autoScrollEnabled = settings.autoScrollEnabled ?? true
+        syntaxHighlightingEnabled = settings.syntaxHighlightingEnabled ?? true
         // The mode comes from a second report, and a channel whose retained handshake is not
         // available yet must not blank a mode an earlier one gave. Nor may the handshake — which is
         // minted once per process — overwrite a mode a `system/status` frame has since reported.
@@ -85,6 +98,18 @@ struct ChannelHeaderReadout: Hashable, Sendable {
         self.mode = mode
         modeIsLive = true
     }
+
+    /// The process behind this channel has been replaced — a restart, and a new epoch on the events.
+    ///
+    /// **The precedence is a claim about one process and it retires with that process.** The live
+    /// mode came from a `system/status` frame the exited engine sent; the replacement mints its own
+    /// handshake and reports nothing until something changes, so a precedence that never reset would
+    /// reject that handshake for ever and the header would show a mode nothing is running. The mode
+    /// itself is left standing rather than blanked: X5's rule is that a readback stands until a
+    /// newer one replaces it, and the next settings poll is what replaces this one.
+    mutating func processReplaced() {
+        modeIsLive = false
+    }
 }
 
 // MARK: - The `get_settings` answer
@@ -98,6 +123,12 @@ struct SettingsReadback: Hashable, Sendable {
     var effort: String?
     var mode: PermissionMode?
 
+    /// The two rendering preferences the answer's `effective` map carries. Optional, because absent
+    /// is a real answer — no settings file sets the key — and it is the caller that knows what the
+    /// engine's default for each one is.
+    var autoScrollEnabled: Bool?
+    var syntaxHighlightingEnabled: Bool?
+
     /// `answer` is the `get_settings` body; `handshake` is the channel's retained
     /// `InitializeResponse`, and nil when the fleet has none for this channel.
     init(answer: JSONValue, handshake: InitializeResponse?) {
@@ -106,8 +137,15 @@ struct SettingsReadback: Hashable, Sendable {
         // `applied.effort` is the effort the engine resolved and the value `Readback.verify`
         // compares a restart against; `effective.effortLevel` is the flag setting a host applied,
         // which is the only one of the two `control-shapes` carries after an `apply_flag_settings`.
-        effort = applied?["effort"]?.stringValue ?? answer["effective"]?["effortLevel"]?.stringValue
+        let effective = answer["effective"]
+        effort = applied?["effort"]?.stringValue ?? effective?["effortLevel"]?.stringValue
         mode = handshake?.currentPermissionMode
+        // Both are settings-file keys, so both are read off `effective` and neither is in `applied`:
+        // `autoScrollEnabled` is in the live answer's key list, and `syntaxHighlightingDisabled` is
+        // settings-file-only (parity §41.17). Read as what each key states, and inverted here rather
+        // than at the reader, so nothing downstream has to remember which way round the name runs.
+        autoScrollEnabled = effective?["autoScrollEnabled"]?.boolValue
+        syntaxHighlightingEnabled = effective?["syntaxHighlightingDisabled"]?.boolValue.map { !$0 }
     }
 }
 

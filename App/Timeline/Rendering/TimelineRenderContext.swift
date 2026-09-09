@@ -81,6 +81,17 @@ struct TimelineRenderContext {
     /// no action rather than offering one that goes nowhere.
     let lifecycle: (any LifecycleAPI)?
 
+    /// Whether this channel is one afleet may act on — C5's `ChannelRow.offersOwnedActions`, the
+    /// gate tracker 74 puts on every owned action and the one the composer mount already asks.
+    ///
+    /// **Separate from `lifecycle`, because they answer different questions.** The lifecycle is
+    /// *what* a request would leave by; this is whether the channel is ours to send one on at all. A
+    /// colleague's transcript is read out of a file and draws the same rows the owner's does —
+    /// including a task that was running when the file was written — so without this gate a row
+    /// offers an action X5 refuses as `notOwned` after it has been pressed. An affordance that is
+    /// there, does nothing, and explains itself only afterwards is the failure Y7 is about.
+    let isOwned: Bool
+
     /// Where a resolved refusal dialog's retracted uuids go, and what the list filters through
     /// before it draws (spec D11).
     ///
@@ -185,9 +196,14 @@ extension TimelineRenderContext {
     /// half and the preview, and the fold's mirror is inside the ingestion. So the card offers
     /// *Stop*, which reads the item's own status, and never offers the backgrounding action.
     /// Tracker 321.
+    ///
+    /// **Gated on the channel as well as on the process.** `TaskCardModel.offersStop` reads the
+    /// item's status alone, and a `taskRun` item is read out of the transcript — so a colleague's
+    /// session shows a running task as readily as ours does. Nil for a channel afleet does not own,
+    /// and the row then draws its reading, which is exactly what it draws for an archived one.
     @MainActor
     func makeTaskCard(_ item: TaskRunItem) -> TaskCardModel? {
-        guard let lifecycle else { return nil }
+        guard isOwned, let lifecycle else { return nil }
         return TaskCardModel(item: item, registry: RegistryMirror(), lifecycle: lifecycle, channel: key)
     }
 }

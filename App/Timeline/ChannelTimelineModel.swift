@@ -167,6 +167,16 @@ final class ChannelTimelineModel {
     /// app made — see `ChannelHeaderReadout`.
     private(set) var readout = ChannelHeaderReadout()
 
+    /// What a settled refusal dialog took back on this channel (spec D11), and what the list filters
+    /// through before it draws.
+    ///
+    /// **On the model and not in the list's `@State`.** The column keys the timeline view by the
+    /// channel, so a switch away and back destroys the view value and builds a fresh one — while
+    /// this model, and the unfiltered items in it, are exactly what the registry retains. A registry
+    /// rebuilt with the view is empty, so every message a resolved dialog took back comes back on
+    /// screen and stays back: the dialog is settled, and nothing will retract them a second time.
+    @ObservationIgnored let retraction = RetractionRegistry()
+
     /// True once `open(_:)` has driven the ingestion; a channel switch away and back does not
     /// restart it, which is what the registry retains this object for.
     private(set) var hasOpened = false
@@ -304,10 +314,26 @@ final class ChannelTimelineModel {
         guard readbacksWanted, readbackTask == nil, !isTerminated, poller != nil, let lifecycle else { return }
         let key = key
         readbackTask = Task { @MainActor [weak self] in
+            // **Subscribed before the opening readback is taken, and not after it.** `events(of:)`
+            // registers a future-only fan-out — which is why `engineReports(of:)` exists at all —
+            // and the readback below is a round trip to a process that may be mid-turn. A mode
+            // change reported inside that window reaches whoever is listening at the time and is
+            // never reissued, so a subscription taken afterwards loses it and the header shows the
+            // launch mode until the next change, which on a quiet channel is never.
+            let stream = await lifecycle.events(of: key)
             await self?.refreshReadbacks()
-            guard let stream = await lifecycle.events(of: key) else { self?.readbackTask = nil; return }
+            guard let stream else { self?.readbackTask = nil; return }
+            // The epoch the events belong to. A restart replaces the process under a channel this
+            // model outlives, and the mode a status frame reported belongs to the process that
+            // reported it: the precedence resets with the process, or the replacement's handshake is
+            // rejected for ever. Monotone, so a straggler from the old process resets nothing.
+            var epoch: ProcessEpoch?
             for await event in stream {
                 guard let self, !self.isTerminated else { return }
+                if let seen = ReadbackPoller.epoch(of: event) {
+                    if let epoch, seen > epoch { self.readout.processReplaced() }
+                    epoch = max(epoch ?? seen, seen)
+                }
                 if let mode = ReadbackPoller.liveMode(event) { self.readout.apply(liveMode: mode) }
                 guard ReadbackPoller.isTurnEnd(event) else { continue }
                 await self.refreshReadbacks()

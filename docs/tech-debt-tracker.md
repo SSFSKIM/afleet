@@ -1816,7 +1816,11 @@ numbered from 321. Nothing above is renumbered.
      at C6.1 Task 2. Closers, in order of preference: estimate a height from the item's own shape
      and correct it when the row is first hosted, which is what a cheap row-height estimator buys;
      or measure with a single reused hosting view rather than a fresh one per row. Owner: C6.1, at
-     Task 5's measurement pass, if the number turns out to matter.
+     Task 5's measurement pass, if the number turns out to matter. Round 1 (scalpel-4 #1) sharpens
+     the same entry: the delegate builds and measures an `NSHostingView` on the main actor for every
+     uncached row, offscreen ones included, so a cold load pays for the whole document before it
+     draws a line, and the warm-up path skips item-backed rows entirely — closer unchanged, measure
+     only what the viewport needs and estimate the rest.
 
 133. **A timeline mounted without `AppModel` in the environment draws rows with no capabilities and
      says nothing.** `TimelineListView` reads `@Environment(AppModel.self)` and builds
@@ -2700,3 +2704,13 @@ C6.1's and C6.2's reservations and is expected.
      is correct for both — neither is drawing text that is still arriving, and the streaming preview
      beside them is the one caller that must keep the boundary rule. Owner: C6.1, in the file that
      owns the controller.
+332. **A decision card on a channel afleet does not own still offers its answers.** Round 1's
+     scalpel-3 #2 closed the task card's *Stop* by gating `TimelineRenderContext.makeTaskCard` on
+     C5's listing policy; `makeAnswering` is not gated the same way, so a `pending` decision item on
+     a read-only or foreign channel would draw answerable buttons whose `LifecycleAction.answer`
+     X5 refuses as `notOwned`. It is filed rather than fixed because no surface can currently reach
+     it: a pending decision enters the overlay through this app's *own* control channel, and a
+     channel afleet does not own has none — an item read out of a foreign transcript settles as
+     answered or, under D12, `.inert`. Found at C6.1's round-1 fix wave. Closer: the same
+     `isOwned` gate on `makeAnswering`, taken together with whatever C6.3 concludes about a decision
+     item's state on a channel with no live overlay. Owner: C6.1 with C6.3.

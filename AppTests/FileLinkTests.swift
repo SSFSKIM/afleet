@@ -62,6 +62,59 @@ final class FileLinkTests: XCTestCase {
                        "\(opened.count) link(s) reached the router and not all were file links")
     }
 
+    // MARK: - The channel's directory (round 1, scalpel-3 #5)
+
+    /// **A relative path opens under the channel's own working directory**, never under whatever
+    /// directory the app process happens to be running in.
+    ///
+    /// The engine writes relative paths into tool inputs — `Edit` and `Read` carry whatever the
+    /// model typed — and `TimelineRenderContext.cwd` is the channel's own directory precisely so
+    /// that they can be resolved. `open` ignored it, so `realpath`/`URL(filePath:)` resolved against
+    /// the test runner's directory and the link named a file in a different project, or none.
+    ///
+    /// Both arms, because either alone proves nothing: a relative path lands under the channel's
+    /// directory, and an absolute one is untouched by it. The third arm is the rule the context's
+    /// own documentation states: with no directory to resolve against, a relative path is not
+    /// resolved at all rather than resolved somewhere else. Every path here is invented and under
+    /// the process's temporary tree (X9), and no assertion prints one (§11).
+    func testARelativePathResolvesAgainstTheChannelsDirectory() async throws {
+        let temp = try TempTree()
+        let project = try temp.directory("an-invented-project")
+        let router = RecordingLinkRouter()
+        let context = InventedItems.context(links: router, cwd: project)
+
+        FileLink.open("notes/an-invented-file.txt", line: 7, in: context)
+        try await Self.settle(router, until: 1)
+        var opened = await router.opened
+        guard case .file(let relative, let line)? = opened.first else {
+            return XCTFail("the relative path produced \(opened.count) link(s) and none of them a file link")
+        }
+        XCTAssertEqual(line, 7, "the link's line reads \(line.map(String.init) ?? "none")")
+        XCTAssertTrue(relative.path.hasPrefix(project.path + "/"),
+                      "the relative link resolved outside the channel's own directory")
+        XCTAssertEqual(relative.lastPathComponent, "an-invented-file.txt",
+                       "the resolved link names a different file")
+
+        // The floor: an absolute path is not re-rooted under the channel's directory.
+        let absolute = temp.root.appending(path: "elsewhere/an-invented-file.txt")
+        FileLink.open(absolute.path, line: nil, in: context)
+        try await Self.settle(router, until: 2)
+        opened = await router.opened
+        guard case .file(let unchanged, _)? = opened.last else {
+            return XCTFail("the absolute path produced \(opened.count) link(s) and the last is not a file link")
+        }
+        XCTAssertFalse(unchanged.path.hasPrefix(project.path + "/"),
+                       "an absolute path was re-rooted under the channel's directory")
+
+        // A channel the index has no directory for: nothing is opened, rather than something else.
+        let homeless = InventedItems.context(links: router)
+        FileLink.open("notes/an-invented-file.txt", line: nil, in: homeless)
+        for _ in 0..<20 { await Task.yield() }
+        let count = await router.opened.count
+        XCTAssertEqual(count, 2,
+                       "\(count) link(s) reached the router, so a relative path with no directory opened something")
+    }
+
     // MARK: - Helpers
 
     private static func line(of link: WorkspaceLink?) -> Int? {

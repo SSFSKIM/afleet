@@ -190,6 +190,45 @@ final class RenderContextMountTests: XCTestCase {
                       "the row the dialog never named was dropped along with the one it did")
     }
 
+    // MARK: - D11's filter, across a channel switch (round 1, sweep #5)
+
+    /// **What a settled dialog took back stays off the screen after a channel switch.**
+    ///
+    /// The column keys the timeline by the channel, so switching away and back destroys the view
+    /// value and builds a fresh one over the **retained** model — that is what
+    /// `ChannelTimelineRegistry` holds a model for. A registry held in the view's `@State` is built
+    /// again with it, empty, while the model's unfiltered items are still there, so every retracted
+    /// message comes back on screen and stays back: the dialog is resolved and nothing will ever
+    /// retract them again.
+    ///
+    /// Two view values over one registry's model is exactly that switch. Discriminating: against a
+    /// view-owned registry the second mount draws both rows.
+    func testTheRetractionSurvivesAChannelSwitch() async throws {
+        let card = try Self.refusalDialogCard()
+        let retracted = try XCTUnwrap(card.refusalFallback?.retractedMessageUUIDs.first,
+                                      "the recorded refusal dialog retracts nothing, so there is nothing to filter")
+        let doomed = TimelineRow(.assistantMessage(Self.assistant(key: retracted)))
+        let kept = TimelineRow(.assistantMessage(Self.assistant(key: "invented-kept-message-2")))
+
+        let app = AppModel(registry: RowRegistry())
+        let key = Self.channel
+        // The first visit. The registry builds the channel's model and the column mounts a list
+        // over it; the card's answer settles into whatever registry that mount injected.
+        let first = TimelineListView(model: app.timelines.model(for: key))
+        let before = TimelineListView.retained([doomed, kept], by: first.context(in: app).retraction)
+        XCTAssertEqual(before.count, 2, "\(before.count) row(s) drawn before the dialog settled, not 2")
+        first.context(in: app).retraction.resolved(card, in: key)
+
+        // Away, and back: the model is the retained one, the view value is new.
+        let second = TimelineListView(model: app.timelines.model(for: key))
+        let drawn = TimelineListView.retained([doomed, kept], by: second.context(in: app).retraction)
+
+        XCTAssertEqual(drawn.count, 1,
+                       "\(drawn.count) row(s) survived the retraction after a channel switch, not 1")
+        XCTAssertFalse(drawn.contains { $0.id.key == doomed.id.key },
+                       "the row a settled dialog took back came back on the second visit")
+    }
+
     // MARK: - Support
 
     /// A config home this suite never writes to, for the items it invents. The rig below builds its

@@ -190,6 +190,10 @@ enum InventedItems {
 
 
     /// A render context whose capabilities are the doubles a test hands it.
+    ///
+    /// `isOwned` defaults to true because a test that says nothing about it is drawing the ordinary
+    /// case, a channel of this app's own. The gate itself is asserted against the real construction
+    /// site, which is the only place the listing policy can be read.
     @MainActor
     static func context(links: any LinkRouterCapability = RecordingLinkRouter(),
                         agents: any AgentNavigating = NoAgentNavigation(),
@@ -200,6 +204,7 @@ enum InventedItems {
                         signal: @escaping @Sendable (HostSignal) async -> Void = { _ in },
                         decisions: DecisionReservations = DecisionReservations(),
                         lifecycle: (any LifecycleAPI)? = nil,
+                        isOwned: Bool = true,
                         retraction: RetractionRegistry = RetractionRegistry(),
                         cwd: URL? = nil,
                         key: ChannelKey? = nil) -> TimelineRenderContext {
@@ -208,6 +213,7 @@ enum InventedItems {
                               signal: signal,
                               decisions: decisions,
                               lifecycle: lifecycle,
+                              isOwned: isOwned,
                               retraction: retraction,
                               cwd: cwd,
                               agents: agents,
