@@ -56,6 +56,14 @@ public struct BufferState: Sendable {
     /// The file this buffer holds. An event, a reply or a capture naming another one is not about
     /// this buffer and changes nothing in it.
     public let path: String
+    /// This open of the file, minted here and never carried across one.
+    ///
+    /// A buffer starts at revision zero every time, `close` keeps the requests it retired and a
+    /// stash reply is recorded even when its request is retired — so a reply from a path's
+    /// *previous* open matched the path and the revision of the buffer that had replaced it, and
+    /// put a closed lifetime's text into the new one. A reply carries the lifetime it was issued
+    /// under, and a previous lifetime's reply matches nothing.
+    let lifetime = UUID()
     public private(set) var text: String
     /// The bytes the text was read from, and `nil` for a file that was never read.
     private(set) var lastLoaded: FileSnapshot?
@@ -145,8 +153,10 @@ public struct BufferState: Sendable {
     /// older window's late answer replaced the capture the newer one had just given.
     @discardableResult
     mutating func capture(text: String, for path: String, from surface: SurfaceID,
-                          expecting revision: Int) -> Bool {
-        guard path == self.path, revision == self.revision else { return false }
+                          expecting revision: Int, lifetime: UUID) -> Bool {
+        guard path == self.path, revision == self.revision, lifetime == self.lifetime else {
+            return false
+        }
         self.revision += 1
         self.text = text
         editorReportsDirty = false
@@ -405,6 +415,9 @@ public final class FilesPanelSession: PanelTabSession {
         /// The buffer as it stood when the request went out. A capture is against that buffer and
         /// no later one.
         let revision: Int
+        /// The open of the file the request was issued under. A reply from a previous one is
+        /// about a buffer that no longer exists, whatever its path and revision say.
+        let lifetime: UUID?
         /// The surface the request went to, which is the only one that may answer it. An identity
         /// and not a reference: a weak surface reads `nil` once its window has gone, and `nil`
         /// compared equal to every other surface's reply — an expired request on a closed window
@@ -1185,8 +1198,10 @@ public final class FilesPanelSession: PanelTabSession {
         while bufferRequests.count > 32, let stale = bufferRequests.firstIndex(where: \.isRetired) {
             bufferRequests.remove(at: stale)
         }
-        let revision = openFiles.first { $0.path == path }?.buffer.revision ?? 0
-        bufferRequests.append(BufferRequest(id: id, kind: kind, path: path, revision: revision,
+        let buffer = openFiles.first { $0.path == path }?.buffer
+        bufferRequests.append(BufferRequest(id: id, kind: kind, path: path,
+                                            revision: buffer?.revision ?? 0,
+                                            lifetime: buffer?.lifetime,
                                             surface: target.id, generation: presentation))
         Task { [weak self, stashTimeout] in
             try? await Task.sleep(for: stashTimeout)
@@ -1215,10 +1230,11 @@ public final class FilesPanelSession: PanelTabSession {
 
     /// Records the buffer the editor answered a stash with, on the buffer that **names that path**
     /// and on no other.
-    private func stash(path: String, text: String, from surface: SurfaceID, revision: Int) {
-        guard let index = openFiles.firstIndex(where: { $0.path == path }),
+    private func stash(path: String, text: String, from surface: SurfaceID, revision: Int,
+                       lifetime: UUID?) {
+        guard let lifetime, let index = openFiles.firstIndex(where: { $0.path == path }),
               openFiles[index].buffer.capture(text: text, for: path, from: surface,
-                                              expecting: revision)
+                                              expecting: revision, lifetime: lifetime)
         else { return }
         // A capture from a window that is not here any more is the last thing that window held,
         // and nothing has drawn it: the windows that are still here are showing what they were
@@ -1638,7 +1654,8 @@ public final class FilesPanelSession: PanelTabSession {
                 // that names this path exactly what the editor holds for it, which nothing that
                 // happened elsewhere makes wrong. What it may not do is resume a waiter that is
                 // not the one it belongs to, and the id is what says so.
-                stash(path: path, text: text, from: surface, revision: request.revision)
+                stash(path: path, text: text, from: surface, revision: request.revision,
+                      lifetime: request.lifetime)
                 finishStash(request.id, captured: true)
             case .refusalOnly:
                 break

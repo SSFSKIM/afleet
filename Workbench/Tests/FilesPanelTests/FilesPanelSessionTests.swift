@@ -2218,6 +2218,35 @@ final class FilesPanelSessionTests: XCTestCase {
                        "a window that never held the buffer answered for it")
     }
 
+    // MARK: - 52. a reopened buffer is not the one that was closed
+
+    /// Every buffer starts at revision zero, `close` keeps its retired requests and a stash reply
+    /// is recorded even when retired — so a reply from a path's previous open matched the path and
+    /// the revision of the buffer that had just replaced it.
+    func testAStashFromAPreviousOpenOfThePathDoesNotReplaceTheReopenedBuffer() async throws {
+        let file = try tree.file("reopened.swift", "on disk\n")
+        let other = try tree.file("other.swift", "two\n")
+        let harness = try makeHarness(stashTimeout: .milliseconds(50))
+        await harness.session.openFile(at: file, line: nil)
+        await harness.session.openFile(at: other, line: nil)
+        await harness.session.select(file)
+        let path = file.path(percentEncoded: false)
+
+        harness.surface.type("edits from the first open\n")
+        harness.surface.deliver(.dirty(path: path, isDirty: true))
+        await harness.session.select(other)
+        XCTAssertEqual(harness.session.issue, .editorDidNotAnswer)
+
+        await harness.session.close(file)
+        await harness.session.openFile(at: file, line: nil)
+
+        harness.surface.deliver(.saveRequested(path: path, text: "edits from the first open\n"))
+
+        XCTAssertEqual(harness.session.selected?.text, "on disk\n",
+                       "a reply from the buffer's previous lifetime was recorded on the new one")
+        XCTAssertEqual(harness.session.selected?.isDirty, false)
+    }
+
     // MARK: - Harness
 
     /// A session and the recorder it drives, held together so a test cannot let the session go by
