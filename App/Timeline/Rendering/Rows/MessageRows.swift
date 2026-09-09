@@ -133,6 +133,14 @@ struct UserMessageBody: View {
             .buttonStyle(.link)
             .font(.caption2)
         }
+        // **Y8.** A message the Agents panel sent as a relay draws what became of it, on the row
+        // that sent it: *Pending*, *Relayed*, *Delivered*, or one of item 51's four *Not delivered*
+        // arms with the model's reply and a *Retry*. A message that sent no relay reads nil and
+        // draws nothing extra — which is every ordinary message in every channel, so the channel
+        // column is untouched wherever this never happened.
+        if let reading = context?.relay.reading(of: item.promptUUID) {
+            AgentRelayNote(reading: reading)
+        }
         // **Y6 site 2.** One note, beside the one message it is about.
         if let note = ComposerSites.note(for: item, in: context) {
             Text(note)

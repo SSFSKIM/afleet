@@ -25,18 +25,39 @@ final class AgentNavigator: AgentNavigating {
     /// Brings the Agents tab forward — `PanelHostModel.select(.agents)`.
     private let selectTab: @MainActor () -> Void
     private let selection: AgentSelectionStore
+    /// Contract Y8's model side, as the timeline's row reaches it. App-scoped and handed in, never
+    /// constructed here: the same registry the Agents tab writes when the user sends.
+    private let relay: AgentRelayRegistry?
+    /// How this object reads a channel's fold — a closure over the app's one
+    /// `ChannelTimelineRegistry`, `AgentsModel.TimelineReach`'s shape and for its reason. The
+    /// delivery state is *derived* from the channel's published timeline on every ask, so the
+    /// reading a row draws cannot drift from the frames it was concluded from.
+    private let timelines: AgentsModel.TimelineReach?
 
     init(selection: AgentSelectionStore,
          focusChannel: @escaping @MainActor (ChannelKey) -> Void,
-         selectTab: @escaping @MainActor () -> Void) {
+         selectTab: @escaping @MainActor () -> Void,
+         relay: AgentRelayRegistry? = nil,
+         timelines: AgentsModel.TimelineReach? = nil) {
         self.selection = selection
         self.focusChannel = focusChannel
         self.selectTab = selectTab
+        self.relay = relay
+        self.timelines = timelines
     }
 
     func show(run: AgentRunID, in key: ChannelKey) {
         focusChannel(key)
         selectTab()
         selection.select(run, in: key)
+    }
+
+    /// Contract Y8: the delivery state of one sent message, keyed by the uuid `sendPrompt` minted.
+    ///
+    /// Nil where nothing was relayed under that uuid, and nil where this navigator was built without
+    /// a registry or a fold to read — both of which are "no record" rather than "delivered".
+    func relay(forPrompt promptUUID: String, in key: ChannelKey) -> AgentRelayReading? {
+        guard let relay, let timelines else { return nil }
+        return relay.reading(forPrompt: promptUUID, in: key, of: timelines(key) ?? ChannelTimeline())
     }
 }

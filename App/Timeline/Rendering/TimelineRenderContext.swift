@@ -171,6 +171,45 @@ struct TimelineRenderContext {
     var authorship: TimelineAuthorship?
 }
 
+// MARK: - Contract Y8 — a relayed message's delivery state, on the row that sent it
+
+extension TimelineRenderContext {
+
+    /// **Contract Y8's reader**, keyed by the sent message's identity — the prompt uuid
+    /// `LifecycleAPI.sendPrompt` minted, which is what a `userMessage` row carries as its
+    /// `promptUUID` (root §8.8, acceptance item 51).
+    ///
+    /// *Send message* on an agent node is an ordinary main-session prompt, so it lands in the main
+    /// timeline as a plain user message, and item 51 says the message "appears in the main timeline
+    /// with its state". The state is not on the item and cannot be — no engine frame carries it, and
+    /// §7.3 forbids this leaf a reducer — so it is host bookkeeping the row reads through here.
+    ///
+    /// **A reading through the Agents seam this context already holds, rather than a stored field.**
+    /// A stored field is one every construction site must remember to fill, and a site that forgot
+    /// it would leave the *Retry* reachable only by opening another tab — which is the silent
+    /// non-delivery item 51 exists to prevent, reintroduced by an unassigned capability. Y7's rule is
+    /// that a capability nobody assigns is the failure these contracts are for; deriving it from
+    /// `agents` leaves nothing to assign.
+    var relay: AgentRelayReader { AgentRelayReader(agents: agents, channel: key) }
+}
+
+/// Y8's reader: one prompt uuid in, one reading out, and nothing else.
+///
+/// It carries no message text and no run id (§11), and it answers nil for every message that sent no
+/// relay — which is every ordinary message in every channel, and is why the row it decorates draws
+/// nothing extra where there is no record.
+struct AgentRelayReader {
+
+    let agents: any AgentNavigating
+    let channel: ChannelKey
+
+    @MainActor
+    func reading(of promptUUID: String) -> AgentRelayReading? {
+        guard !promptUUID.isEmpty else { return nil }
+        return agents.relay(forPrompt: promptUUID, in: channel)
+    }
+}
+
 /// Who a surface's assistant messages are by, and on which model (root §8.8, item 38).
 ///
 /// Two strings and nothing else: the fields a row's frame already draws. It carries no run id, no
