@@ -69,6 +69,12 @@ not renumber anything above.
     and identical on the corpus; they diverge only for a depth-2 node no source answered for,
     which surfaces as a root instead of vanishing. C6 reads `roots` and must be told at
     recomposition. Owner: C3 (whole-branch review). Closer: decide which reading C6 needs.
+    **Answered 2026-09-09 by C6.4, which is the C6 surface that reads it.** C6.4 takes `roots` as
+    it stands (`parent == nil`). A depth-2 node no source answered for should surface at the top
+    level, visible and openable with its depth drawn, rather than being filtered out of a tree
+    that draws only depth-1 roots: an orphan the user can open is the truth, and an orphan that
+    vanishes is not. `AgentRunReadTests.testAnOrphanSurfacesAsARootWithItsDepthDrawn` pins it from
+    the consumer's side. No change to `roots` is wanted; this entry closes.
 14. **Incremental reduction in `StreamIngestion.publish`.** `publish`
     (`FleetKit/Sources/FleetTimeline/Ingest/StreamIngestion.swift:884`) recomputes the whole
     projection through `recompute()` (`:858`) once per applied frame, so draining N buffered
@@ -3318,3 +3324,62 @@ them), four new below. Numbers 384–393 are C7.4's; C6.1 continues from 394.
     rechecking a live channel, so readbacks stop for good on that channel. The existing test masks it
     by calling `startReadbacks` repeatedly. Re-check liveness when the task ends. First corrective
     after the merge (C6 recomposition). Round 3 scalpel-5#4.
+
+## From C6.4 (`child/c6-agents`)
+
+Entries **172 through 186** are C6.4's, as the C6 composite's leaf table allots them, with
+**398 through 405** held in reserve (allotted at this child's gate) if the parent-impact work
+needs more. Nothing above is renumbered.
+
+172. **`ChannelTimeline.agents` is never nil for an opened channel, so a file-only channel is
+     told it has no agent runs.** `StreamIngestion.agents` is documented "nil for good on a
+     file-only channel: no wire means no fold, so no tree"
+     (`FleetKit/Sources/FleetTimeline/Ingest/StreamIngestion.swift:154–155`), and X4's
+     2026-09-08 amendment says the same. Neither is true: `open` assigns
+     `wire = WireReducer(stream:slug:)` unconditionally (`:247`), and
+     `ChannelTimelineModel.performOpen` hands an archived or foreign channel
+     `Self.finishedEvents()` rather than no stream at all
+     (`App/Timeline/ChannelTimelineModel.swift:470`), so `agents` is a **non-nil empty tree**
+     for every channel afleet opens from disk. The consequence is a false sentence to the user:
+     C6.4's Agents tab distinguishes "no runs in this channel" from "this channel has no wire,
+     so the runs are not visible" (spec D10) and today only the first is reachable, so an
+     archived session with a dozen recorded subagent runs reads *No agent runs in this channel.*
+     Found at C6.4 Task 1 by measuring the value rather than reading the comment;
+     `AppTests/AgentChipTests` did not catch it because it constructs `agents: nil` by hand.
+     C6.4 kept the honest three-state read and asserted the no-wire arm over the value the read
+     is defined on, rather than asserting the defect. Closer: the C3 corrective already
+     dispatched for tracker 187 should make the value truthful either way — a file-only channel
+     gets a tree fed from its `.meta.json` sidecars, or `agents` is nil when nothing feeds it —
+     and whichever it chooses, the doc comment and X4's amendment are corrected to match. Owner:
+     C3, in the same corrective. Raised by C6.4 Task 1.
+
+173. **C3's `isParked` and §8.8's parking sentence are two different readings, and only one is
+     computable.** `AgentRunTree.isParked(_:)`
+     (`FleetKit/Sources/FleetTimeline/Agents/AgentRunTree.swift:194`) is "this node is not
+     running and some child is". §8.8 and the parity map's §18.23.3 say parking is "an agent that
+     finished but holds children — completed children under a node with **no
+     `task_notification`**", detected by "completed children but no notification". The tree
+     carries no notified bit: `notified` is a `RegistryEntry` field
+     (`Registry/RegistryMirror.swift:27`) and the mirror is not published on `ChannelTimeline`
+     (tracker 321). The two readings agree while a child still runs and diverge exactly at the
+     tail — a node whose children have all settled and whose notification has not arrived, which
+     §8.8 calls parked and `isParked` calls finished. C6.4 draws C3's reading, because it is the
+     one the data supports and it catches the case the user cares about (a node that looks
+     finished while work continues under it), and files the tail rather than approximating it.
+     `isParked` had no caller anywhere in the tree before C6.4. Closer: once the mirror is
+     published, add the notification arm and decide whether `isParked` becomes the union of the
+     two or stays the live reading with a second query beside it. Owner: C3 for the definition,
+     C6.4's successor for the drawn state. Raised by C6.4 Task 1.
+
+174. **`.agents` needed a once-per-process registration guard that no other tab's registration
+     documents.** `AppModel.launch()` runs again on *Check again*, and `PanelHost.register` traps
+     on a duplicate — so a plain `try panels.register(AgentsTab(...))` in `performLaunch` takes
+     the app down on the second launch. Found the hard way: the full floor crashed the app test
+     bundle with a fatal error during a second-launch test. The Browser's registration sits in
+     `init` and cannot hit this; the Thread tab's is a handover, whose `unregister` makes the
+     second pass idempotent by accident rather than by design. C6.4 guards the tab, the
+     `agentNavigation` install and the link-target registration together. Closer: the guard is a
+     property of "registered in `performLaunch`", not of this tab, so the next child that
+     registers there will rediscover it — name the rule where Y3 is stated rather than in three
+     tabs' comments. Owner: the C6 composite (Y3's wording). Raised by C6.4 Task 2.
+
