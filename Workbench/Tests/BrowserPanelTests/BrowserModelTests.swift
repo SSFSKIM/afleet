@@ -673,6 +673,44 @@ final class BrowserModelTests: XCTestCase {
                        "the document a quit left behind is \(String(describing: document?.tabs.map(\.url)))")
     }
 
+    /// **A mutation the panel accepted before the barrier is persisted by the drain that follows
+    /// it** (scalpel-1#1).
+    ///
+    /// The gate is what decides whether a mutation was accepted: `gated` refuses once `isClosed` is
+    /// set, and everything already queued behind the restoration was accepted before it. Those
+    /// operations still *run* — the drain awaits the gate chain, which is the point of D57 — and
+    /// they changed memory; but `commit` read the same closed flag and dropped the structural
+    /// snapshot, so the drain wrote out a document without the tab the user had opened. The barrier
+    /// is about what arrives after the close, not about what the close is draining.
+    func testAMutationAcceptedBeforeTheQuitBarrierIsPersistedByTheDrain() async throws {
+        let backing = InMemoryScopedStore()
+        await backing.holdReads()
+        let (model, _, _) = await makeModel(store: backing, restored: false)
+
+        let restoring = Task { await model.restore() }
+        let reading = expectation(description: "the restore reached the store")
+        await backing.expectReadArrival(reading)
+        await fulfillment(of: [reading], timeout: Self.webDeadline)
+
+        // Accepted: the gate is open to it, and it queues behind the read.
+        let accepted = URL(string: "https://accepted-before-the-quit.example.invalid/")!
+        model.openNewTab(url: accepted)
+
+        // The quit arrives while it is still queued, and drains from behind the barrier.
+        let quitting = Task { await model.closeForQuit() }
+        for _ in 0..<Self.yields { await Task.yield() }
+        await backing.releaseReads()
+        await quitting.value
+        await restoring.value
+
+        XCTAssertEqual(model.tabs.map(\.url), [accepted],
+                       "the precondition did not hold: the mutation never ran")
+        let document = try await backing.document(BrowserTabSetDocument.self,
+                                                  key: BrowserTabStore.storeKey)
+        XCTAssertEqual(document?.tabs.map(\.url), [accepted],
+                       "the document the quit left behind is \(String(describing: document?.tabs.map(\.url)))")
+    }
+
     /// The order the user made two mutations in survives the restoration boundary.
     ///
     /// The gate is only half of first-in-first-out. `performRestore` opens the gate *before* the

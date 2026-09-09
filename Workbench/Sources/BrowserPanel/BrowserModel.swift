@@ -331,7 +331,11 @@ public final class BrowserModel {
             } else {
                 await restoration.value
             }
+            // The gate accepted this before the barrier, so its commit is part of what the drain
+            // is draining, not work arriving behind it. See `isRunningAcceptedMutation`.
+            self.isRunningAcceptedMutation = true
             operation()
+            self.isRunningAcceptedMutation = false
             self.gatedOperationsOutstanding -= 1
         }
     }
@@ -740,10 +744,21 @@ public final class BrowserModel {
         commit { store, set in await store.commitEdit(set) }
     }
 
+    /// True for exactly as long as a mutation the gate accepted before the close is running.
+    ///
+    /// **The barrier is about what arrives after the close, not about what the close is draining**
+    /// (D66). A mutation queued behind the restoration was accepted while the gate was open, and
+    /// `closeForQuit` drains the gate chain, so it *runs* — it changed the tab set in memory, and
+    /// the user saw it. A `commit` guard that read only `isClosed` dropped that mutation's snapshot
+    /// and left the drain writing a document without it. `gated` is the only thing that sets this,
+    /// around one synchronous operation, so the door it opens closes again in the same turn.
+    private var isRunningAcceptedMutation = false
+
     private func commit(_ body: @escaping @Sendable (BrowserTabStore, BrowserTabSet) async -> Void) {
-        // The barrier's other door, and the one the finding is about: `recordPageState` reaches
-        // this directly from `trackChrome`, with no gate in front of it (D62).
-        guard !isClosed else { return }
+        // The barrier's other door, and the one D62 is about: `recordPageState` reaches this
+        // directly from `trackChrome`, with no gate in front of it — that is work arriving behind
+        // the close, and it stays refused.
+        guard !isClosed || isRunningAcceptedMutation else { return }
         let set = snapshot()
         let store = store
         enqueuedWork += 1
