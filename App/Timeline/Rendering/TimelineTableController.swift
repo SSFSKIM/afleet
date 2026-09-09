@@ -578,8 +578,9 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
 
     /// Whether two render contexts draw differently.
     ///
-    /// The value's own fields are compared where they are values, and by identity where they are the
-    /// channel-scoped objects a row shares — a context carrying a *different* collapse state or
+    /// The value's own fields — including the two capabilities a row's affordances are gated on,
+    /// ownership and the composer — are compared where they are values, and by identity where they
+    /// are the channel-scoped objects a row shares — a context carrying a *different* collapse state or
     /// reservation set is a different channel's context, and a row holding the old one would fold
     /// and answer into an object nothing else reads.
     static func differs(_ previous: TimelineRenderContext?, _ next: TimelineRenderContext?) -> Bool {
@@ -588,7 +589,13 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
         if previous.key != next.key || previous.cwd != next.cwd { return true }
         if previous.isOverlayStale != next.isOverlayStale
             || previous.autoScrollEnabled != next.autoScrollEnabled
-            || previous.syntaxHighlightingEnabled != next.syntaxHighlightingEnabled { return true }
+            || previous.syntaxHighlightingEnabled != next.syntaxHighlightingEnabled
+            || previous.isOwned != next.isOwned { return true }
+        // The composer is a capability, not one of the shared channel objects below: contract Y6
+        // gates *Edit* on it, so a channel that acquires or loses one changes what every mounted
+        // user message offers. Compared by identity, which is what a reference has — and nil
+        // against non-nil, which is the adoption and the release themselves.
+        if previous.composer !== next.composer { return true }
         if previous.neighbourhood.toolCalls != next.neighbourhood.toolCalls
             || previous.neighbourhood.precedingTimestamps != next.neighbourhood.precedingTimestamps
             || previous.neighbourhood.agents != next.neighbourhood.agents { return true }
