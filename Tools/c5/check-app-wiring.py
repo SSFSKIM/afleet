@@ -74,9 +74,14 @@ ALLOWLIST: dict[str, str] = {
                             "one caller is the `.commit` target's handler inside "
                             "`SourceControlTab.linkTargets()` \u2014 outside App/ by construction, "
                             "which is what X7 handing a panel a capability and never the host "
-                            "means. Its Files twin escapes this check only because no test names "
-                            "it; this one is named because C7.7's G3 asserts the per-destination "
-                            "answer directly",
+                            "means. C7.7's G3 asserts the per-destination answer directly, which "
+                            "is what makes it visible here at all",
+    "filesSession": "a `FilesTabHost` requirement (Workbench/FilesPanel), on exactly the terms of "
+                    "its Source Control twin above: `AppModel.init` registers the tab with itself "
+                    "as the host and the callers are the `.file` and `.diff` handlers inside "
+                    "`FilesTab.linkTargets()`. It escaped this check until 2026-09-09, when the "
+                    "corrective that closed tracker 240 named it directly \u2014 a delivery with no "
+                    "originating channel is the one case that cannot be raised through the router",
     # Probes that exist for the suite and say so where they are declared.
     "pump": "a test-only probe on ActivityModel, named as one where it is declared",
     "settle": "a test-only probe on NotificationRouter, named as one where it is declared",

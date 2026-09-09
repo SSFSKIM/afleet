@@ -79,13 +79,6 @@ actor PanelHostStore {
         writer = Task { [weak self] in await self?.drain() }
     }
 
-    /// Writes whatever is pending now, without waiting for the interval.
-    func flush() async {
-        let batch = pending
-        pending = [:]
-        for (channel, tab) in batch { await write(tab, for: channel) }
-    }
-
     /// One writer at a time: it sleeps the interval, writes whatever the burst left, and exits when
     /// an interval passes with nothing pending.
     private func drain() async {
