@@ -62,14 +62,32 @@ final class BrowserWiringTests: XCTestCase {
     /// specificity for every link the Browser claims.
     func testRegisteringTheLinkTargetsTwiceRegistersThemOnce() async throws {
         let app = AppModel()
+        let base = try await settledTargetCount(app)
         await app.registerBrowserLinkTargets()
         let after = await app.panels.links.targetCount
 
         await app.registerBrowserLinkTargets()
 
         let again = await app.panels.links.targetCount
-        XCTAssertEqual(after, 2, "the Browser registered \(after) targets, not the .url and .pullRequest pair")
+        XCTAssertEqual(after - base, 2,
+                       "the Browser registered \(after - base) targets, not the .url and .pullRequest pair")
         XCTAssertEqual(again, after, "a second registration added \(again - after) more targets")
+    }
+
+    /// The app's registry is shared, and C7.5's Files tab claims its own pair from a `Task` spawned
+    /// in `AppModel.init` — so a count read at an arbitrary moment is a race between two children.
+    /// Waiting for that pair to land is what makes the Browser's two a *delta*. A count, never a
+    /// target (§11).
+    private func settledTargetCount(_ app: AppModel,
+                                    file: StaticString = #filePath, line: UInt = #line) async throws -> Int {
+        let deadline = ContinuousClock().now + .seconds(10)
+        while ContinuousClock().now < deadline {
+            let count = await app.panels.links.targetCount
+            if count >= 2 { return count }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTFail("the Files tab's own link targets never registered", file: file, line: line)
+        return 0
     }
 
     /// The launch is what registers them, and it does so on a launch that reaches no workspace.
@@ -88,13 +106,15 @@ final class BrowserWiringTests: XCTestCase {
             resolveEnvironment: { LaunchFixtures.environment(home: temp.root, configHome: configHome) },
             locateBinary: { _, _ in nil })
         let app = AppModel(sequence: sequence)
-        let before = await app.panels.links.targetCount
+        let before = try await settledTargetCount(app)
 
         await app.launch()
 
         let after = await app.panels.links.targetCount
-        XCTAssertEqual(before, 0, "something registered targets before the launch ran")
-        XCTAssertEqual(after, 2, "the launch left \(after) targets registered, not the Browser's two")
+        XCTAssertEqual(before, 2,
+                       "\(before) targets were registered before the launch, not the Files tab's pair alone")
+        XCTAssertEqual(after - before, 2,
+                       "the launch added \(after - before) targets, not the Browser's two")
         XCTAssertNil(app.route.workspace,
                      "this launch is meant to reach no workspace, so a registration under one proves less")
     }
