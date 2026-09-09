@@ -194,7 +194,7 @@ public final class BrowserModel {
 
     /// Set when the main panel goes away *holding* the pages and they move to a surface that is
     /// still drawing. It is what tells a panel that is coming back from a channel switch apart
-    /// from one that never had them (D61).
+    /// from one that never had them (D63).
     ///
     /// Cleared by anything that claims the pages deliberately — a window appearing, or the "Bring
     /// them back here" control — because the panel takes back what it was holding and never what
@@ -209,7 +209,7 @@ public final class BrowserModel {
     /// pop-out is for. The pop-out is the deliberate act, so it is the one that moves them. Two
     /// pop-outs are two windows and two claimants, and the newest one is the one the user just
     /// asked for.
-    /// **The one thing the panel does claim is what it was holding when it went away** (D61).
+    /// **The one thing the panel does claim is what it was holding when it went away** (D63).
     /// `PanelHostModel.view` keys the subtree by (tab, channel), so a channel switch destroys this
     /// panel's surface and builds another one in its place — a disappearance and an appearance,
     /// not a re-render. The departing panel hands the pages to a pop-out that is still drawing, so
@@ -310,7 +310,7 @@ public final class BrowserModel {
     /// of one store read on every channel switch, and it would drop a keystroke rather than delay
     /// it: deferring keeps the user's action, which is the honest half of the two.
     private func gated(_ operation: @escaping @MainActor () -> Void) {
-        // Closed is closed (D61): after the quit drain nothing may enqueue work the drain cannot
+        // Closed is closed (D62): after the quit drain nothing may enqueue work the drain cannot
         // have waited for.
         guard !isClosed else { return }
         guard !isRestored || gatedOperationsOutstanding > 0 else { return operation() }
@@ -529,7 +529,7 @@ public final class BrowserModel {
         }
     }
 
-    /// **Closes this panel to new persistence work, and then drains what is left** (D61).
+    /// **Closes this panel to new persistence work, and then drains what is left** (D62).
     ///
     /// What `QuitGuard` calls, and the reason `flush` alone was not enough: the drain returns, and
     /// the app then awaits `shutdownForQuit()`, which suspends several times. `trackChrome` is
@@ -739,7 +739,7 @@ public final class BrowserModel {
 
     private func commit(_ body: @escaping @Sendable (BrowserTabStore, BrowserTabSet) async -> Void) {
         // The barrier's other door, and the one the finding is about: `recordPageState` reaches
-        // this directly from `trackChrome`, with no gate in front of it (D61).
+        // this directly from `trackChrome`, with no gate in front of it (D62).
         guard !isClosed else { return }
         let set = snapshot()
         let store = store

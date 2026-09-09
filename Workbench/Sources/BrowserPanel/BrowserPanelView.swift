@@ -36,7 +36,7 @@ public struct BrowserPanelView: View {
         .onAppear { model.surfaceAppeared(surface) }
         // Quick-open goes with the surface presenting it: the session is cached per (tab,
         // channel) and outlives this view, so a sheet nobody can see would otherwise stay
-        // presented on a surface that is gone, with its feed watcher still running (D61).
+        // presented on a surface that is gone, with its feed watcher still running (D64).
         .onDisappear {
             model.surfaceDisappeared(surface)
             session.surfaceDisappeared(surface)

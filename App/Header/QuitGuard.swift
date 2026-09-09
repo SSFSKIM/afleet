@@ -338,7 +338,7 @@ extension QuitGuard {
                          // **It closes the panel and then drains it**, rather than draining alone:
                          // the shutdown below suspends several times and the panel's chrome
                          // tracking runs through all of it, so a drain that left the panel open
-                         // would be a snapshot with work arriving behind it (C7.6 D61).
+                         // would be a snapshot with work arriving behind it (C7.6 D62).
                          drainPanels: { await browserTab.model.closeForQuit() })
     }
 }

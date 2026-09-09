@@ -139,7 +139,7 @@ public final class BrowserTabSession: PanelTabSession {
         }
     }
 
-    /// A surface stopped drawing this panel: the quick-open it was presenting goes with it (D61).
+    /// A surface stopped drawing this panel: the quick-open it was presenting goes with it (D64).
     ///
     /// The session is cached per (tab, channel) and outlives every surface that draws it, so
     /// neither `deinit` nor a dismissal is reached when a subtree is simply taken away — and the
