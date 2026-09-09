@@ -465,14 +465,37 @@ final class PanelHostModel: PanelHost {
     func run(_ request: PaneRequest, for channel: ChannelKey) async throws {
         let tab = runners[.terminal] != nil ? PanelTabID.terminal
             : PanelTabID.allCases.first(where: { runners[$0] != nil })
-        guard let tab, let runner = runners[tab] else { throw PanelHostError.noPaneRunner(.terminal) }
+        guard let tab, let runner = runners[tab] else {
+            await discharge(request)
+            throw PanelHostError.noPaneRunner(.terminal)
+        }
         // Resolved before anything moves: a selection changed for a pane that then never started
         // would leave the window showing an empty panel and the user nothing to read.
-        guard let context = context(for: channel) else { throw PanelHostError.noChannelContext }
+        guard let context = context(for: channel) else {
+            await discharge(request)
+            throw PanelHostError.noChannelContext
+        }
         // Selecting or creating the Terminal tab is spec §7's wording; a runner registered for a
         // tab that is not registered runs without a selection moving.
         select(tab)
         await runner.run(request, in: context)
+    }
+
+    /// A request that cannot be run is **reported as an exit with code 127**, and only then does
+    /// `run(_:for:)` throw.
+    ///
+    /// C7.4's Design §2 already fixes 127 for the other half of this: a spawn that never executed
+    /// is reported as a `PaneExit` because C4 is waiting on that id and a hatch whose pane never
+    /// started would leave its channel released for ever. A request that never reaches a pane at
+    /// all is the same fact one step earlier — X5 has installed `pendingHatch`, which only a
+    /// matching `paneExited` clears, and no pane exists for anyone else to report. So the two
+    /// places carry one rule: whoever refuses the request discharges it.
+    ///
+    /// The throw is unchanged, and deliberately so: the caller's banner is what tells the user,
+    /// and this is only what stops the channel being stranded behind it.
+    private func discharge(_ request: PaneRequest) async {
+        guard let lifecycle else { return }
+        await lifecycle.paneExited(PaneExit(request: request, code: 127, observedAt: Date()))
     }
 }
 

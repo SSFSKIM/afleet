@@ -1037,6 +1037,60 @@ final class PanelHostTests: XCTestCase {
         XCTAssertEqual(count, 0, "the runner received \(count) request(s) for an unresolvable channel")
         XCTAssertNil(rig.host.selected, "the refused run moved the panel selection")
     }
+
+    /// A request the host cannot place is **discharged**, and still throws.
+    ///
+    /// C4 has already installed `pendingHatch` by the time this runs, and it is cleared only by a
+    /// matching `paneExited`. The banner the caller draws changes nothing about that: no pane was
+    /// created, so nobody else will ever send the exit, and the channel stays released for ever.
+    /// So the host reports the request it cannot run as an exit with code 127 — the same status
+    /// and the same reasoning the child spec's Design §2 already fixes for a spawn that never
+    /// executed — and throws afterwards, so the caller's refusal is unchanged.
+    func testAPaneForAnUnresolvableChannelIsDischargedAsA127Exit() async throws {
+        let rig = try await PanelRig(channels: 1)
+        _ = rig.host.context(for: rig.keys[0], cwd: PanelFixtures.cwd)
+        rig.host.registerPaneRunner(RecordingPaneRunner(), for: .terminal)
+        let request = PanelFixtures.paneRequest()
+
+        do {
+            try await rig.host.run(request, for: PanelFixtures.key(9))
+            XCTFail("a pane ran for a channel the host cannot resolve")
+        } catch let error as PanelHostError {
+            XCTAssertEqual(error, .noChannelContext, "the host refused with a different error")
+        }
+
+        let exits = await rig.lifecycle.paneExits
+        XCTAssertEqual(exits.count, 1, "the lifecycle received \(exits.count) pane exits, not 1")
+        // The id is the clause that matters: C4 discards an exit whose id it is not waiting on,
+        // silently, and a hatch discharged under a fresh id leaves the channel released.
+        XCTAssertTrue(exits.first?.request.id == request.id,
+                      "the discharge carries a different request id from the one that could not run")
+        XCTAssertTrue(exits.first?.request == request, "the discharge edited the request it echoes")
+        XCTAssertEqual(exits.first?.code, 127, "the discharge reported code \(exits.first?.code ?? -1), not 127")
+    }
+
+    /// The same for a window with no pane runner registered: item 47's stated degradation is a
+    /// banner, not a channel that can never be owned again.
+    func testAPaneWithNoRunnerIsDischargedAsA127Exit() async throws {
+        let rig = try await PanelRig(channels: 1)
+        let key = rig.keys[0]
+        _ = rig.host.context(for: key, cwd: PanelFixtures.cwd)
+        let request = PanelFixtures.paneRequest()
+
+        do {
+            try await rig.host.run(request, for: key)
+            XCTFail("a pane ran with no runner registered")
+        } catch let error as PanelHostError {
+            XCTAssertEqual(error, .noPaneRunner(.terminal), "the host refused with a different error")
+        }
+
+        let exits = await rig.lifecycle.paneExits
+        XCTAssertEqual(exits.count, 1, "the lifecycle received \(exits.count) pane exits, not 1")
+        XCTAssertTrue(exits.first?.request.id == request.id,
+                      "the discharge carries a different request id from the one that could not run")
+        XCTAssertTrue(exits.first?.request == request, "the discharge edited the request it echoes")
+        XCTAssertEqual(exits.first?.code, 127, "the discharge reported code \(exits.first?.code ?? -1), not 127")
+    }
     /// The tab reads the channel's identity, its working directory and X11's environment out of the
     /// context, and each is asserted.
     ///
