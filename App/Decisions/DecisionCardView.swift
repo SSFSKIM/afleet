@@ -32,9 +32,14 @@ struct DecisionCardView: View {
     /// Where a resolved refusal dialog's retracted uuids go (spec D11). A host with no list to
     /// filter passes none.
     let retraction: RetractionRegistry?
-    /// The `system/model_consent_fallback` frame that followed an overage answer, where one did.
-    /// **Its absence is equally correct** — the engine emits nothing when provisioning succeeded
-    /// (anchor 5) — so it changes what a settled card *reads* and never whether it settles.
+    /// An override of the `system/model_consent_fallback` frame the card already carries, for a host
+    /// that holds one the fold has not attached.
+    ///
+    /// **The card's own frame is the ordinary route** (`DecisionCard.consentFallback`, written by
+    /// C3's fold): a parameter every host had to remember is a parameter most hosts would forget,
+    /// and the card would then settle reading the wrong outcome. **Its absence is equally correct**
+    /// — the engine emits nothing when provisioning succeeded (anchor 5) — so it changes what a
+    /// settled card *reads* and never whether it settles.
     let consentFallback: ModelConsentFallback?
 
     init(card: DecisionCard,
@@ -119,8 +124,8 @@ extension DecisionCard {
     /// successful path — which is why this only ever replaces the text of an already-settled card.
     func reading(inStaleOverlay stale: Bool,
                  consentFallback: ModelConsentFallback? = nil) -> DecisionReading? {
-        if let consentFallback, dialogKind == .overageConsent, state != .pending {
-            return DecisionReading(text: consentFallback.fields.content)
+        if let frame = consentFallback ?? self.consentFallback, dialogKind == .overageConsent, state != .pending {
+            return DecisionReading(text: frame.fields.content)
         }
         switch state {
         case .pending:

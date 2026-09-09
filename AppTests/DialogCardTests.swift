@@ -490,6 +490,70 @@ final class DialogCardTests: XCTestCase {
         XCTAssertEqual(after, 0, "the cancellation of an undeclared dialog put \(after) actions on the wire")
     }
 
+    /// Item 62's fallback frame is part of the **card's own state**, and reaches the timeline row
+    /// without any host passing it in.
+    ///
+    /// The whole recording is replayed through C3's fold — every frame and every declared dialog
+    /// request, with the host's own `decisionAnswered` raised for each overage ask as it arrives,
+    /// which is what a card's successful answer does in production. The recording answers five
+    /// overage dialogs and emits four `model_consent_fallback` frames, each after the ask it
+    /// concerns, so the reading is discriminating in both directions: the first ask, which no frame
+    /// followed, must read its own outcome, and each of the other four must read the frame that
+    /// followed **it** rather than the newest one.
+    ///
+    /// Drawn through `DecisionRowContent`, which is the timeline's host path, with no
+    /// `consentFallback` handed to any view.
+    func testTheConsentFallbackReachesTheTimelineRowsCardWithoutBeingHandedIn() async throws {
+        var reducer = WireReducer(stream: Self.stream, slug: "invented-slug")
+        var answered: [RequestID] = []
+        for event in try FixtureRunner.events("dialog-fable-overage") {
+            _ = reducer.apply(event)
+            guard case .request(let request) = event,
+                  case .requestUserDialog(let dialog) = request.payload,
+                  DecisionCard.DialogKind(rawValue: dialog.fields.dialogKind) == .overageConsent else { continue }
+            _ = reducer.apply(.decisionAnswered(request.id, outcome: .answered(summary: "consent")))
+            answered.append(request.id)
+        }
+        XCTAssertEqual(answered.count, 5, "the recording answered \(answered.count) overage dialogs, not 5")
+
+        let frames = Self.consentFallbacks(try FixtureRunner.frames("dialog-fable-overage"))
+        XCTAssertEqual(frames.count, 4, "the recording carries \(frames.count) consent-fallback frames, not 4")
+
+        let (_, answering) = await hosted()
+        let context = InventedItems.context(key: Self.channel)
+
+        // The first ask: no frame followed it, so the settled card reads its own outcome and the
+        // newest frame in the recording must not have leaked onto it.
+        let first = try XCTUnwrap(reducer.overlay.decisions[answered[0]], "the fold dropped the first overage ask")
+        let firstDrawn = try Self.rowCardTexts(first, context, answering)
+        XCTAssertTrue(firstDrawn.contains("consent"),
+                      "the card no frame followed does not read its own outcome")
+        XCTAssertFalse(frames.contains { frame in firstDrawn.contains(frame.fields.content) },
+                       "a consent-fallback frame reached the card that no frame followed")
+
+        // The four the frames followed, each against the frame that followed *it*.
+        for (offset, frame) in frames.enumerated() {
+            let item = try XCTUnwrap(reducer.overlay.decisions[answered[offset + 1]],
+                                     "the fold dropped an answered overage ask")
+            let drawn = try Self.rowCardTexts(item, context, answering)
+            XCTAssertTrue(drawn.contains(frame.fields.content),
+                          "the row's card does not read the frame that followed ask \(offset + 1)")
+        }
+    }
+
+    /// What the timeline's own decision row draws for an item: the row mount's body, the card
+    /// component it hosts, and that component's body. The descent is spelled out because reflection
+    /// does not evaluate a stored view's `body` — a test that read the row's body alone would find
+    /// no text at all and pass whatever the card says.
+    private static func rowCardTexts(_ item: DecisionItem,
+                                     _ context: TimelineRenderContext,
+                                     _ answering: DecisionAnswering) throws -> [String] {
+        let row = DecisionRowContent(row: TimelineRow(.decision(item)), context: context, answering: answering)
+        let card = try XCTUnwrap(ViewTree.values(of: DecisionCardView.self, in: row.body).first,
+                                 "the decision row hosted no card component")
+        return CardTree.texts(in: card.body)
+    }
+
     /// Every `model_consent_fallback` a fixture's frames carry.
     private static func consentFallbacks(_ frames: [Frame]) -> [ModelConsentFallback] {
         frames.compactMap { frame in

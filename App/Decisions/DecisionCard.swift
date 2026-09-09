@@ -39,6 +39,11 @@ struct DecisionCard: Sendable {
     var toolUseID: String?
     var agentID: String?
     var payload: Payload
+    /// The `system/model_consent_fallback` frame the fold attached to this decision, where one
+    /// arrived (§8.4, item 62). It travels **on the card** because it is part of the decision's own
+    /// state: every host draws the same component, and a frame each host had to hand in separately
+    /// is a frame most hosts would not have.
+    var consentFallback: ModelConsentFallback?
 
     init(_ item: DecisionItem) {
         self.kind = item.kind
@@ -47,6 +52,7 @@ struct DecisionCard: Sendable {
         self.toolUseID = item.toolUseID
         self.agentID = item.agentID
         self.payload = Self.decode(item.payload, as: item.kind)
+        self.consentFallback = item.consentFallback
     }
 
     /// The payload case for a raw request object.

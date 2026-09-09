@@ -55,6 +55,17 @@ public struct WireReducer: Sendable {
     /// retaining answers for the life of the fold.
     public static let retainedAnswerLimit = 64
 
+    /// The overage-consent dialog this fold last saw answered, and the one a
+    /// `system/model_consent_fallback` frame belongs to. Nil until an overage ask is answered, and
+    /// dropped on process replacement with the rest of the overlay: the request id belongs to the
+    /// process that issued it.
+    private var lastAnsweredOverageConsent: RequestID?
+
+    /// The `dialog_kind` an overage-consent ask carries. It is `DecisionItem.title` for a dialog —
+    /// `title(of:)` puts the kind there — so this is a comparison and not a second decode of the
+    /// request payload.
+    static let overageConsentDialogKind = "fable_overage_consent_prompt"
+
     public init(stream: LogicalStream, slug: String, seed: DurableProjection = .empty) {
         self.stream = stream
         self.slug = slug
@@ -74,6 +85,7 @@ public struct WireReducer: Sendable {
         self.epoch = .first
         self.pendingDeliveries = 0
         self.retainedAnswers = []
+        self.lastAnsweredOverageConsent = nil
         rebuild()
     }
 
@@ -135,6 +147,7 @@ public struct WireReducer: Sendable {
                 retain(outcome, for: id)
             } else {
                 setDecision(id) { $0.state = .answered(outcome: outcome.label) }
+                noteOverageConsentAnswer(id)
             }
 
         case .rewound(let toUUID):
@@ -146,6 +159,7 @@ public struct WireReducer: Sendable {
             preview = nil
             outstandingPrompts = []
             retainedAnswers = []
+            lastAnsweredOverageConsent = nil
 
         case .relocated(let mainPath):
             if let (resolved, kind) = TranscriptPath.resolve(mainPath, under: stream.configHome),
@@ -418,6 +432,13 @@ public struct WireReducer: Sendable {
 
         case .modelConsentFallback(let f):
             banner(.modelFallback, text: f.content, at: now)
+            // §8.4: the frame *is* the answered overage card's outcome, in the engine's own words.
+            // The banner alone is the channel-level notice; the card is the surface the user
+            // pressed, and the frame carries no request id — the engine correlates it by the answer
+            // it followed, which is the only correlation available here too.
+            if let answered = lastAnsweredOverageConsent {
+                setDecision(answered) { $0.consentFallback = f }
+            }
 
         case .mirrorError(let f):
             // The banner only; the ingestion's switch to file-only is Task 10's.
@@ -451,7 +472,21 @@ public struct WireReducer: Sendable {
             agentID: Self.agentID(of: request.payload), state: state, payload: request.raw)
         if state == .pending, let retained {
             setDecision(request.id) { $0.state = .answered(outcome: retained.label) }
+            noteOverageConsentAnswer(request.id)
         }
+    }
+
+    /// Remembers the overage-consent dialog an answer has just settled, so the
+    /// `system/model_consent_fallback` frame that follows can be attached to it.
+    ///
+    /// **The most recent answer and not a scan of the overlay.** A session can raise the ask many
+    /// times, and a settled decision carries no instant of its own — so a reducer that looked for
+    /// "an answered overage card" would attach every frame to whichever id sorted first. The engine
+    /// emits the frame directly after the answer it concerns, which is exactly what this records.
+    private mutating func noteOverageConsentAnswer(_ id: RequestID) {
+        guard let decision = overlay.decisions[id], decision.kind == .dialog,
+              decision.title == Self.overageConsentDialogKind else { return }
+        lastAnsweredOverageConsent = id
     }
 
     private mutating func setDecision(_ id: RequestID, _ body: (inout DecisionItem) -> Void) {

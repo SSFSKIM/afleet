@@ -210,6 +210,17 @@ public struct DecisionItem: Hashable, Sendable, Codable {
     public var agentID: String?
     public var state: State
     public var payload: JSONValue
+    /// The `system/model_consent_fallback` frame that followed this decision's answer, where one did
+    /// (root §8.4, acceptance item 62).
+    ///
+    /// **On the item and not handed to a view by its host.** The engine emits the frame after an
+    /// overage-consent dialog has been answered — even after `consent`, because a bare wire reply
+    /// never enables billing — and the card renders its `content` as the outcome. It is the reducer
+    /// that sees both the answer and the frame, so the frame is attached to the decision the answer
+    /// settled; a host passing it in would be a second reading of the wire, and every host that
+    /// forgot to would draw a settled card with the wrong outcome on it. Nil is equally correct: no
+    /// frame arrives when provisioning succeeded, and the card then reads its own settled state.
+    public var consentFallback: ModelConsentFallback?
     /// `other`: a subtype the host does not model, reached only through `.policyAnswered`.
     public enum Kind: String, Sendable, Codable { case permission, question, plan, dialog, elicitation, other }
     public enum State: Hashable, Sendable, Codable {
@@ -217,10 +228,11 @@ public struct DecisionItem: Hashable, Sendable, Codable {
     }
     public init(id: ItemID, timestamp: Date? = nil, threadParent: ItemID? = nil, provenance: Provenance,
                 requestID: RequestID, kind: Kind, title: String, toolUseID: String? = nil, agentID: String? = nil,
-                state: State, payload: JSONValue) {
+                state: State, payload: JSONValue, consentFallback: ModelConsentFallback? = nil) {
         self.id = id; self.timestamp = timestamp; self.threadParent = threadParent; self.provenance = provenance
         self.requestID = requestID; self.kind = kind; self.title = title; self.toolUseID = toolUseID
         self.agentID = agentID; self.state = state; self.payload = payload
+        self.consentFallback = consentFallback
     }
 }
 
