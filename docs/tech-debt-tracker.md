@@ -4015,4 +4015,47 @@ needs more. Nothing above is renumbered.
      *Not delivered* once the run's notification arrived — a false negative, which is the safe
      direction but still wrong. Task 8's fixture is what pins the real shape; if it shows a
      within-line wrapper, the match needs a containment test over the normalised line rather than
-     an equality one. Owner: C6.4 Task 8. Raised by C6.4 at Task 7.
+     an equality one. **Amended at Task 8: the fixture does not pin it.** The pinned bundle states
+     the `SendMessage` result shape at its own definition site but says nothing readable about the
+     frame the receiving run gets, so the synthetic recording carries this leaf's assumption — a
+     `user` frame on the run's own stream inside a wrapper line — and names it in its `notes` as
+     one of the four things a real recording must settle. This entry therefore stays open and its
+     owner moves. Owner: whoever records a live `SendMessage` against a running agent. Raised by
+     C6.4 at Task 7, amended at Task 8.
+
+
+183. **The refused-resume reading turns on one key in the engine's result body, and nothing
+     alarms if that key moves.** `AgentRelayMachine.verdict(of:for:)`
+     (`App/Agents/AgentRelayRegistry.swift`) settles `.notDelivered(.refused)` from
+     `is_error` **or** from a `success: false` in the JSON the `tool_result` carries, because the
+     pinned bundle shows a resume refusal comes back as an ordinary non-error result whose body
+     says so. That reading is right today and is what stops a stopped agent's relay from sitting
+     at *Relayed* for ever. What is missing is drift protection: a release that renamed `success`,
+     nested it, or moved the outcome out of the text block would return the false positive
+     silently, and `probe diff` cannot catch it because a synthetic fixture is excluded from the
+     drift command by design. Closing it means a probe scenario that relays to a stopped agent
+     against a live binary and records the real result, which needs an account that permits a
+     turn. Owner: C1's probe suite, on a permitting account. Raised by C6.4 at Task 8.
+
+184. **G6's zero-turn half proves the tree reads from disk but exercises no nesting and no
+     parking.** The only session the scratch config home *lists* whose transcript directory holds
+     subagent files carries one run with no children, so `LiveAgentsTests`
+     (`AppTests/Live/LiveAgentsTests.swift`) asserts one root, its node content, and a five-row
+     per-run transcript that is a strict subset of the channel's sixteen — which is the claim the
+     gate needs — and asserts nothing about the two-step join, an orphan, or a parked parent. Those
+     stay on G1, which replays `nested-depth-2` and has both. Seven sessions on disk carry
+     subagent files and only one of them is listed, so a fixture recorded into a listed directory
+     with a nested run would close this at no model cost. Owner: whoever next extends the scratch
+     corpus. Raised by C6.4 at Task 10.
+
+185. **`probe verify`'s account-name scanner fires on an ordinary English word inside engine copy,
+     and will do so for every reviewer whose account name is a common word.** The
+     `send-message-delivery` fixture carries the engine's own stopped-by-user refusal template,
+     which contains the word "new"; on a machine whose home directory's last segment is `new` the
+     scanner reports one hit per file and asks a reviewer to judge it. The scanner documents this
+     case and the judgement is easy — the hit is engine copy, identical on every machine — but it
+     costs a reviewer a look on every walk, and a reviewer whose account name is *not* that word
+     never sees it, so two people walking the same fixture get different reports. Closing it means
+     either a per-fixture acknowledgement the manifest can carry, or restricting the rule to hits
+     that are not inside a value the fixture declares as carried copy. Owner: C1's probe suite.
+     Raised by C6.4 at Task 8.
