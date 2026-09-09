@@ -154,6 +154,47 @@ final class AgentTreeGateTests: XCTestCase {
                           "a branch with work still under it is drawn as finished")
     }
 
+    // MARK: - The tick (child spec D7)
+
+    /// A tick moves no row identity, and the span it moves is drawn **inside** one leaf view.
+    ///
+    /// The second clause is the discriminating one. Row identity alone cannot fail: the outline does
+    /// not read the clock, so two evaluations are identical whatever the label says. What a wrong
+    /// implementation would show is the span computed by the row — one timer invalidating the whole
+    /// outline every second, on a surface whose sibling column is the S7 budget's tenant — and that
+    /// is what the search of the row's own body catches.
+    func testATickMovesNoRowIdentity() async throws {
+        let rig = try await AgentGateRig(fixture: "nested-depth-2")
+        defer { Task { await rig.finish() } }
+        _ = try await rig.replay()
+        let settledBarrier = await rig.settleOnBarrier()
+        XCTAssertTrue(settledBarrier, "the replay never reached the model")
+        let armed = await rig.settleOnRuns(2)
+        XCTAssertTrue(armed, "the replay armed a tree with 2 runs in it")
+
+        let read = rig.read()
+        let before = AgentTreeView.visibleRows(read: read, collapsed: []).map { AgentTreeView.identity(of: $0.id) }
+        let after = AgentTreeView.visibleRows(read: rig.read(), collapsed: []).map { AgentTreeView.identity(of: $0.id) }
+        XCTAssertEqual(before.count, 2, "the outline pinned \(before.count) row identity(s) for 2 runs")
+        XCTAssertTrue(before == after, "a re-derivation moved a row identity")
+
+        // A tick has something to change.
+        let content = try XCTUnwrap(read.roots.first.flatMap { read.content(of: $0) }, "the tree offered no root")
+        let first = ElapsedTicker.label(origin: content.elapsedOrigin, now: content.elapsedOrigin)
+        let later = ElapsedTicker.label(origin: content.elapsedOrigin,
+                                        now: content.elapsedOrigin.addingTimeInterval(90))
+        XCTAssertNotEqual(first, later, "a 90-second tick does not move the label, so this proves nothing")
+
+        // And the change is one leaf's, not the row's: the row hosts exactly one ticker and draws no
+        // span of its own.
+        let row = AgentNodeRow(content: content, isSelected: false, disclosure: .expanded,
+                               toggle: {}, select: {}).body
+        XCTAssertEqual(ViewTree.values(of: ElapsedTicker.self, in: row).count, 1,
+                       "the row hosts \(ViewTree.values(of: ElapsedTicker.self, in: row).count) elapsed ticker(s), not 1")
+        XCTAssertEqual(ViewTree.values(of: String.self, in: row).filter { $0 == first || $0 == later }.count, 0,
+                       "the row computed an elapsed span of its own, so a tick invalidates the outline")
+    }
+
     // MARK: - §11
 
     /// **A task id is drawable and never printable.** No code under `App/Agents/` writes one to a
