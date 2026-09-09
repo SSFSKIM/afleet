@@ -1,0 +1,375 @@
+import Foundation
+import XCTest
+import AfleetCore
+import ClaudeWire
+import FleetKit
+@testable import Afleet
+
+/// C6.4 Task 1: the Agents tab's read of C3's run tree, and a node's drawn content.
+///
+/// **Every identifier below is invented** — a word and a repeated nibble — so nothing here can be
+/// mistaken for an engine byte or for anybody's own session (§11). The one exception is the
+/// `nested-depth-2` arm, which folds a *committed, reviewed* recording through C3's own
+/// `WireReducer`; it asserts counts and shapes and prints no id.
+///
+/// **X9:** nothing in this file writes anything. The config home the tree is constructed over is a
+/// value used to compute a transcript URL, and no path here is opened.
+@MainActor
+final class AgentRunReadTests: XCTestCase {
+
+    // MARK: - The three states
+
+    /// A channel with **no tree at all** and a channel with an **empty tree** are different facts
+    /// (child spec D10).
+    ///
+    /// Discriminating: a read that mapped both to an empty roots array passes every assertion about
+    /// the roots and answers "no agent runs" for a channel whose fold has not been built yet, which
+    /// is a statement about runs nothing has looked for.
+    func testANilTreeIsNotAnEmptyTree() {
+        let notOpened = AgentRunRead(timeline: ChannelTimeline())
+        XCTAssertTrue(notOpened.state == .notOpened,
+                      "a channel whose fold has not been built did not read as the not-opened state")
+
+        let empty = AgentRunRead(timeline: ChannelTimeline(agents: InventedAgents.tree()))
+        XCTAssertTrue(empty.state == .noRuns, "a channel with an empty tree did not read as the no-runs state")
+
+        XCTAssertTrue(notOpened.state != empty.state,
+                      "the two empty states are one value, so nothing downstream can word them apart")
+        XCTAssertEqual(notOpened.roots.count, 0,
+                       "the not-opened state offered \(notOpened.roots.count) root(s)")
+        XCTAssertEqual(empty.roots.count, 0, "the no-runs state offered \(empty.roots.count) root(s)")
+    }
+
+    // MARK: - Nesting
+
+    /// Over the committed `nested-depth-2` recording, folded through C3's own wire reducer: the
+    /// tree has **one** root and the depth-2 run is that root's child.
+    ///
+    /// Failing-first against a read that answers every node as a root — which is what a tree built
+    /// from `spawn_depth` alone, or from `task_started` alone, would produce, since `task_started`
+    /// carries no parent id.
+    ///
+    /// The recording holds **one** depth-1 run, so this arm cannot separate a read that follows the
+    /// parent link from one that hangs every nested run off the newest root; the test below is the
+    /// corpus that does.
+    func testADepthTwoNodeIsNotARoot() throws {
+        let read = try InventedAgents.nestedDepthTwo()
+
+        XCTAssertEqual(read.roots.count, 1,
+                       "the recording's tree read as \(read.roots.count) root(s), not the 1 it holds")
+        let root = try XCTUnwrap(read.roots.first, "the tree offered no root")
+        let children = read.children(of: root)
+        XCTAssertEqual(children.count, 1,
+                       "the root has \(children.count) child(ren), not the 1 the recording nests under it")
+        let child = try XCTUnwrap(read.content(of: try XCTUnwrap(children.first, "the root has no child")),
+                                  "the tree holds no content for its own child")
+        XCTAssertEqual(child.depth, 2, "the nested run draws depth \(child.depth), not 2")
+    }
+
+    /// A nested run goes under the run that **spawned** it, and not under whichever root started
+    /// most recently.
+    ///
+    /// Discriminating, and the reason this corpus exists at all: every nesting assertion this leaf
+    /// had ran over a tree with **one** depth-1 root, where "the parent the link names" and "the
+    /// newest root" are the same node — so a read that inferred nesting from `spawn_depth` and
+    /// arrival order passed all of them. Here there are two depth-1 roots and the join names the
+    /// **first**, which is the one case the two readings answer differently.
+    func testANestedRunGoesUnderTheRunThatSpawnedItAndNotTheNewestRoot() throws {
+        var tree = InventedAgents.tree()
+        tree.apply(taskStarted: InventedAgents.taskStarted(taskID: "task_inventedaaa1", toolUseID: "toolu_inventedaaa1",
+                                                 agentType: "an-invented-first-root", depth: 1),
+                   at: InventedAgents.epoch)
+        tree.apply(taskStarted: InventedAgents.taskStarted(taskID: "task_inventedbbb2", toolUseID: "toolu_inventedbbb2",
+                                                 agentType: "an-invented-later-root", depth: 1),
+                   at: InventedAgents.epoch)
+        tree.apply(taskStarted: InventedAgents.taskStarted(taskID: "task_inventedccc3", toolUseID: "toolu_inventedccc3",
+                                                 agentType: "an-invented-nested-run", depth: 2),
+                   at: InventedAgents.epoch)
+        // The two-step join, on the older root: the block that spawned the nested run was carried by
+        // a frame from inside the *first* root's own spawning block.
+        tree.observe(parentToolUseID: "toolu_inventedaaa1", carryingToolUseIDs: ["toolu_inventedccc3"])
+
+        let read = AgentRunRead(timeline: ChannelTimeline(agents: tree))
+
+        XCTAssertEqual(read.roots.count, 2,
+                       "the tree read as \(read.roots.count) root(s) for the 2 runs no source parented")
+        XCTAssertTrue(read.children(of: "task_inventedaaa1") == ["task_inventedccc3"],
+                      "the nested run is not under the root whose block spawned it")
+        XCTAssertEqual(read.children(of: "task_inventedbbb2").count, 0,
+                       "the later root was given \(read.children(of: "task_inventedbbb2").count) child(ren) it never spawned")
+
+        // And the outline draws it there: three rows, the nested run second — between its own parent
+        // and the root that started after it — and closing the first root takes it away.
+        let rows = AgentTreeView.visibleRows(read: read, collapsed: [])
+        XCTAssertEqual(rows.count, 3, "the outline drew \(rows.count) row(s) for 3 runs")
+        XCTAssertTrue(rows.map(\.id) == ["task_inventedaaa1", "task_inventedccc3", "task_inventedbbb2"],
+                      "the outline drew the nested run somewhere other than under the run that spawned it")
+        let closed = AgentTreeView.visibleRows(read: read, collapsed: ["task_inventedaaa1"])
+        XCTAssertEqual(closed.count, 2,
+                       "closing the spawning root left \(closed.count) row(s), so the nested run is not under it")
+    }
+
+    /// A node whose parent **no source answered** surfaces in `roots`, with its own depth stated
+    /// (child spec D8, tracker 13).
+    ///
+    /// Failing-first against a read that filtered the roots to `depth == 1`: the two readings agree
+    /// on every well-formed session and diverge exactly here, and the depth-1 filter would drop this
+    /// run out of the tree with no sign that it existed.
+    func testAnOrphanSurfacesAsARootWithItsDepthDrawn() throws {
+        var tree = InventedAgents.tree()
+        tree.apply(taskStarted: InventedAgents.taskStarted(taskID: "task_invented0001", toolUseID: "toolu_invented0001",
+                                                 agentType: "an-invented-agent", depth: 1),
+                   at: InventedAgents.epoch)
+        // Depth 2, and nothing anywhere names its parent: no metadata, no sidecar, and no frame
+        // carrying the block that spawned it.
+        tree.apply(taskStarted: InventedAgents.taskStarted(taskID: "task_invented0002", toolUseID: "toolu_invented0002",
+                                                 agentType: "an-invented-orphan", depth: 2),
+                   at: InventedAgents.epoch)
+
+        let read = AgentRunRead(timeline: ChannelTimeline(agents: tree))
+
+        XCTAssertEqual(read.roots.count, 2,
+                       "the orphan is not at the top: \(read.roots.count) root(s) for 2 parentless runs")
+        let orphan = try XCTUnwrap(read.content(of: "task_invented0002"),
+                                   "the read holds no content for the orphaned run")
+        XCTAssertEqual(orphan.depth, 2, "the orphan draws depth \(orphan.depth) rather than the 2 it was spawned at")
+        XCTAssertTrue(read.roots.contains("task_invented0002"), "the orphan is not among the tree's roots")
+    }
+
+    // MARK: - The item filter
+
+    /// One run's items are the channel's items whose provenance names that run — and **both** a
+    /// main-thread item and a *sibling run's* item are absent.
+    ///
+    /// Discriminating: the sibling half is the whole test. A filter that only excluded the
+    /// unattributed main thread passes the naive assertion and puts one subagent's work in another
+    /// subagent's transcript.
+    func testTheItemFilterExcludesTheMainThreadAndEverySibling() {
+        let mine = InventedAgents.call("toolu_invented0010", agent: "task_invented0001")
+        let siblings = InventedAgents.call("toolu_invented0011", agent: "task_invented0002")
+        let mainThread = InventedAgents.call("toolu_invented0012", agent: nil)
+        let timeline = ChannelTimeline(durable: DurableProjection(items: [mainThread, mine, siblings]))
+
+        let filtered = AgentRunRead.items(of: "task_invented0001", in: timeline)
+
+        XCTAssertEqual(filtered.count, 1, "the filter kept \(filtered.count) item(s) for a run that has 1")
+        XCTAssertTrue(filtered.compactMap(\.provenance.agentID) == ["task_invented0001"],
+                      "the filter kept an item some other stream produced")
+        XCTAssertTrue(filtered.map(\.id.key) == ["toolu_invented0010"],
+                      "the filter kept the wrong item")
+        XCTAssertEqual(AgentRunRead.items(of: "task_invented0003", in: timeline).count, 0,
+                       "a run the channel has no items for was given some")
+    }
+
+    // MARK: - Sanitising and the waiting count
+
+    /// Every wire string a node draws passes `TextSanitiser` once, where the content is built
+    /// (child spec D11, §12).
+    func testEveryDrawnStringIsSanitised() throws {
+        var tree = InventedAgents.tree()
+        tree.apply(taskStarted: InventedAgents.taskStarted(taskID: "task_invented0004", toolUseID: "toolu_invented0004",
+                                                 agentType: "an\u{202E}invented\u{200B}agent",
+                                                 description: "an\u{2028}invented\u{0007}errand",
+                                                 depth: 1),
+                   at: InventedAgents.epoch)
+        tree.apply(taskProgress: InventedAgents.taskProgress(taskID: "task_invented0004",
+                                                   summary: "read\u{FEFF}ing an\u{202D}invented file",
+                                                   lastToolName: "Re\u{200D}ad"),
+                   at: InventedAgents.epoch)
+
+        let read = AgentRunRead(timeline: ChannelTimeline(agents: tree))
+        let content = try XCTUnwrap(read.content(of: "task_invented0004"), "the read holds no content for the run")
+
+        // Both halves, per field. The control characters are gone **and** the readable text is still
+        // there: a content boundary that blanked a field, or dropped it, or handed back the whole
+        // string minus everything printable would pass a strip-count assertion on its own — and an
+        // absent field would pass one that skipped nil. Each expectation is the wire string with
+        // exactly the strip set removed.
+        let drawn: [(String?, String)] = [(content.agentType, "aninventedagent"),
+                                          (content.description, "aninventederrand"),
+                                          (content.activityLine, "reading aninvented file"),
+                                          (content.lastToolName, "Read")]
+        XCTAssertEqual(drawn.count, 4, "the node draws \(drawn.count) wire string(s), not the 4 D11 names")
+        for (index, field) in drawn.enumerated() {
+            guard let value = field.0 else {
+                // Reported rather than thrown, so one dropped field does not hide the other three.
+                XCTFail("wire string \(index + 1) of \(drawn.count) is drawn as nothing at all, "
+                        + "and dropping a field is not sanitising it")
+                continue
+            }
+            let stripped = value.unicodeScalars.filter(TextSanitiser.isStripped).count
+            XCTAssertEqual(stripped, 0,
+                           "wire string \(index + 1) of \(drawn.count) kept \(stripped) scalar(s) the sanitiser strips")
+            XCTAssertTrue(value == field.1,
+                          "wire string \(index + 1) of \(drawn.count) lost \(field.1.count - value.count) "
+                          + "readable character(s) with the control characters")
+        }
+    }
+
+    /// The waiting badge's count is the channel's **pending** decisions whose `agent_id` is this
+    /// node's — counted per run, and never a card the user has already answered.
+    ///
+    /// Discriminating on two axes at once, because the one-each corpus this replaced could tell
+    /// neither: the two runs wait on **different** numbers of cards, so a read that counted the
+    /// channel's pending decisions and put the total on every node, or that swapped the two nodes'
+    /// counts, now answers wrongly; and one of the first run's cards is already answered, so a read
+    /// that counted every decision rather than the pending ones over-reports a run that is waiting
+    /// on nothing of the kind.
+    func testTheWaitingCountComesFromTheDecisionsAgentID() throws {
+        var tree = InventedAgents.tree()
+        tree.apply(taskStarted: InventedAgents.taskStarted(taskID: "task_invented0005", toolUseID: "toolu_invented0005",
+                                                 agentType: "an-invented-agent", depth: 1),
+                   at: InventedAgents.epoch)
+        tree.apply(taskStarted: InventedAgents.taskStarted(taskID: "task_invented0006", toolUseID: "toolu_invented0006",
+                                                 agentType: "an-invented-sibling", depth: 1),
+                   at: InventedAgents.epoch)
+        var overlay = Overlay.empty
+        overlay.decisions = [
+            // Two pending on the first run, one on the second, and one the user has already
+            // answered — a card that is on neither node's badge and on the channel's total.
+            RequestID(rawValue: "req_invented0001"): InventedAgents.decision("req_invented0001", agent: "task_invented0005"),
+            RequestID(rawValue: "req_invented0002"): InventedAgents.decision("req_invented0002", agent: "task_invented0005"),
+            RequestID(rawValue: "req_invented0003"): InventedAgents.decision("req_invented0003", agent: "task_invented0006"),
+            RequestID(rawValue: "req_invented0004"): InventedAgents.decision("req_invented0004", agent: "task_invented0005",
+                                                                             state: .answered(outcome: "allow")),
+        ]
+
+        let read = AgentRunRead(timeline: ChannelTimeline(overlay: overlay, agents: tree))
+
+        let mine = try XCTUnwrap(read.content(of: "task_invented0005"), "the read holds no content for the run")
+        let sibling = try XCTUnwrap(read.content(of: "task_invented0006"), "the read holds no content for the sibling")
+        XCTAssertEqual(mine.waitingCount, 2,
+                       "the node reports \(mine.waitingCount) waiting decision(s) of the 2 pending on it")
+        XCTAssertEqual(sibling.waitingCount, 1,
+                       "the sibling reports \(sibling.waitingCount) waiting decision(s) of the 1 pending on it")
+        XCTAssertEqual(mine.waitingCount + sibling.waitingCount, 3,
+                       "the 4 card(s) in the channel put \(mine.waitingCount + sibling.waitingCount) on the two "
+                       + "nodes, not the 3 that are still pending")
+    }
+}
+
+/// The invented material every Agents suite in this directory is built from: a tree over an
+/// invented config home, frames decoded the way the wire decodes them, and items attributed to an
+/// agent stream. A word and a repeated nibble throughout, so nothing here can be mistaken for an
+/// engine byte or for anybody's own session (§11). Nothing is opened and nothing is written (X9).
+enum InventedAgents {
+
+    static let epoch = Date(timeIntervalSince1970: 1_800_000_000)
+
+    private static let session = SessionID("eeeeeeee-5555-4555-8555-eeeeeeeeeeee")!
+
+    /// A tree over an invented config home. Nothing opens it: the tree computes URLs from it and
+    /// this file asks for none (X9).
+    static func tree() -> AgentRunTree {
+        AgentRunTree(configHome: URL(fileURLWithPath: "/invented/config-home"),
+                     sessionID: session, slug: "an-invented-slug")
+    }
+
+    /// One tree holding `count` top-level runs, started in order, with invented ids.
+    ///
+    /// `at` is the runs' elapsed origin. It defaults to the invented epoch — a fixed instant, so
+    /// nothing that reads the tree depends on when the suite ran — and a test about elapsed passes
+    /// the wall clock instead, because a run that started years ago draws a span that moves once a
+    /// minute and a test about one second would never see it change.
+    static func treeOfRoots(_ count: Int, at started: Date = epoch) -> AgentRunTree {
+        var tree = tree()
+        for index in 0..<count {
+            tree.apply(taskStarted: taskStarted(taskID: "task_invented000\(index)",
+                                                toolUseID: "toolu_invented000\(index)",
+                                                agentType: "an-invented-agent", depth: 1),
+                       at: started)
+        }
+        return tree
+    }
+
+    /// One depth-1 run with one depth-2 run under it, joined the way the wire joins them: the
+    /// nested run's spawning block was carried by a frame from inside its parent's block.
+    static func nestedPair() -> AgentRunTree {
+        var tree = treeOfRoots(1)
+        tree.apply(taskStarted: taskStarted(taskID: run(1), toolUseID: "toolu_invented0001",
+                                            agentType: "an-invented-nested-agent", depth: 2),
+                   at: epoch)
+        tree.observe(parentToolUseID: "toolu_invented0000", carryingToolUseIDs: ["toolu_invented0001"])
+        return tree
+    }
+
+    /// The id `treeOfRoots(_:)` gives its nth run.
+    static func run(_ index: Int) -> AgentRunID { "task_invented000\(index)" }
+
+    /// `nested-depth-2` folded through C3's own wire reducer — the same reducer a live channel runs,
+    /// and the only source of the tree on this baseline.
+    static func nestedDepthTwo() throws -> AgentRunRead {
+        let reducer = try TimelineCorpus.wire("nested-depth-2")
+        return AgentRunRead(timeline: ChannelTimeline(durable: reducer.durable,
+                                                      overlay: reducer.overlay,
+                                                      agents: reducer.agents))
+    }
+
+    /// A `task_started`, decoded rather than constructed: ClaudeWire's field structs synthesise an
+    /// *internal* memberwise initialiser, and building from JSON also keeps the invented frame in
+    /// the shape the wire uses.
+    static func taskStarted(taskID: String, toolUseID: String, agentType: String,
+                            description: String = "an invented errand", depth: Int) -> TaskStarted {
+        decode(["type": .string("system"), "subtype": .string("task_started"),
+                "task_id": .string(taskID), "tool_use_id": .string(toolUseID),
+                "description": .string(description), "subagent_type": .string(agentType),
+                "spawn_depth": .integer(Int64(depth)), "task_type": .string("local_agent"),
+                "uuid": .string("aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"),
+                "session_id": .string(session.description)])
+    }
+
+    /// The frame a run **ends** by: C3 folds a node's terminal status from `task_notification` and
+    /// from nothing else, so a test about a finished run sends one rather than setting a field.
+    static func taskNotification(taskID: String, status: String,
+                                 summary: String = "an invented result") -> TaskNotification {
+        decode(["type": .string("system"), "subtype": .string("task_notification"),
+                "task_id": .string(taskID), "status": .string(status),
+                "output_file": .string(""), "summary": .string(summary),
+                "uuid": .string("aaaaaaaa-3333-4333-8333-aaaaaaaaaaaa"),
+                "session_id": .string(session.description)])
+    }
+
+    static func taskProgress(taskID: String, summary: String, lastToolName: String) -> TaskProgress {
+        decode(["type": .string("system"), "subtype": .string("task_progress"),
+                "task_id": .string(taskID), "description": .string("an invented step"),
+                "usage": .object([:]), "summary": .string(summary), "last_tool_name": .string(lastToolName),
+                "uuid": .string("aaaaaaaa-2222-4222-8222-aaaaaaaaaaaa"),
+                "session_id": .string(session.description)])
+    }
+
+    private static func decode<T: Decodable>(_ object: [String: JSONValue]) -> T {
+        guard let data = try? JSONValue.object(object).canonicalData(),
+              let frame = try? JSONDecoder().decode(T.self, from: data) else {
+            preconditionFailure("an invented frame did not decode as one")
+        }
+        return frame
+    }
+
+    private static var stream: LogicalStream {
+        LogicalStream(configHome: URL(fileURLWithPath: "/invented/config-home"), sessionID: session, name: .main)
+    }
+
+    /// A tool call attributed to one agent stream, or to the main thread when `agent` is nil.
+    static func call(_ toolUseID: String, agent: String?) -> TimelineItem {
+        .toolCall(ToolCallItem(id: ItemID(stream: stream, key: toolUseID),
+                               timestamp: epoch,
+                               provenance: Provenance(stream: stream, agentID: agent, origin: .wire),
+                               toolUseID: toolUseID,
+                               name: "Read",
+                               rawInput: .object([:]),
+                               status: .completed))
+    }
+
+    static func decision(_ request: String, agent: String,
+                         state: DecisionItem.State = .pending) -> DecisionItem {
+        DecisionItem(id: ItemID(stream: stream, key: request),
+                     timestamp: epoch,
+                     provenance: Provenance(stream: stream, agentID: agent, origin: .wire),
+                     requestID: RequestID(rawValue: request),
+                     kind: .permission,
+                     title: "an invented permission",
+                     agentID: agent,
+                     state: state,
+                     payload: .object([:]))
+    }
+}

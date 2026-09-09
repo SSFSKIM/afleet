@@ -144,6 +144,23 @@ final class AppModel: FilesTabHost, SourceControlTabHost {
     /// call site changes when it does.
     var agentNavigation: any AgentNavigating = NoAgentNavigation()
 
+    /// Which run each channel's Agents pane has open (C6.4, child spec D5).
+    ///
+    /// **One instance, app-scoped**, for the reason `decisions` above it is: contract Y4's
+    /// `show(run:in:)` is synchronous and the tab's per-channel session is built lazily by the host
+    /// on first render, so a chip clicked before the tab was ever opened has nothing to write to. A
+    /// store per surface would drop exactly those navigations.
+    let agentSelection = AgentSelectionStore()
+
+    /// Every *Send message* the app has relayed to an agent, and what became of each (item 51,
+    /// contract Y8).
+    ///
+    /// **One instance, app-scoped**, for `agentSelection`'s reason and one more: the surface that
+    /// draws a relay's delivery state is the **main timeline's** user-message row, not the Agents
+    /// tab, so the record has to outlive the panel session that made it. A registry per surface
+    /// would leave the row that must show the *Retry* with nothing to read.
+    let agentRelay = AgentRelayRegistry()
+
     /// Activity, the badges and the notification router (spec §5, §6). Nil until a launch reaches a
     /// workspace, and rebuilt by each one — *Check again* is the same call as the first launch, and
     /// a second Activity following the first fleet's channels would notify twice.
@@ -545,6 +562,80 @@ final class AppModel: FilesTabHost, SourceControlTabHost {
             // withdrawal and the registration are the same two lines each time, so no launch leaves
             // two indistinguishable targets tying on specificity.
             await registerCommandLinkTarget()
+
+            // C6.4's Agents tab under `.agents` (contract Y3, and this leaf's `[parent-impact]`).
+            // **A plain registration, not a handover**: `PlaceholderTab` claims `.thread` alone and
+            // nothing else registers `.agents`, so there is nothing to unregister first. Here
+            // rather than on `init`'s registration line for Y3's second reason — the tab's own
+            // later actions are X5 requests, and the lifecycle exists nowhere earlier.
+            //
+            // The registry reaches it as a closure and not as a reference: a panel holding the
+            // app's one `ChannelTimelineRegistry` is the duplicate-capability path the C6 cut
+            // exists to prevent, and X7 hands panels capabilities rather than the host.
+            //
+            // **Once for the process, like the Browser's targets.** `launch()` runs again on
+            // *Check again*, and a plain second `register` would trap on the duplicate. Keeping the
+            // first registration is right rather than merely safe: everything this tab holds is
+            // app-scoped and outlives a launch — the registry closure reads whichever workspace
+            // `bindWorkspace` last attached, and the selection store is the same one either way.
+            if !panels.isRegistered(.agents) {
+                // The lifecycle is the tab's third app-scoped object, and it is Y3's second reason
+                // for registering here at all: §8.8's node actions are X5 requests — `stop_task`,
+                // `background_tasks`, `.stopEverything`, `.backgroundAll` — and there is no fleet to
+                // send them by anywhere earlier.
+                let agents = AgentsTab(timelines: { [timelines] key in timelines.model(for: key).timeline },
+                                       selection: agentSelection,
+                                       // Through the registry and not by value: `launch()` runs
+                                       // again on *Check again* and this first registration is the
+                                       // one that stays, so a fleet captured here would be the
+                                       // fleet of a workspace the app has since replaced.
+                                       // `attach` updates the registry's, which is what every other
+                                       // closure on this tab already follows.
+                                       lifecycle: { [timelines] in timelines.lifecycle },
+                                       // Contract Y2 and Y7: a card answered on a node raises
+                                       // `HostSignal.decisionAnswered` on the channel's own fold —
+                                       // the engine sends no frame back for an answer — and it
+                                       // reserves the request in the app's **one** set, so the same
+                                       // card answered here and in Activity cannot both reach the
+                                       // wire. Two closures over the one registry, never a second.
+                                       fold: ChannelFold(timelines: timelines),
+                                       reservations: decisions,
+                                       // Contract Y8: the app's one relay registry, written by a
+                                       // node's *Send message* here and read by the main
+                                       // timeline's row through `agentNavigation` below. Two
+                                       // registries would be two answers about one delivery.
+                                       relay: agentRelay)
+                do {
+                    try panels.register(agents)
+                } catch {
+                    assertionFailure("the Agents tab is registered on a host where nothing holds .agents")
+                }
+                // Contract Y4, installed: the `Agent` chip's seam, which has been
+                // `NoAgentNavigation` since C6.1 landed it. It focuses the run's channel, selects
+                // this tab and writes the run into the app-scoped store the session reads when the
+                // host builds it — the shell and the host through closures, never references.
+                agentNavigation = AgentNavigator(selection: agentSelection,
+                                                 focusChannel: { [shell] key in shell.select(key.session) },
+                                                 selectTab: { [panels] in panels.select(.agents) },
+                                                 // Contract Y8's other half: the timeline's one
+                                                 // seam to this leaf answers a row's "what became
+                                                 // of the message I sent", derived from the
+                                                 // channel's own published fold.
+                                                 relay: agentRelay,
+                                                 timelines: { [timelines] key in
+                                                     timelines.model(for: key).timeline
+                                                 })
+                // Its `/agents` command target (child spec D15, tracker 207), registered **with the
+                // tab** and awaited — a session is built lazily for rendering, so a link raised
+                // before anyone opened the tab must still resolve. It cannot go beside the
+                // Browser's at the top of this call: the tab does not exist until the lifecycle
+                // does, a few lines above. Awaiting here is still strictly before the first link
+                // that can be raised, because nothing this launch reached is on screen until
+                // `route` is published below.
+                for target in agents.linkTargets(through: { [panels] in panels.select(.agents) }) {
+                    await panels.links.register(target)
+                }
+            }
         }
         await startActivity(over: reached)
         // **Last.** Publishing the route is what puts the actionable surfaces on screen — the

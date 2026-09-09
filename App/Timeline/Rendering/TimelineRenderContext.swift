@@ -158,6 +158,72 @@ struct TimelineRenderContext {
     /// renderer honours rather than a debug switch. Task 5 lands the readout that sets it; until
     /// then fenced blocks are highlighted, which is what the engine's own renderer does.
     var syntaxHighlightingEnabled: Bool = true
+
+    /// Who the assistant's messages on this surface are by, when the surface is not the channel's
+    /// own thread.
+    ///
+    /// **Nil is the default and is the channel's own reading**, so nothing about the channel column
+    /// moves: a row drawn without one is authored exactly as it was before this field existed. An
+    /// agent run's transcript supplies one, because acceptance item 38 wants a subagent's messages
+    /// authored by the *agent type* with the *run's* badge and never by "Claude" — and that is a
+    /// property of the surface rather than of any row. Every row of one run shares it, and a row
+    /// that derived it for itself would have to reach the channel's run tree from inside a message.
+    var authorship: TimelineAuthorship?
+}
+
+// MARK: - Contract Y8 — a relayed message's delivery state, on the row that sent it
+
+extension TimelineRenderContext {
+
+    /// **Contract Y8's reader**, keyed by the sent message's identity — the prompt uuid
+    /// `LifecycleAPI.sendPrompt` minted, which is what a `userMessage` row carries as its
+    /// `promptUUID` (root §8.8, acceptance item 51).
+    ///
+    /// *Send message* on an agent node is an ordinary main-session prompt, so it lands in the main
+    /// timeline as a plain user message, and item 51 says the message "appears in the main timeline
+    /// with its state". The state is not on the item and cannot be — no engine frame carries it, and
+    /// §7.3 forbids this leaf a reducer — so it is host bookkeeping the row reads through here.
+    ///
+    /// **A reading through the Agents seam this context already holds, rather than a stored field.**
+    /// A stored field is one every construction site must remember to fill, and a site that forgot
+    /// it would leave the *Retry* reachable only by opening another tab — which is the silent
+    /// non-delivery item 51 exists to prevent, reintroduced by an unassigned capability. Y7's rule is
+    /// that a capability nobody assigns is the failure these contracts are for; deriving it from
+    /// `agents` leaves nothing to assign.
+    var relay: AgentRelayReader { AgentRelayReader(agents: agents, channel: key) }
+}
+
+/// Y8's reader: one prompt uuid in, one reading out, and nothing else.
+///
+/// It carries no message text and no run id (§11), and it answers nil for every message that sent no
+/// relay — which is every ordinary message in every channel, and is why the row it decorates draws
+/// nothing extra where there is no record.
+struct AgentRelayReader {
+
+    let agents: any AgentNavigating
+    let channel: ChannelKey
+
+    @MainActor
+    func reading(of promptUUID: String) -> AgentRelayReading? {
+        guard !promptUUID.isEmpty else { return nil }
+        return agents.relay(forPrompt: promptUUID, in: channel)
+    }
+}
+
+/// Who a surface's assistant messages are by, and on which model (root §8.8, item 38).
+///
+/// Two strings and nothing else: the fields a row's frame already draws. It carries no run id, no
+/// node and no tree — a value that carried the run would put a task id inside every row's context
+/// for the first diagnostic that prints one (§11), and the row has no use for it.
+struct TimelineAuthorship: Equatable, Sendable {
+
+    /// The name above the message. Sanitised by whoever built it, at the boundary where the wire
+    /// string became content — this value re-strips nothing and inherits the strip.
+    let author: String
+
+    /// The badge beside the name, or nil where the surface knows of none and the row should fall
+    /// back to the message's own model.
+    let badge: String?
 }
 
 // MARK: - What a row builds through the context

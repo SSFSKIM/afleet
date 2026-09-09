@@ -69,6 +69,12 @@ not renumber anything above.
     and identical on the corpus; they diverge only for a depth-2 node no source answered for,
     which surfaces as a root instead of vanishing. C6 reads `roots` and must be told at
     recomposition. Owner: C3 (whole-branch review). Closer: decide which reading C6 needs.
+    **Answered 2026-09-09 by C6.4, which is the C6 surface that reads it.** C6.4 takes `roots` as
+    it stands (`parent == nil`). A depth-2 node no source answered for should surface at the top
+    level, visible and openable with its depth drawn, rather than being filtered out of a tree
+    that draws only depth-1 roots: an orphan the user can open is the truth, and an orphan that
+    vanishes is not. `AgentRunReadTests.testAnOrphanSurfacesAsARootWithItsDepthDrawn` pins it from
+    the consumer's side. No change to `roots` is wanted; this entry closes.
 14. **Incremental reduction in `StreamIngestion.publish`.** `publish`
     (`FleetKit/Sources/FleetTimeline/Ingest/StreamIngestion.swift:884`) recomputes the whole
     projection through `recompute()` (`:858`) once per applied frame, so draining N buffered
@@ -3813,3 +3819,282 @@ four whole-branch review rounds.
      carries, so it borrows `FilesPanelStore`'s rather than adding a fourth copy: correct, and an
      edge from C5's host to a C7 leaf that exists only for a string. Closer: the hash on a type in
      `PanelHostAPI` or `AfleetCore`, which every one of the four can reach. Owner: C7 under W6.
+
+## From C6.4 (`child/c6-agents`)
+
+Entries **172 through 186** are C6.4's, as the C6 composite's leaf table allots them, with
+**398 through 405** held in reserve (allotted at this child's gate) if the parent-impact work
+needs more. Nothing above is renumbered.
+
+172. **`ChannelTimeline.agents` is never nil for an opened channel, so a file-only channel is
+     told it has no agent runs.** `StreamIngestion.agents` is documented "nil for good on a
+     file-only channel: no wire means no fold, so no tree"
+     (`FleetKit/Sources/FleetTimeline/Ingest/StreamIngestion.swift:154–155`), and X4's
+     2026-09-08 amendment says the same. Neither is true: `open` assigns
+     `wire = WireReducer(stream:slug:)` unconditionally (`:247`), and
+     `ChannelTimelineModel.performOpen` hands an archived or foreign channel
+     `Self.finishedEvents()` rather than no stream at all
+     (`App/Timeline/ChannelTimelineModel.swift:470`), so `agents` is a **non-nil empty tree**
+     for every channel afleet opens from disk. The consequence is a false sentence to the user:
+     C6.4's Agents tab distinguishes "no runs in this channel" from "this channel has no wire,
+     so the runs are not visible" (spec D10) and today only the first is reachable, so an
+     archived session with a dozen recorded subagent runs reads *No agent runs in this channel.*
+     Found at C6.4 Task 1 by measuring the value rather than reading the comment;
+     `AppTests/AgentChipTests` did not catch it because it constructs `agents: nil` by hand.
+     C6.4 kept the honest three-state read and asserted the no-wire arm over the value the read
+     is defined on, rather than asserting the defect.
+     **Closed by the C3 corrective (`main`, merged into this child at Wave B).** It took the
+     first of the two branches the closer named: `StreamIngestion` now feeds the `agent_metadata`
+     record and every `.meta.json` sidecar beside the transcript into the tree through
+     `apply(agentMetadata:for:)` and `apply(metaFile:)`, for live *and* file-only channels, so an
+     archived or foreign session has the tree its own corpus produces rather than an empty one.
+     The doc comment at `StreamIngestion.swift:154–158` was corrected with it: `agents` is nil
+     **only before `open` builds the reducer** and non-nil afterwards for every channel kind.
+     C6.4's read kept its three states and re-worded the third, which no longer means "this
+     channel has no wire, so the runs are not visible" but "this channel's fold has not been
+     built yet" — `AgentRunRead.State.notOpened`, drawn by `AgentTreeEmptyState.notOpened`, and
+     reached by a channel the host holds no model for. `AgentTreeGateTests` asserts the archived
+     channel's runs are read rather than swallowed by an empty state. X4's own 2026-09-08
+     parenthesis is retracted in the same amendment (root spec §17 X4, corrective `b412f2e`), so
+     nothing is left carrying the refuted sentence. Owner: closed. Raised by C6.4 Task 1; closed
+     at C6.4 Wave B.
+
+173. **C3's `isParked` and §8.8's parking sentence are two different readings, and only one is
+     computable.** `AgentRunTree.isParked(_:)`
+     (`FleetKit/Sources/FleetTimeline/Agents/AgentRunTree.swift:194`) is "this node is not
+     running and some child is". §8.8 and the parity map's §18.23.3 say parking is "an agent that
+     finished but holds children — completed children under a node with **no
+     `task_notification`**", detected by "completed children but no notification". The tree
+     carries no notified bit: `notified` is a `RegistryEntry` field
+     (`Registry/RegistryMirror.swift:27`) and the mirror is not published on `ChannelTimeline`
+     (tracker 321). The two readings agree while a child still runs and diverge exactly at the
+     tail — a node whose children have all settled and whose notification has not arrived, which
+     §8.8 calls parked and `isParked` calls finished. C6.4 draws C3's reading, because it is the
+     one the data supports and it catches the case the user cares about (a node that looks
+     finished while work continues under it), and files the tail rather than approximating it.
+     `isParked` had no caller anywhere in the tree before C6.4. Closer: once the mirror is
+     published, add the notification arm and decide whether `isParked` becomes the union of the
+     two or stays the live reading with a second query beside it. Owner: C3 for the definition,
+     C6.4's successor for the drawn state. Raised by C6.4 Task 1.
+
+174. **`.agents` needed a once-per-process registration guard that no other tab's registration
+     documents.** `AppModel.launch()` runs again on *Check again*, and `PanelHost.register` traps
+     on a duplicate — so a plain `try panels.register(AgentsTab(...))` in `performLaunch` takes
+     the app down on the second launch. Found the hard way: the full floor crashed the app test
+     bundle with a fatal error during a second-launch test. The Browser's registration sits in
+     `init` and cannot hit this; the Thread tab's is a handover, whose `unregister` makes the
+     second pass idempotent by accident rather than by design. C6.4 guards the tab, the
+     `agentNavigation` install and the link-target registration together. Closer: the guard is a
+     property of "registered in `performLaunch`", not of this tab, so the next child that
+     registers there will rediscover it — name the rule where Y3 is stated rather than in three
+     tabs' comments. Owner: the C6 composite (Y3's wording). Raised by C6.4 Task 2.
+
+175. **The Agents tree's scroll position is not retained on the session, so a channel switch
+     returns the user to the top of the tree.** `AgentsModel` holds the disclosure set and reads
+     the open run from the app-scoped selection store, and `AgentOutline`
+     (`App/Agents/AgentTreeView.swift:103–140`) scrolls only on appearance and on a change of the
+     open run — nothing carries where the user had scrolled to. X7 makes a panel's session the
+     place per-channel state lives for the session's lifetime, and this is per-channel state that
+     does not live there: on a tall tree, switching away and back drops the user at the top of a
+     branch they were reading in the middle of. Bounded by what already survives — the two things
+     a user notices, the disclosure state and the selected run, are both on the session or the
+     store, and the run they had open is scrolled back to on appearance — which is why C6.4's fix
+     wave ruled it deferred rather than fixed. Closer: hold the outline's scroll offset (or the
+     id of the first visible row, which survives a tree that moved) on `AgentsModel` and restore
+     it on appearance, ahead of the open-run scroll. Owner: C6.4's successor, with the transcript
+     pane's own scroll retention, which has the same shape. Raised by Wave A review.
+
+
+176. **`ViewTree.values(of:in:)` matches an empty array of any element type against an empty
+     array of any other, so a walk for one row type silently finds an unrelated empty one.**
+     `AppTests/Support/ViewTree.swift:7` is `if let match = value as? T { return [match] }`, and
+     an empty Swift array dynamic-casts to any other array type — `[] as [String] as? [SomeRow]`
+     succeeds and yields an empty `[SomeRow]`. So `values(of: [SomeRow].self, in: body)` returns
+     a first element that came from a different property entirely whenever the body stores an
+     empty array of anything, and every assertion over `.first?.count` then reads 0 from a value
+     that is not the one under test. The consequence is a test that passes for the wrong reason
+     and, worse, one that *fails* for the wrong reason: it cost one wrong assertion in this child
+     already, where a walk for a row array found an unrelated empty array first and the fix was to
+     walk for the view that holds the rows instead of for the array. Wave A found it, verified it
+     and correctly declined to fix it, because `AppTests/Support/` is another leaf's ground and a
+     change there moves every suite in the bundle. Closer: make the match refuse an empty
+     collection whose dynamic type is not `T` — compare `type(of: value)` before the cast, or take
+     the element type as a second parameter — and run the whole app bundle behind it, since the
+     helper is used by every panel's tests. Owner: whoever owns `AppTests/Support/`, ahead of the
+     next child that walks for an array. Raised by C6.4 Wave A, filed by Wave B.
+
+177. **A subagent's live tail is never drawn under the subagent, because the fold keeps one
+     unattributed streaming preview per channel.** `WireReducer` opens and appends to a single
+     `preview` on every `stream_event`
+     (`FleetKit/Sources/FleetTimeline/Reduce/WireReducer.swift:250–255`) and drops the frame's
+     `parentToolUseID` while doing it, and `StreamingPreview`
+     (`Reduce/StreamingPreview.swift:28–39`) carries no agent field at all — so nothing on the
+     value says whose the tail is. `ChannelTimeline.preview` is therefore the channel's, with no
+     way to ask whether it belongs to a run. C6.4's transcript pane passes **nil**: a tail with
+     no attribution is the main thread's, and drawing it under a subagent would put the parent's
+     words in the child's mouth, which is worse than not drawing it. The consequence is bounded —
+     a depth-1 run's text is forwarded and lands as items the moment the message closes, so the
+     run's transcript is complete a beat later and only the *live* typing is missing — but it
+     means a subagent that is thinking looks idle in its own pane while the tree row beside it
+     shows it running. Closer: carry the stream event's `parent_tool_use_id` onto the preview (the
+     wire has it; the reducer discards it) and keep one preview per agent stream, then the pane
+     passes the preview whose agent is the run's. Owner: C3, with whoever next touches the
+     preview's shape. Raised by C6.4 Task 4.
+
+178. **A node's backgrounding offer is cached on a key that cannot see the tool-use id change.**
+     C6.4's read is rebuilt when `AgentRunRead.Source` moves, and the mirror's third of that key
+     is `TaskCardEligibility` (`App/Decisions/TaskCardView.swift`), which records per task only
+     whether the action is available, the status and the two instants — deliberately, because
+     `RegistryEntry.lastFrameAt` is stamped by every `task_progress` heartbeat and a key over the
+     whole mirror would rebuild a chatty channel's tree read several times a second. The gap is
+     that eligibility requires a `tool_use_id` to *exist* and says nothing about its **value**, so
+     a mirror row whose id changes while the run stays running, foreground and backgroundable
+     leaves the cached `AgentNodeContent.backgroundToolUseID` naming the previous one, and
+     `background_tasks` would then name a tool use the engine has moved on from. No frame observed
+     in the corpus rewrites a live row's `tool_use_id` — `apply(taskStarted:)` and
+     `apply(taskProgress:)` only ever set it when the frame carries one, and a re-arm is the same
+     run — so this is a gap in the key rather than a reachable defect today, and the same gap is
+     the task card's, which is why it was not closed one-sidedly here. Closer: fold the id into
+     `TaskCardEligibility`'s row, which costs one string per task and changes nothing about the
+     heartbeat's cost. Owner: whoever owns `TaskCardEligibility`, with both of its readers.
+     Raised by C6.4 Task 5.
+
+179. **"Background tasks are disabled in this session." is remembered for the panel's life, not
+     the process's.** §6.4 says the refusal hides both backgrounding affordances *for that
+     process*, and `AgentNodeActions.backgroundingDisabled` (`App/Agents/AgentNodeActions.swift`)
+     is set when the engine sends it and is never cleared. The panel's session outlives the
+     process: a quiescent restart, a `.reopen` or any other replacement gives the channel a new
+     epoch, and a channel that was launched with backgrounding disabled and is relaunched without
+     it keeps the affordances hidden until the session is rebuilt. The failure is one-directional
+     and quiet — the user sees no *Move to background* on a channel that would now accept it, and
+     nothing says why — which is why it is filed rather than left unstated. It is deliberately not
+     "clear it on any success", which would put the affordance back after an unrelated request
+     succeeded. Closer: hold the reading against the `ProcessEpoch` it was learned in, and drop it
+     when the epoch moves — `HostSignal.processReplaced` already carries the epoch to the fold, so
+     the fact is on the wire the panel already reads. Owner: C6.4's successor. Raised by C6.4
+     Task 5.
+
+180. **Two `WorkspaceLink.command` targets now overlap, and the older one's comment says they
+     cannot.** `CommandLinkTarget` (`App/Composer/CommandLinkTarget.swift:30–37`, C7's acceptance
+     item 3) claims **every** `.command` link at specificity 1, and its comment reasons from
+     "nothing else claims `.command`, so there is no tie to break, and a higher number would be a
+     claim about a competition that does not exist." At C6.4's merge that stops being true:
+     `AgentsTab.linkTargets` claims `command("agents")` at specificity 50, so the router's
+     most-specific rule sends `/agents` to the Agents tab and every other command to the channel's
+     composer. That is the outcome tracker **207** asked for — it named C6.4 as the owner of the
+     `agents` half precisely because `composer.present(native:)` had nowhere to send it — so the
+     behaviour is right and only the reasoning is stale. The risk it leaves is a silent one: the
+     next child to claim a command link will read that comment, take specificity 1, and tie with
+     C7's target on a link both claim, where the winner is whichever the registry compares first.
+     Closer: reword the comment to say a specific claim outranks the catch-all, and say what a
+     second catch-all would mean. Owner: C7's composer leaf for the comment; the C6 composite if
+     it would rather state the rule once where link targets are described. Raised by C6.4 at the
+     `2b9c18d` merge.
+
+
+181. **A relay's delivery state does not survive a relaunch, so a *Retry* the user was offered
+     stops existing.** `AgentRelayRegistry` (`App/Agents/AgentRelayRegistry.swift`) is an
+     app-scoped in-memory object: it holds one record per *Send message* and the closure that
+     re-sends it, and nothing writes either anywhere (X9 forbids the config home, and this leaf
+     has no store of its own). The state itself is derived from the channel's timeline and would
+     survive, but the *record* — which prompt uuid was a relay, and for which run — does not, so
+     after a relaunch a relayed message is an ordinary user message again and its *Not delivered*
+     reading and *Retry* are gone. The reading is honest while it lasts and simply absent
+     afterwards, which is why this is debt and not a defect; closing it means a small persisted
+     table keyed by channel and prompt uuid, holding a digest and a run id and no text (§11).
+     Owner: C6.4's successor or whichever leaf lands panel-state persistence. Raised by C6.4 at
+     Task 7.
+
+182. **The delivery arm's text match is line-granular, and the forwarded frame's real shape is
+     unpinned.** `AgentRelayDigest` (`App/Agents/AgentRelayState.swift`) concludes *Delivered*
+     when the digest of the whole normalised candidate, one of its paragraphs, or one of its lines
+     equals the sent message's — which accepts a wrapper the harness prepends and refuses a mere
+     mention. Nothing in the pinned bundle states whether the engine forwards a `SendMessage`
+     body verbatim, so a harness that wrapped the message *within* a line (a prefix on the same
+     line, or a re-indent) would leave a delivered message reading *Relayed*, and then
+     *Not delivered* once the run's notification arrived — a false negative, which is the safe
+     direction but still wrong. Task 8's fixture is what pins the real shape; if it shows a
+     within-line wrapper, the match needs a containment test over the normalised line rather than
+     an equality one. **Amended at Task 8: the fixture does not pin it.** The pinned bundle states
+     the `SendMessage` result shape at its own definition site but says nothing readable about the
+     frame the receiving run gets, so the synthetic recording carries this leaf's assumption — a
+     `user` frame on the run's own stream inside a wrapper line — and names it in its `notes` as
+     one of the four things a real recording must settle. This entry therefore stays open and its
+     owner moves. Owner: whoever records a live `SendMessage` against a running agent. Raised by
+     C6.4 at Task 7, amended at Task 8.
+
+
+183. **The refused-resume reading turns on one key in the engine's result body, and nothing
+     alarms if that key moves.** `AgentRelayMachine.verdict(of:for:)`
+     (`App/Agents/AgentRelayRegistry.swift`) settles `.notDelivered(.refused)` from
+     `is_error` **or** from a `success: false` in the JSON the `tool_result` carries, because the
+     pinned bundle shows a resume refusal comes back as an ordinary non-error result whose body
+     says so. That reading is right today and is what stops a stopped agent's relay from sitting
+     at *Relayed* for ever. What is missing is drift protection: a release that renamed `success`,
+     nested it, or moved the outcome out of the text block would return the false positive
+     silently, and `probe diff` cannot catch it because a synthetic fixture is excluded from the
+     drift command by design. Closing it means a probe scenario that relays to a stopped agent
+     against a live binary and records the real result, which needs an account that permits a
+     turn. Owner: C1's probe suite, on a permitting account. Raised by C6.4 at Task 8.
+
+184. **G6's zero-turn half proves the tree reads from disk but exercises no nesting and no
+     parking.** The only session the scratch config home *lists* whose transcript directory holds
+     subagent files carries one run with no children, so `LiveAgentsTests`
+     (`AppTests/Live/LiveAgentsTests.swift`) asserts one root, its node content, and a five-row
+     per-run transcript that is a strict subset of the channel's sixteen — which is the claim the
+     gate needs — and asserts nothing about the two-step join, an orphan, or a parked parent. Those
+     stay on G1, which replays `nested-depth-2` and has both. Seven sessions on disk carry
+     subagent files and only one of them is listed, so a fixture recorded into a listed directory
+     with a nested run would close this at no model cost. Owner: whoever next extends the scratch
+     corpus. Raised by C6.4 at Task 10.
+
+185. **`probe verify`'s account-name scanner fires on an ordinary English word inside engine copy,
+     and will do so for every reviewer whose account name is a common word.** The
+     `send-message-delivery` fixture carries the engine's own stopped-by-user refusal template,
+     which contains the word "new"; on a machine whose home directory's last segment is `new` the
+     scanner reports one hit per file and asks a reviewer to judge it. The scanner documents this
+     case and the judgement is easy — the hit is engine copy, identical on every machine — but it
+     costs a reviewer a look on every walk, and a reviewer whose account name is *not* that word
+     never sees it, so two people walking the same fixture get different reports. Closing it means
+     either a per-fixture acknowledgement the manifest can carry, or restricting the rule to hits
+     that are not inside a value the fixture declares as carried copy. Owner: C1's probe suite.
+     Raised by C6.4 at Task 8.
+
+186. **Item 51's fourth arm reads "a frame arrived" where it means "a notification arrived".**
+     `AgentRelayMachine.stoppedBeforeNextRound` (`App/Agents/AgentRelayRegistry.swift`) settles the
+     *stopped before its next tool round* arm on `RegistryEntry.notified && status != .running &&
+     lastFrameAt > relay`. `lastFrameAt` moves for **any** frame naming the task, a `task_progress`
+     and a `background_tasks_changed` listing included, so the ordinary case item 51 is written
+     about — a message sent to a run that was already complete and already notified — reads the arm
+     the first time that run appears in a later listing, and reports *Not delivered* on the strength
+     of a notification that is not new. Nothing the mirror publishes tells a new notification from
+     an old one: there is no instant for the notification and no count of them, and `endedAt` is
+     stamped once and keeps its first value. Closing it needs one field on `RegistryEntry` —
+     `notifiedAt`, or a notification count — which this leaf may not invent; the arm and its
+     limitation are stated in the source. The way it is wrong is the visible direction: a *Not
+     delivered* with a *Retry* on a message that may still be queued, rather than a *Relayed* on one
+     that will never arrive. Owner: FleetKit's registry mirror, then this arm. Raised by C6.4 at fix
+     wave C.
+
+398. **What a delivery note *draws* is assertable; where the row *puts* it is not.**
+     `AgentRelayNote`'s sentence, reply and *Retry* are stored rather than computed inside `body`
+     because `Mirror` does not enter a `@ViewBuilder` — so a test can find the note in a row's tree
+     and build its body, which `AgentRelayTests` now does, but the step between the two is still
+     reflection: that the note is *in* the row's rendered hierarchy, and where, is taken from the
+     view value the body returned rather than from anything rendered. The same gap covers the
+     *Retry* button's placement and the `.red` styling of a *Not delivered* sentence. Closing it
+     means a rendering harness this repository does not have — a snapshot of the row, or a
+     view-inspection dependency — which is a decision above one leaf. Owner: whoever rules on a
+     rendering harness for the timeline's rows. Raised by C6.4 at fix wave C.
+
+399. **A *Retry* pressed after the panel session is gone words its refusal to nobody.**
+     Since fix wave C the resend closure holds the three app-scoped capabilities and the panel only
+     through a weak `report`, so the send itself survives an eviction — but the refusal it may come
+     back with is written to `AgentNodeActions.banner`, and after the eviction there is no such
+     object and no banner on screen. The user presses *Retry* on the main timeline's row, the relay
+     is refused by the lifecycle, and the row goes on showing the arm it showed before with no
+     sentence saying the retry failed. It is bounded — a refused `sendPrompt` opens no record, so
+     nothing is silently reported as sent — but the press reads as ignored. Closing it means a
+     channel-scoped refusal the Y8 note can draw beside the state, which is a new field on the
+     reading rather than a rewording. Owner: C6.4's successor on the relay. Raised by C6.4 at fix
+     wave C.
