@@ -1468,7 +1468,12 @@ Mitchell's Swift renderer or SwiftTerm is contained.
 directory: URL bar, back, forward, reload, inspector. Quick-open lists dev-server URLs seen
 in the current channel's tool output; links in messages open here, Cmd-click in the system
 browser. Tabs persist across channel switches; Workbench persists them under its own
-namespace of FleetKit's store.
+namespace of FleetKit's store. As shipped 2026-09-09 (C7.6): one tab set and one set of web views
+per process, owned by the tab and not by any channel's session; the URL bar's `NavigationPolicy`
+is the single place that decides what loads, what leaves for the system browser and what is
+refused — `javascript:` and `data:` are refused from the bar, a link, a redirect and a script
+alike; no script message handlers and no user scripts reach a page; the inspector follows the
+Debug build and the Developer setting in Release; a typed non-web scheme opens externally.
 
 ### 9.5 Jobs
 
@@ -2517,7 +2522,15 @@ registers the same tab at the same specificity and the router picks by specifici
 alone, so a link could open, and a save then write, a file in a channel the user was not looking
 at. C7.5 mitigates inside its fence (one registration per tab, delivered to the channel on
 screen); the amendment itself — the link carries its channel and the router matches on it — is a
-corrective on C5's `HostLinkRouter` and C7.2's `LinkRouter`, tracker 240.
+corrective on C5's `HostLinkRouter` and C7.2's `LinkRouter`, tracker 240. Amended 2026-09-09 at
+C7.6's merge: `LinkTarget.popsOutForNewWindow` (default `true`) lets a target decline the pop-out —
+the Browser's `.url` and `.pullRequest` targets do, and `.newWindow` on them opens the system
+browser, the skip taken in `LinkRouter.open` since the host hands `prepare` in before the registry
+resolves; and `PanelTab.makeView(session:context:surface:)` / `PanelHost.view(for:context:surface:)`
+take a `PanelSurface` — `.mainColumn` or `.poppedOutWindow(tab:channel:)` — with no default, because
+a tab that owns an `NSView` (the Browser's shared `WKWebView`s) must know which hierarchy is drawing
+it and which of several pop-outs; the web views follow the pop-out and the main column draws a
+"Showing in the Browser window" state with a way back.
 - **X8 Fixture and fake-claude format.** NDJSON frames with relative timestamps, paired
   with a transcript snapshot directory and a census JSON; a redaction manifest naming
   the fields removed; `fake-claude` accepts a fixture path, a speed factor, an
@@ -4698,3 +4711,6 @@ Pending — written at finish.
 - 2026-09-09 C7.5 merged (`517899d`; composite Revision Note of the same date). §8.7 gains Cmd+S;
   §9.1's watcher narrowed to open files; X7 records the link-channel gap (tracker 240) with C7.5's
   mitigation.
+- 2026-09-09 C7.6 merged (`6f8a8ec`; composite Revision Note of the same date). X7 amended twice
+  (pop-out declination; `PanelSurface` on the two view members); §9.4 records the shipped policy
+  and the one-tab-set claim.
