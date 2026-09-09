@@ -62,13 +62,19 @@ struct AgentChipContent: Equatable {
 enum AgentChip {
 
     /// The chip for one call, read from the call itself and from the neighbourhood around it.
+    ///
+    /// **The engine-supplied strings are sanitised here, once** (§12). The subagent type, the
+    /// description and the result's first line all come off the wire, and everything the chip draws
+    /// is derived from them — the title, the frame's badge, the headline and the description line.
+    /// Stripping them where the content is built means every reader of it draws the same sanitised
+    /// value, rather than each call site remembering to strip its own.
     static func content(for call: ToolCallItem, in context: TimelineRenderContext?,
                         now: Date = Date()) -> AgentChipContent {
         var type: String?
         var description = ""
         if case .agent(let input) = call.input {
-            type = input.subagentType
-            description = input.description
+            type = input.subagentType.map(TextSanitiser.sanitise)
+            description = TextSanitiser.sanitise(input.description)
         }
         let members = members(of: call, in: context)
         // The row is the group's, so everything on it is the group's: one member still working
@@ -84,7 +90,8 @@ enum AgentChip {
                                 elapsed: elapsed,
                                 runID: context?.neighbourhood.agents?.node(withToolUse: call.toolUseID)?.id,
                                 groupCount: members.count,
-                                headline: ToolResultForms.form(for: speaker(of: members, status: status) ?? call).headline,
+                                headline: TextSanitiser.sanitise(
+                                    ToolResultForms.form(for: speaker(of: members, status: status) ?? call).headline),
                                 isGroupLead: members.first?.toolUseID == call.toolUseID)
     }
 
@@ -168,7 +175,9 @@ struct AgentChipRow: View {
                 // would land another leaf on a node that does not exist (§9).
                 .disabled(!content.canNavigate)
                 if !content.description.isEmpty && content.groupCount == 1 {
-                    Text(TextSanitiser.sanitise(content.description))
+                    // Already sanitised: `AgentChipContent` is built stripped, so the line under
+                    // the chip and the title above it cannot disagree about the same text.
+                    Text(content.description)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)

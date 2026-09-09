@@ -180,6 +180,50 @@ final class AgentChipTests: XCTestCase {
         XCTAssertEqual(solo.status, .completed, "a lone finished call reads \(solo.status.rawValue)")
     }
 
+    // MARK: - Sanitising (round 2, scalpel-3 #2)
+
+    /// **Everything the chip draws is sanitised** (spec §12).
+    ///
+    /// The chip's title is the call's own `subagent_type` or `description`, and its headline is the
+    /// result's first line — all three engine-supplied, all three drawn raw while the description
+    /// line beneath them and the surrounding tool output were stripped. A bidi override in an agent
+    /// type reverses the rest of the chip's title, a zero-width mark hides a word boundary, and an
+    /// ANSI escape in a failure's first line reaches the layout intact. Sanitising happens where
+    /// `AgentChipContent` is built, so every reader of it — the title, the badge, the headline and
+    /// the description line — gets the stripped value. The text here is invented (§11).
+    func testTheChipsTitleAndHeadlineAreSanitised() {
+        let call = InventedItems.toolCall("Agent",
+                                          id: "toolu_invented0001",
+                                          input: .object(["description": .string("an invented\u{200B} errand"),
+                                                          "prompt": .string("an invented brief"),
+                                                          "subagent_type": .string("an-invented\u{202E}type")]),
+                                          result: .string("\u{1B}[31man invented refusal\u{1B}[0m"),
+                                          isError: true,
+                                          status: .failed,
+                                          messageID: "msg_invented0001")
+        let context = InventedItems.context(neighbourhood: TimelineNeighbourhood(items: [.toolCall(call)]))
+        let content = AgentChip.content(for: call, in: context)
+
+        let carried = [content.agentType ?? "", content.description, content.title, content.headline]
+            .filter { $0.unicodeScalars.contains(where: TextSanitiser.isStripped) }
+        XCTAssertEqual(carried.count, 0,
+                       "\(carried.count) of the chip's 4 derived string(s) still carry a stripped scalar")
+        XCTAssertEqual(content.title, "an-inventedtype", "the chip's title is \(content.title.unicodeScalars.count) scalar(s)")
+        XCTAssertEqual(content.description, "an invented errand",
+                       "the chip's description is \(content.description.unicodeScalars.count) scalar(s)")
+        // The escape's ESC is gone; its printable remainder stays as text, which is exactly the
+        // strip set parity §41.7 names — the sanitiser removes control and format scalars, it does
+        // not parse ANSI sequences.
+        XCTAssertEqual(content.headline, "Error: [31man invented refusal[0m",
+                       "the chip's headline is \(content.headline.unicodeScalars.count) scalar(s)")
+
+        // The four strings above are exactly the ones `AgentChipRow` hands to a `Text` or to the
+        // frame's badge, and they are asserted here rather than off the drawn body because the row
+        // builds them inside `RowFrame`'s stored `@ViewBuilder` closure, which reflection cannot
+        // enter (TimelineFixtureGateTests states the same limit). Sanitising at the content is what
+        // makes every reader of it — including the ones a test cannot reach — carry the same value.
+    }
+
     // MARK: - Fixtures
 
     private static func call(name: String, id: String = "toolu_invented0001",
