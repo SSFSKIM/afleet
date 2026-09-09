@@ -26,8 +26,10 @@ struct ToolCallRow: View {
         if ToolCallRow.isAgentChip(item) {
             AgentChipRow(item: item)
         } else {
-            RowFrame(author: ToolResultForms.userFacingName(of: item.name),
-                     badge: ToolResultForms.mcpFamily(of: item.name)?.server,
+            // The tool's name is the engine's text too, and the two labels it becomes are drawn
+            // beside the ones below: everything relayed goes through the sanitiser (spec §12).
+            RowFrame(author: TextSanitiser.sanitise(ToolResultForms.userFacingName(of: item.name)),
+                     badge: ToolResultForms.mcpFamily(of: item.name).map { TextSanitiser.sanitise($0.server) },
                      timestamp: item.timestamp) {
                 ToolCallHeader(item: item)
                 ToolResultBody(id: item.id, form: ToolResultForms.form(for: item))
@@ -83,11 +85,16 @@ struct ToolResultBody: View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
                 if form.isRunning { ProgressView().controlSize(.mini) }
-                Text(form.headline)
+                // **Sanitised, and not only `raw`.** The forms are derived *from* engine text and
+                // carry it: `errorHeadline` keeps the result's first line whole and several forms
+                // interpolate a path or a tool's own name. A bidi override in one of them reorders
+                // the collapsed label — the line a reader sees without expanding anything — so
+                // §12's rule applies to every derived label and not to the disclosure alone.
+                Text(TextSanitiser.sanitise(form.headline))
                     .font(.caption)
                     .foregroundStyle(form.isError ? AnyShapeStyle(.red) : AnyShapeStyle(.primary))
                 if let detail = form.detail {
-                    Text(detail).font(.caption2).foregroundStyle(.secondary)
+                    Text(TextSanitiser.sanitise(detail)).font(.caption2).foregroundStyle(.secondary)
                 }
             }
             if let raw = form.raw, !raw.isEmpty {

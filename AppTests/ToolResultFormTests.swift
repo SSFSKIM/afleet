@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import XCTest
 import ClaudeWire
 import FleetKit
@@ -239,5 +240,47 @@ final class ToolResultFormTests: XCTestCase {
         let generic = InventedItems.toolCall("AnInventedTool", result: .string("one\ntwo"))
         XCTAssertEqual(ToolResultForms.form(for: generic).headline, "Done",
                        "an unmodelled tool reads \(ToolResultForms.form(for: generic).headline)")
+    }
+
+    // MARK: - The derived labels, sanitised (round 1, sweep #10)
+
+    /// **Every label the row draws goes through the sanitiser, not only the raw output** (parent
+    /// §12, parity §41.7).
+    ///
+    /// The forms above are derived from engine text: `errorHeadline` keeps the result's first line
+    /// whole, and the MCP form interpolates the tool's own name into both its headline and its
+    /// detail. `ToolResultBody` sanitised `raw` and drew those two directly, so a bidi override in a
+    /// tool result reordered the collapsed label — the row a reader sees without expanding anything.
+    ///
+    /// Asserted over **what the row drew**, reflected out of the constructed body, rather than over
+    /// the form: the form is deliberately the engine's own sentence, and the strip happens where it
+    /// is laid out. Every input is invented (§11).
+    @MainActor
+    func testEveryDrawnLabelIsSanitisedAndNotOnlyTheRawOutput() {
+        let override: Unicode.Scalar = "\u{202E}"
+
+        // The headline arm: the error normalisation keeps the result's first line.
+        let failed = InventedItems.toolCall("Bash",
+                                            input: .object(["command": .string("an invented command")]),
+                                            result: .string("run\u{202E}this\nand a second line"),
+                                            isError: true, status: .failed)
+        XCTAssertTrue(ToolResultForms.form(for: failed).headline.unicodeScalars.contains(override),
+                      "the derived headline carries no override, so drawing it could not leak one")
+
+        // The headline, detail and badge arm: the MCP family is spelled out of the tool's own name.
+        let mcp = InventedItems.toolCall("mcp__inv\u{202E}ented__doThing", result: .string("one\ntwo"))
+        let form = ToolResultForms.form(for: mcp)
+        XCTAssertTrue(form.headline.unicodeScalars.contains(override),
+                      "the derived MCP headline carries no override, so drawing it could not leak one")
+        XCTAssertTrue(form.detail?.unicodeScalars.contains(override) == false,
+                      "the MCP detail is the line count and is expected to carry no override")
+
+        for item in [failed, mcp] {
+            let drawn = ViewTree.values(of: String.self, in: ToolCallRow(item: item).body)
+            XCTAssertGreaterThan(drawn.count, 0, "the tool row drew no text at all, so finding nothing proves nothing")
+            let leaked = drawn.filter { $0.unicodeScalars.contains(where: TextSanitiser.isStripped) }
+            XCTAssertEqual(leaked.count, 0,
+                           "\(leaked.count) label(s) of the \(drawn.count) the row drew carry a stripped scalar")
+        }
     }
 }
