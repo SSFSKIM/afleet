@@ -1691,8 +1691,9 @@ Behavior a person can observe. Commands assume the app is built with
     turns the channel archived.
 15. **Background job.** Run `claude --bg "Run this: sleep 90 && echo done"` in a terminal. The
     Background section lists it; *Attach* shows its screen in a Terminal tab; the detach
-    key returns; *Adopt* stops it and reopens it owned, and its next message continues the
-    same session id.
+    key returns — `claude attach` exits on it (S1), so what returns is the pane showing the
+    exited attach and the job still running, not a client back at a shell; *Adopt* stops it
+    and reopens it owned, and its next message continues the same session id.
 16. **Send to background.** *Send to background* on an owned channel; `claude agents --json`
     lists the session as background; the channel shows the job glyph and mirrors.
 17. **Open in terminal.** *Open in terminal*; the owned process exits; the Terminal tab
@@ -2323,8 +2324,10 @@ SwiftPM package or target that builds and tests without the children above it, p
   `TerminalSurface` over GhosttyKit from libghostty-spm with our PTY layer, panes per
   channel in the channel's cwd with the resolved environment, Cmd+Shift+T, job attach
   through `claude attach <id>`, the raw-TUI hatch through `claude --resume <id>` with
-  re-adoption on exit via C4's lifecycle API, and the Background section's *Attach*,
-  *Stop*, *Logs* and *Respawn* through CLI verbs. Files: the tree with gitignore toggle
+  re-adoption on exit via C4's lifecycle API, and the Background section's *Attach* and
+  *Logs* in a pane, with *Stop* and *Respawn* as X5's one-shot actions with no PTY (the
+  composite split the verbs that way at its cut; worded here 2026-09-09 at C7.4's merge).
+  Files: the tree with gitignore toggle
   and filter, Monaco in a `WKWebView` bundled by script with bun, committed, and bridged for
   open, save, goto-line, theme and diff, native viewers for markdown, images, PDF, audio
   and video, the file watcher with dirty-buffer conflict banner, and `LinkRouter`, which
@@ -2537,7 +2540,14 @@ resolves; and `PanelTab.makeView(session:context:surface:)` / `PanelHost.view(fo
 take a `PanelSurface` — `.panel` or `.poppedOutWindow(tab:channel:)` — with no default, because
 a tab that owns an `NSView` (the Browser's shared `WKWebView`s) must know which hierarchy is drawing
 it and which of several pop-outs; the web views follow the pop-out and the main column draws a
-"Showing in the Browser window" state with a way back.
+"Showing in the Browser window" state with a way back. Amended 2026-09-09 at C7.4's merge (its
+`[parent-impact]`): `PanelHost.run(_ request:, for channel: ChannelKey)` replaces the context-less
+`run(_:)`, resolving the channel's context from the caller and throwing `noChannelContext` when the
+host has none; `PaneRunning.run(_ request:, in context: ChannelContext)` hands the runner the
+reporter and the cwd W8 obliges it to use, so a `PaneExit` reaches X5 through the context of the
+channel that asked and a pane lands in that channel's Terminal session — never the focused one,
+since a header action, a trust banner or a sidebar row acts on a channel it already holds and
+focus can move during the handoff.
 - **X8 Fixture and fake-claude format.** NDJSON frames with relative timestamps, paired
   with a transcript snapshot directory and a census JSON; a redaction manifest naming
   the fields removed; `fake-claude` accepts a fixture path, a speed factor, an
@@ -2676,7 +2686,7 @@ notarized distribution, and any write under `<configHome>` (X9).
 | C4 FleetKit sessions and fleet | `2026-09-05-c4-fleetkit-sessions-fleet.md`; plan `plans/2026-09-05-c4-fleetkit-sessions-fleet.md` (v4, 12 tasks); retrospective in the child spec's Outcomes | **merged** 2026-09-06 at `f1e35d9` from `child/c4-sessions-fleet` `26aa962` (owns `FleetKit/Package.swift`; `FleetSessions` and its tests, `docs/`, plus a C2 corrective to `ClaudeWire`'s process runner carried by the branch); suite at the tip: FleetKit 415 tests, 10 skipped without the live flags, ClaudeWire 243; G1 coverage gate 58/58 lifecycle scenarios; G2 over C3's real registry mirror, five boundary cases; G3, G4; G5 eight live scenarios green together twice on the installed 2.1.263 (runs 4 and 5: 136.6 s and 132.3 s, five turns each, $0.17 and $0.19; cumulative child live spend $1.58); two whole-branch Codex reviews (48 confirmed → 10) closed by one fix wave and two follow-up rounds under five architect rulings; four live-gate product defects found at Task 10 and three more at the merge gate; independent leak-risk review at merge: no findings; deferred debt 26–48 in `docs/tech-debt-tracker.md` |
 | C5 App shell, panel host, packaging | `2026-09-06-c5-app-shell.md`; plan `plans/2026-09-06-c5-app-shell.md` (v6, 10 tasks); retrospective in the child spec's Outcomes | **merged** 2026-09-07 at `78303c7` from `child/c5-app-shell` `4c4ede4` (212 commits; owns `App/`, `AppTests/`, `project.yml`, `Workbench/Sources/PanelHostAPI`, plus `main` correctives taken at its boundaries); G1–G4 green at the tip: test scheme 835 executed, 20 designed skips, 0 failures, zero compiler warnings at `5f3779f`, re-run green at `4c4ede4`; `make check-imports` and `make check-wiring` clean; first paint 2,505 ms median with no persisted snapshot and 2,121 ms with one, warm page cache, over 4,261 transcripts against the 5,000 ms budget; the cold case is unmeasured; three `[parent-impact]` filings reconciled (§11 per-domain logs, the per-write sink corrective `c31bebd`, the `.claude.json` sibling rule `6b3fc23`/`1c19d52`) and X7 amended as filed |
 | C6 Conversation surface and Agents panel | composite spec `2026-09-07-c6-conversation-surface.md` (four leaves, its own tracking map) | cut landed 2026-09-07 after C5's merge (`78303c7`), approved by the human 2026-09-08; Y1 skeleton on `main` at `5e24f1a`; C6.1 Timeline renderer **merged** 2026-09-09 at `947c7cc` (S7 met, p99 7.66 ms); C6.2 Composer and header **merged** 2026-09-08 at `c2dae0f` (Y6 named); C6.3 Decision cards and threads **merged** 2026-09-09 at `0fe2797` (Y3 corrected, §8.4 corrected); C6.4 Agents panel blocked-by C6.1 and C6.3 |
-| C7 Workbench panels | composite spec `2026-09-05-c7-workbench-panels.md` (seven leaves, its own tracking map) | cut landed 2026-09-05 at `1fe6fc1`; W1 Workbench skeleton on `main` (libghostty-spm `1.5.20260903` resolves and the empty package builds); C7.1 Terminal core, C7.2 Editor core and C7.3 Source Control core **dispatchable** — the cut approved by the human 2026-09-07, dispatch follows C6's; C7.4–C7.7 unblocked by C5's merge (`78303c7`) except where noted (C7.4 also by C4's X5, C7.6 by C4's store); C7.3 Source Control core **merged** 2026-09-08 at `aa5df80` (41 commits, 128 package tests, two whole-diff review rounds and three fix waves at merge; W7's command lines amended in the composite); C7.2 Editor core **merged** 2026-09-08 at `a47788a` (37 commits, 110 package tests; Monaco 0.56 on the custom scheme with workers proven by attribution; three whole-diff review rounds and three fix waves at merge; human still to witness "no visible jank"); C7.1 at Task 7 |
+| C7 Workbench panels | composite spec `2026-09-05-c7-workbench-panels.md` (seven leaves, its own tracking map) | cut landed 2026-09-05 at `1fe6fc1`; W1 Workbench skeleton on `main` (libghostty-spm `1.5.20260903` resolves and the empty package builds); C7.1 Terminal core, C7.2 Editor core and C7.3 Source Control core **dispatchable** — the cut approved by the human 2026-09-07, dispatch follows C6's; C7.4–C7.7 unblocked by C5's merge (`78303c7`) except where noted (C7.4 also by C4's X5, C7.6 by C4's store); C7.3 Source Control core **merged** 2026-09-08 at `aa5df80` (41 commits, 128 package tests, two whole-diff review rounds and three fix waves at merge; W7's command lines amended in the composite); C7.2 Editor core **merged** 2026-09-08 at `a47788a` (37 commits, 110 package tests; Monaco 0.56 on the custom scheme with workers proven by attribution; three whole-diff review rounds and three fix waves at merge; human still to witness "no visible jank"); C7.1 Terminal core **merged** 2026-09-08 at `855b815` (45 commits, S1 promotes GhosttyKit provisionally); C7.5 Files panel **merged** 2026-09-09 at `517899d` (56 commits); C7.6 Browser panel **merged** 2026-09-09 at `6f8a8ec` (46 commits, X7 amended twice); C7.4 Terminal panel **merged** 2026-09-09 at `054e42c` (43 commits, X7's pane runner amended); C7.7 in flight |
 
 Each child's spec path is filled in when it is dispatched; a composite's row points at
 its own composite spec, whose tracking map lists its leaves. Children keep their own
@@ -4724,3 +4734,6 @@ Pending — written at finish.
 - 2026-09-09 C6.1 merged (`947c7cc`; composite Revision Note of the same date). §11's dependency
   list gains HighlightKit; §12 gains the untrusted-text sanitiser; §8.3's diagrams deferred. S7's
   verdict: native list promoted, p99 7.66 ms against the finished renderer.
+- 2026-09-09 C7.4 merged (`054e42c`; composite Revision Note of the same date). X7's pane runner
+  takes its channel's context; §17.4 C7's *Respawn* and item 15's "returns" re-worded from the
+  leaf's Parent revisions; §17.9's C7 row brought current.
