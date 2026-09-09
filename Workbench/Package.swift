@@ -7,6 +7,11 @@ import PackageDescription
 // region; the regions stay apart so the branches merge without a conflict. Dependencies are
 // AfleetCore and FleetKit only (parent X1; never ClaudeWire) and libghostty-spm at an exact
 // tag, bumped only by a leaf with a Revision Note on the C7 spec.
+//
+// Every row below lists the modules its own sources import: SwiftPM makes a transitive module
+// visible whether or not a target asked for it, so an edge left undeclared still compiles and
+// W1's table stops describing the package. `TerminalCoreTests/DeclaredEdgeTests` reads this
+// manifest through `swift package dump-package` and holds each target to that.
 
 let v6: [SwiftSetting] = [.swiftLanguageMode(.v6)]
 let core: Target.Dependency = .product(name: "AfleetCore", package: "AfleetCore")
@@ -37,7 +42,12 @@ let package = Package(
             ],
             swiftSettings: v6
         ),
-        .testTarget(name: "TerminalCoreTests", dependencies: ["TerminalCore"], swiftSettings: v6),
+        // `ghosttyTerminal` because the suite asserts on the renderer directly — the adapter's
+        // wiring, the flood path, and `NameCollisionTests`, which names
+        // `GhosttyTerminal.TerminalSurface` to prove the shipped protocol and the renderer's
+        // same-named one are two types. TerminalCore does not re-export it, and a module reached
+        // only through another target's edge is an undeclared edge (`DeclaredEdgeTests`).
+        .testTarget(name: "TerminalCoreTests", dependencies: ["TerminalCore", ghosttyTerminal], swiftSettings: v6),
         .executableTarget(name: "S1Harness", dependencies: ["TerminalCore"], path: "Spikes/S1Harness", swiftSettings: v6),
         // MARK: - end of C7.1
 
@@ -77,7 +87,10 @@ let package = Package(
         // decode (ledger D9): real field names, invented values, never a recorded account.
         // `.copy` rather than `.process` — the tests read them back as bytes and assert on
         // those bytes, so the build system must not rewrite them.
-        .testTarget(name: "SourceControlCoreTests", dependencies: ["SourceControlCore"],
+        // `core` for the member-import-visibility reason C5 recorded for `PanelHostAPITests`:
+        // the diff suites name `DiffRef.Base`, and SourceControlCore does not re-export the
+        // module that defines it.
+        .testTarget(name: "SourceControlCoreTests", dependencies: ["SourceControlCore", core],
                     resources: [.copy("Samples")], swiftSettings: v6),
         // MARK: - end of C7.3
 
@@ -90,12 +103,22 @@ let package = Package(
         // MARK: - end of PanelHostAPI
 
         // MARK: - C7.4 terminal panel (owner: C7.4)
-        .target(name: "TerminalPanel", dependencies: ["TerminalCore", "LinkRouting", "PanelHostAPI", fleet], swiftSettings: v6),
+        // `core` is required, not decorative, and is the same amendment C7.5's, C7.6's and
+        // C7.7's rows already took: `TerminalPanelSession` names AfleetCore's own types, and
+        // neither `TerminalCore` nor `PanelHostAPI` re-exports the module that defines them.
+        // W1's row predates that ruling; every other panel row gained `AfleetCore` at merge and
+        // this one reached it through a transitive edge instead (found by the C7 recomposition
+        // review, `DeclaredEdgeTests`).
+        .target(name: "TerminalPanel", dependencies: [core, "TerminalCore", "LinkRouting", "PanelHostAPI", fleet], swiftSettings: v6),
         // `TerminalCore`, `fleet` and `core` for the member-import-visibility reason C5 recorded
         // for PanelHostAPITests: TerminalPanel re-exports none of them, so a test that names a
         // `TerminalSize`, a `PaneRequest` or the `SessionID` inside `.hatch` must import the
         // module that defines it.
-        .testTarget(name: "TerminalPanelTests", dependencies: ["TerminalPanel", "TerminalCore", fleet, core], swiftSettings: v6),
+        // `PanelHostAPI` joins them for the same reason: the suites name `PaneRequest` and
+        // `ChannelContext`, and reached the module through TerminalPanel's edge until now.
+        .testTarget(name: "TerminalPanelTests",
+                    dependencies: ["TerminalPanel", "TerminalCore", "PanelHostAPI", fleet, core],
+                    swiftSettings: v6),
         // MARK: - end of C7.4
 
         // MARK: - C7.5 files panel (owner: C7.5)
