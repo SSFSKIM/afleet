@@ -208,6 +208,53 @@ final class HeaderReadoutTests: XCTestCase {
         rig.model.close()
     }
 
+    // MARK: - An idle replacement is read (round 2, scalpel-5 #1)
+
+    /// **A replacement process that says nothing has its mode read anyway.**
+    ///
+    /// Clearing the live precedence on a new epoch is only half of a restart: the mode standing in
+    /// the readout is still the one the *replaced* process reported, and nothing re-reads it. A
+    /// handshake is not a turn end, so the one thing that re-takes a readback never fires, and an
+    /// idle replacement — one that runs no turn after it comes up — leaves the header naming a mode
+    /// nothing is running. So an epoch increase re-takes the readback itself.
+    ///
+    /// Discriminating against the wave-C fix, which reset the precedence and stopped there: the last
+    /// assertion fails, because no `result` frame follows the restart here. The existing restart test
+    /// feeds the replacement's turns and so cannot tell the two apart. The count is the second half —
+    /// two readbacks, the opening one and the one the epoch took, and no turn ended in between.
+    func testARestartWithNoTurnEndStillReadsTheReplacementsMode() async throws {
+        let rig = try await Rig()
+        let double = rig.double
+        let key = rig.key
+        await double.stageSend("get_settings", .success(try Self.answer("control-shapes", to: "get_settings")))
+        await double.stageEngineReport(handshake: try Self.handshake("exit-plan-mode"), systemInitFrom: nil)
+
+        rig.model.startReadbacks()
+        let attached = await LaunchFixtures.waitAsync { await double.memberSequence.contains("events") }
+        XCTAssertTrue(attached, "the header never subscribed, so no frame could reach it")
+        let opened = await LaunchFixtures.waitAsync { @MainActor in rig.model.readout.mode == .plan }
+        XCTAssertTrue(opened, "the first process's handshake never reached the readout")
+
+        for status in try Self.modeStatuses("exit-plan-mode") { double.enqueue(status, to: key) }
+        let moved = await LaunchFixtures.waitAsync { @MainActor in rig.model.readout.mode == .acceptEdits }
+        XCTAssertTrue(moved, "the readout did not follow the first process's status frame")
+
+        // The restart, and nothing after it: the fleet retains the replacement's handshake, one
+        // event carries the new epoch, and no turn ends on the new process.
+        await double.stageEngineReport(handshake: try Self.handshake("control-shapes"), systemInitFrom: nil)
+        double.enqueue(try Self.handshake("control-shapes", epoch: ProcessEpoch.first.next()), to: key)
+
+        let followed = await LaunchFixtures.waitAsync { @MainActor in rig.model.readout.mode == .default }
+        XCTAssertTrue(followed,
+                      "an idle replacement left the readout showing the mode the replaced process reported")
+
+        let taken = await Self.polls(double, of: "get_settings")
+        XCTAssertEqual(taken, 2,
+                       "\(taken) settings readback(s) were taken, not the opening one and the one the new epoch took")
+
+        rig.model.close()
+    }
+
     // MARK: - The rendering preferences (round 1, scalpel-4 #7)
 
     /// **`get_settings`' two rendering preferences reach the render context.**
