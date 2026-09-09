@@ -224,6 +224,28 @@ final class TerminalPanelStateTests: XCTestCase {
                       "the pane opened during the read never reached the document")
     }
 
+    /// The default pane belongs to a session that has done nothing yet, and to no other. A user
+    /// who opened a pane inside the held read and closed it again has said what they want the tab
+    /// to hold — nothing — and `close()` and the view both say that closing the last pane leaves
+    /// none. A restore that read emptiness as "this session has never had a pane" opened a shell
+    /// over that answer and persisted it.
+    func testAPaneClosedDuringTheReadIsNotReplacedByADefaultShell() async throws {
+        let store = PaneTestContext.RecordingStore()
+        let session = makeSession(cwd: try temporaryDirectory(), session: SessionID(), store: store)
+
+        await store.holdReads()
+        session.restoreOnce()
+        await store.awaitHeldRead()
+        let opened = session.openShellPane()
+        await session.close(opened)
+        await store.releaseHeldRead()
+        await session.settleRestore()
+        await session.settlePersistence()
+
+        XCTAssertTrue(session.panes.isEmpty, "panes=\(session.panes.count)")
+        XCTAssertNil(session.selectedIndex, "selected=\(String(describing: session.selectedIndex))")
+    }
+
     // MARK: Group 6 — the selection is an index into what is persisted
 
     /// Only shell panes are persisted, so a selection recorded as an index into the full stack is

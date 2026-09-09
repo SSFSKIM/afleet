@@ -74,6 +74,9 @@ public final class TerminalPanelSession: PanelTabSession {
     /// nothing and spawns nothing, whenever the read it is suspended in comes back: its owner has
     /// gone, so a pane opened from here is a child nobody is left to close.
     @ObservationIgnored private var isReleased = false
+    /// Whether a pane has ever stood in this stack. The difference between a session that has done
+    /// nothing yet and one whose stack is empty because the user emptied it (see ``restore``).
+    @ObservationIgnored private var hasEverHeldAPane = false
     /// The teardown of whatever session held this channel before, if one is still finishing. The
     /// read waits for it, because two sessions writing one key with nothing between them is the
     /// one ordering the document's single-writer rule does not cover.
@@ -346,7 +349,10 @@ public final class TerminalPanelSession: PanelTabSession {
             } else if let selected = document.selected, panes.indices.contains(selected) {
                 selectedIndex = selected
             }
-        } else if openingDefaultPane, !held {
+        } else if openingDefaultPane, !held, !hasEverHeldAPane {
+            // The one shell of an empty document belongs to a session that has done nothing yet.
+            // A user who opened a pane inside this read and closed it again has already said what
+            // the tab holds, and `close()` leaves the last pane's place empty on purpose.
             openShellPane()
         }
         reading = .done
@@ -415,6 +421,7 @@ public final class TerminalPanelSession: PanelTabSession {
         // A pane is the first thing that could put a write in front of the read, so it is also
         // what makes the document be read when no renderer has asked yet.
         requestRead(openingDefaultPane: false)
+        hasEverHeldAPane = true
         panes.append(pane)
         selectedIndex = panes.count - 1
         paneCountDidChange?(self)
