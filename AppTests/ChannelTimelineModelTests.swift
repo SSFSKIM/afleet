@@ -217,6 +217,100 @@ final class ChannelTimelineModelTests: XCTestCase {
         XCTAssertFalse(model.items.isEmpty, "the settled open read 0 items")
     }
 
+    // MARK: - D11's retraction, from the state the fold publishes
+
+    /// §8.4: the refusal dialog's `retractedMessageUuids` are evicted "on resolution, whatever the
+    /// choice, **or when a `control_cancel_request` retires the dialog**".
+    ///
+    /// The binary retiring a dialog is a resolution nobody pressed, so a registry fed only by a
+    /// card's success callback never hears about it — and the messages the refusal took back stay
+    /// on screen for the life of the channel. This drives the whole thing through the running
+    /// channel: recorded frames and the recorded refusal go in on the wire, the binary's
+    /// cancellation follows, and **no card is ever built and no answer is ever sent**, which is what
+    /// separates a registry fed from the published overlay from one fed by a view.
+    ///
+    /// Both directions, and both readers of the registry: C6.1's list filter drops the retracted
+    /// rows and keeps every other row, and a host reaching the channel's fold the way the Thread tab
+    /// does — through the app's one `ChannelTimelineRegistry` — reads the same eviction.
+    func testACancelledRefusalRetractsItsMessagesWithNoCardEverDrawn() async throws {
+        let rig = try await Rig(fixtures: ["plain-two-turn"])
+        let key = rig.keys[0]
+        await rig.lifecycle.openEvents(of: key)
+        let model = rig.registry.model(for: key)
+        await model.open(rig.row(0, origin: .owned(.ready)))
+
+        let streamed = await Self.settle(until: { Self.messageKeys(of: model).count > 1 })
+        XCTAssertTrue(streamed, "the channel holds \(Self.messageKeys(of: model).count) message(s), fewer than 2")
+        let retracted = Array(Self.messageKeys(of: model).prefix(2))
+
+        // A refusal naming those two, which is the shape §8.4 describes and the shape no recording
+        // carries: the recorded refusals each name one. It is the recorded request with its
+        // `retractedMessageUuids` replaced, so everything but the list under test is the engine's.
+        let request = try FixtureRunner.request("dialog-refusal-fallback", subtype: "request_user_dialog",
+                                                id: "invented-refusal-1",
+                                                overrides: ["payload": ["originalModel": "invented-original",
+                                                                        "fallbackModel": "invented-fallback",
+                                                                        "retractedMessageUuids": retracted]])
+        rig.lifecycle.enqueue(.request(request), to: key)
+        let raised = await Self.settle(until: { model.timeline.overlay.decisions[request.id] != nil })
+        XCTAssertTrue(raised, "the refusal never reached the channel's fold")
+
+        // The messages are on screen while the dialog is open — a registry that evicted on receipt
+        // would already have taken them, and the clause below could not tell it from a working one.
+        XCTAssertTrue(retracted.allSatisfy { uuid in
+            TimelineListView.retained(model.rows, by: model.retraction).contains { $0.item.id.key == uuid }
+        }, "a message was evicted while its dialog was still open")
+
+        // The binary retires the dialog. Nothing is pressed and no card exists.
+        rig.lifecycle.enqueue(.requestCancelled(request.id, .first), to: key)
+
+        let evicted = await Self.settle(until: {
+            let drawn = TimelineListView.retained(model.rows, by: model.retraction)
+            return retracted.allSatisfy { uuid in !drawn.contains { $0.item.id.key == uuid } }
+        })
+        XCTAssertTrue(evicted, "the retired dialog left \(retracted.count) retracted message(s) on screen")
+
+        let survivors = model.rows.filter { row in !retracted.contains(row.item.id.key) }
+        XCTAssertGreaterThan(survivors.count, 0, "the channel holds nothing but the retracted messages")
+        let drawn = TimelineListView.retained(model.rows, by: model.retraction)
+        XCTAssertEqual(drawn.count, survivors.count,
+                       "the filter drew \(drawn.count) of \(survivors.count) unretracted row(s)")
+
+        // The second reader: the same fold reached the way the Thread tab reaches it.
+        let elsewhere = rig.registry.model(for: key).retraction
+        let doomed = model.rows.filter { retracted.contains($0.item.id.key) }
+        XCTAssertEqual(doomed.count, retracted.count,
+                       "the channel holds \(doomed.count) of the \(retracted.count) retracted messages")
+        XCTAssertTrue(doomed.allSatisfy { !elsewhere.retains($0.item) },
+                      "a host reaching the channel's fold does not see the eviction")
+
+        // And nothing was answered: this whole eviction happened with no card and no wire traffic.
+        let actions = await rig.lifecycle.actions.filter { if case .answer = $0.action { return true } else { return false } }
+        XCTAssertEqual(actions.count, 0, "the retired dialog put \(actions.count) answer(s) on the wire")
+    }
+
+    /// The keys of the message rows this channel holds, in the fold's order.
+    private static func messageKeys(of model: ChannelTimelineModel) -> [String] {
+        model.rows.compactMap { row in
+            switch row.item {
+            case .assistantMessage, .userMessage: row.item.id.key
+            default: nil
+            }
+        }
+    }
+
+    /// A bounded wait on a condition the ingestion fulfils asynchronously. It is a hang guard and
+    /// not a measurement: the publish is coalesced at thirty hertz and the fold runs on an actor,
+    /// so there is no synchronous point to read.
+    private static func settle(until condition: @MainActor () -> Bool) async -> Bool {
+        let deadline = Date().addingTimeInterval(LaunchFixtures.hangGuard)
+        while Date() < deadline {
+            if condition() { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return condition()
+    }
+
     // MARK: - The change feed
 
     /// A subscriber attached before the file changes sees the change.

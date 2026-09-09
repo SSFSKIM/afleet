@@ -12,10 +12,15 @@ import FleetKit
 /// for; C3's items are untouched.
 ///
 /// **Nothing enters on receipt.** There is deliberately no entry point for a dialog that has merely
-/// been drawn: the one way a uuid gets in is `resolved(_:in:)`, which the card calls after an answer
-/// has left the host and which the channel calls for a `control_cancel_request` that retired the
-/// dialog (§8.4 counts that as a resolution). A registry that evicted on receipt would delete the
-/// partial answer while the user was still deciding whether to keep it.
+/// been drawn: a uuid gets in only once its dialog has stopped being pending. A registry that
+/// evicted on receipt would delete the partial answer while the user was still deciding whether to
+/// keep it.
+///
+/// **The writer is the published overlay, not a view.** `observe(_:in:)` runs at every publish over
+/// the state C3's fold holds, so every resolution §8.4 names feeds it: an answer this host sent, an
+/// answer another surface sent, and a `control_cancel_request` that retired the dialog — which
+/// nobody pressed and which no card's callback can see. The card's own callback stays for the frame
+/// in which it answers, before the next publish has landed.
 @MainActor
 @Observable
 final class RetractionRegistry {
@@ -36,6 +41,19 @@ final class RetractionRegistry {
         let uuids = refusal.retractedMessageUUIDs
         guard !uuids.isEmpty else { return }
         retracted[channel, default: []].formUnion(uuids)
+    }
+
+    /// Every refusal dialog this channel's fold now holds in a settled state, resolved.
+    ///
+    /// Called at every publish. **Non-pending is the whole test**: §8.4 evicts "on resolution,
+    /// whatever the choice, or when a `control_cancel_request` retires the dialog", and `.answered`,
+    /// `.cancelled`, `.policyAnswered` and `.inert` are exactly the states a dialog that is no
+    /// longer waiting can be in. Idempotent — the union is a set — so re-reading the same settled
+    /// dialog on every publish costs a lookup and changes nothing.
+    func observe(_ overlay: Overlay, in channel: ChannelKey) {
+        for decision in overlay.decisions.values where decision.kind == .dialog && decision.state != .pending {
+            resolved(DecisionCard(decision), in: channel)
+        }
     }
 
     /// Whether the channel's list should still draw this item.
