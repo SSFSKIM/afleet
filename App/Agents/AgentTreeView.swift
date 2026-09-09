@@ -20,6 +20,14 @@ struct AgentTreeView: View {
 
     var body: some View {
         let read = model.read
+        VStack(alignment: .leading, spacing: 0) {
+            if model.selection == .unknownRun { AgentUnknownRunNotice() }
+            tree(read)
+        }
+    }
+
+    @ViewBuilder
+    private func tree(_ read: AgentRunRead) -> some View {
         switch read.state {
         case .tree:
             ScrollView {
@@ -79,6 +87,34 @@ struct AgentTreeView: View {
     /// The SwiftUI identity of a run's row. A task id is drawable and never printable (§11): it
     /// keys the row here and is stated in no report.
     static func identity(of run: AgentRunID) -> String { "agent-run:\(run)" }
+}
+
+/// A run was asked for and this channel's tree does not hold it (child spec D5).
+///
+/// The pane selects nothing **and says so**. A chip on an archived channel resolves to a run this
+/// channel's tree has never held — tracker 187 — and the alternative to this sentence is a
+/// fabricated selection, which would put a run's name over another run's transcript. Saying nothing
+/// at all is the third alternative and is worse than either: the user clicked something and the
+/// panel changed to an ordinary tree with no node open, which reads as a bug.
+///
+/// It is drawn **above** whatever the tree draws rather than instead of it, because the channel's
+/// other runs are still there to open, and it names no run (§11: a task id is drawable here, but a
+/// report is not a drawing and this sentence is a report).
+struct AgentUnknownRunNotice: View {
+
+    /// Stored rather than read from the static value at draw time, so the sentence the pane is
+    /// about to draw is a value a test can find — the shape `AgentTreeEmptyState` takes beside it.
+    var sentence: String = Self.sentence
+
+    static let sentence = "That run is not in this channel's tree, so nothing is open."
+
+    var body: some View {
+        Text(sentence)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
 }
 
 /// The two states a tree with nothing to draw is in, worded apart (child spec D10).

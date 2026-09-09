@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import XCTest
 import AfleetCore
 import ClaudeWire
@@ -74,6 +75,35 @@ final class AgentNavigatorTests: XCTestCase {
         XCTAssertTrue(model.selectedRun == nil, "a run the tree does not hold was selected anyway")
         XCTAssertEqual(rig.host.selected, .agents,
                        "the tab was not brought forward, so the user is not where the message is")
+
+        // The "and says so" half, drawn: the pane states the fact rather than showing an ordinary
+        // tree with nothing open, which reads as a bug rather than as an answer.
+        let drawn = ViewTree.values(of: String.self, in: AgentTreeView(model: model).body)
+        XCTAssertEqual(drawn.filter { $0 == AgentUnknownRunNotice.sentence }.count, 1,
+                       "the pane drew the unknown-run sentence \(drawn.filter { $0 == AgentUnknownRunNotice.sentence }.count) time(s), not once")
+        // And the tree the channel does hold is still drawn beneath it: the other runs stay openable.
+        XCTAssertTrue(ViewTree.scrollViewContent(in: AgentTreeView(model: model).body) != nil,
+                      "the notice replaced the channel's own runs instead of sitting above them")
+        XCTAssertEqual(drawn.filter { $0 == AgentTreeEmptyState.noRuns || $0 == AgentTreeEmptyState.noWire }.count, 0,
+                       "a channel with a run in it drew one of the empty-state sentences")
+    }
+
+    /// The notice is the unknown-run state's and not a permanent fixture: a run the tree **does**
+    /// hold draws no sentence at all.
+    ///
+    /// Without this half the clause above passes against a pane that says "that run is not in this
+    /// channel's tree" over every run it opens.
+    func testAKnownRunDrawsNoUnknownRunNotice() throws {
+        let rig = try NavigationRig(tree: InventedAgents.treeOfRoots(1))
+
+        rig.navigator.show(run: InventedAgents.run(0), in: rig.key)
+        let model = try rig.session()
+
+        XCTAssertTrue(model.selection == .run(InventedAgents.run(0)),
+                      "the run the tree holds did not read as the open run, so this proves nothing")
+        let drawn = ViewTree.values(of: String.self, in: AgentTreeView(model: model).body)
+        XCTAssertEqual(drawn.filter { $0 == AgentUnknownRunNotice.sentence }.count, 0,
+                       "an open run drew the unknown-run sentence \(drawn.filter { $0 == AgentUnknownRunNotice.sentence }.count) time(s)")
     }
 
     // MARK: - The rig
