@@ -35,9 +35,10 @@ struct AgentTreeView: View {
                 }
                 .padding(8)
             }
-        case .noRuns, .noWire:
-            // The two empty states are worded apart in the commit that follows this one.
-            EmptyView()
+        case .noRuns:
+            AgentTreeEmptyState(sentence: AgentTreeEmptyState.noRuns)
+        case .noWire:
+            AgentTreeEmptyState(sentence: AgentTreeEmptyState.noWire)
         }
     }
 
@@ -78,4 +79,30 @@ struct AgentTreeView: View {
     /// The SwiftUI identity of a run's row. A task id is drawable and never printable (§11): it
     /// keys the row here and is stated in no report.
     static func identity(of run: AgentRunID) -> String { "agent-run:\(run)" }
+}
+
+/// The two states a tree with nothing to draw is in, worded apart (child spec D10).
+///
+/// "No runs" and "we cannot see the runs" are different facts. The tree is wire-fed — every archived
+/// and every foreign channel has none at all — and a user told the first when the second is true has
+/// been misinformed about their own history. The sentences are values so both this view and a test
+/// name the same one.
+struct AgentTreeEmptyState: View {
+
+    let sentence: String
+
+    static let noRuns = "No agent runs in this channel."
+
+    static let noWire = "This channel's agent runs cannot be shown: the run tree is built from a "
+        + "live session's frames, and this channel is being read from its transcript alone."
+
+    var body: some View {
+        VStack {
+            Text(sentence)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
 }

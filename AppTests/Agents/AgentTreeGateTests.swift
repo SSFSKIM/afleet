@@ -154,6 +154,49 @@ final class AgentTreeGateTests: XCTestCase {
                           "a branch with work still under it is drawn as finished")
     }
 
+    // MARK: - The two empty states (G1, child spec D10)
+
+    /// A channel whose tree is empty and a channel that has no tree at all draw two different
+    /// sentences.
+    ///
+    /// The first arm is a real channel: `background-shell`'s task frames are a background shell —
+    /// a registry row and **not** an agent run — so the fold arms a tree with nothing in it.
+    ///
+    /// The second arm is asserted over the value the read is defined on, and **not** over an opened
+    /// channel, because on this baseline no opened channel produces it. `StreamIngestion.open`
+    /// builds the wire fold unconditionally — a file-only channel is handed an already-finished
+    /// event stream rather than none — so `agents` is a non-nil empty tree for every archived and
+    /// every foreign channel. That contradicts `StreamIngestion.swift:155`'s own comment ("nil for
+    /// good on a file-only channel") and the child spec's grounding, and it means an archived
+    /// channel is told *No agent runs in this channel* today, which is exactly the misinformation
+    /// D10 exists to prevent. Reported to the architect rather than papered over: the read keeps
+    /// the honest three-state shape, and the state becomes reachable the moment the producer does.
+    func testTheTwoEmptyStatesAreDistinct() async throws {
+        let wired = try await AgentGateRig(fixture: "background-shell")
+        defer { Task { await wired.finish() } }
+        _ = try await wired.replay()
+        let settled = await wired.settleOnBarrier()
+        XCTAssertTrue(settled, "the replay never reached the model")
+        XCTAssertNotNil(wired.model.timeline.agents,
+                        "the replayed channel carries no tree at all, so this is not the no-runs arm")
+        XCTAssertEqual(wired.read().state, .noRuns,
+                       "a wire channel whose task frames are not agent runs did not read as having no runs")
+
+        let noWire = AgentRunRead(timeline: ChannelTimeline())
+        XCTAssertEqual(noWire.state, .noWire, "a timeline with no tree did not read as having no wire")
+
+        XCTAssertNotEqual(AgentTreeEmptyState.noRuns, AgentTreeEmptyState.noWire,
+                          "the two empty states are one sentence, so a user told the first when the "
+                          + "second is true has been misinformed")
+        XCTAssertEqual(ViewTree.values(of: String.self, in: AgentTreeView(model: wired.pane()).body)
+                            .filter { $0 == AgentTreeEmptyState.noRuns }.count, 1,
+                       "the no-runs channel does not draw its own sentence")
+        let paneWithNoWire = AgentsModel(channel: wired.key, timelines: { _ in nil }, store: AgentSelectionStore())
+        XCTAssertEqual(ViewTree.values(of: String.self, in: AgentTreeView(model: paneWithNoWire).body)
+                            .filter { $0 == AgentTreeEmptyState.noWire }.count, 1,
+                       "the no-wire state does not draw its own sentence")
+    }
+
     // MARK: - The tick (child spec D7)
 
     /// A tick moves no row identity, and the span it moves is drawn **inside** one leaf view.
