@@ -77,12 +77,18 @@ final class AgentsModel: PanelTabSession {
     /// invalidated by that object rather than by this session's own tracking.
     @ObservationIgnored let actions: AgentNodeActions?
 
+    /// What a card answered on a node leaves by (contract Y2 and Y7). C6.3's object, built by the
+    /// tab over the **app's** reservation set and this channel's fold; this leaf writes no mapping
+    /// of its own and hosts no card of its own.
+    @ObservationIgnored let answering: DecisionAnswering?
+
     init(channel: ChannelKey, timelines: @escaping TimelineReach, store: AgentSelectionStore,
-         actions: AgentNodeActions? = nil) {
+         actions: AgentNodeActions? = nil, answering: DecisionAnswering? = nil) {
         self.channel = channel
         self.timelines = timelines
         self.store = store
         self.actions = actions
+        self.answering = answering
         // §8.4's `{backgrounded: false}` arm: the engine has said the registry row the panel read is
         // stale, and a reply is not a publish — the cache's key cannot see it. Dropping the held read
         // is the whole of "refresh" for a derivation, and wiring it here is what stops the next body
@@ -99,6 +105,16 @@ final class AgentsModel: PanelTabSession {
     /// **Nothing opens it** — the url goes to the channel's link router as a `WorkspaceLink.file`
     /// and the target is the Files panel's.
     func transcriptURL(of run: AgentRunID) -> URL? { timelines(channel)?.agents?.transcriptURL(of: run) }
+
+    /// The requests the engine is waiting on for one run (child spec D6, item 52). A filter over
+    /// C3's overlay by `DecisionItem.agentID`, which the reducer sets from the request payload.
+    func decisions(of run: AgentRunID) -> [DecisionItem] {
+        AgentRunRead.decisions(of: run, in: timelines(channel) ?? ChannelTimeline())
+    }
+
+    /// The overlay belongs to a process that has exited, so every card in it is a reading rather
+    /// than a question (C6.3's D12). The card cannot derive this: it is a property of the overlay.
+    var isOverlayStale: Bool { timelines(channel)?.overlay.stale ?? false }
 
     /// The tree, as this pane reads it. A channel with no model has no fold and therefore no tree,
     /// which is `.notOpened` — the same answer the read gives for a channel whose `open` has not

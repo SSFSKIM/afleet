@@ -27,6 +27,9 @@ struct AgentNodeRow: View {
     /// Where this run's transcript is (child spec D12). Read from the tree by the outline, because
     /// the path is composed from the tree's current slug and a row that held one could go stale.
     var transcriptURL: URL?
+    /// The cards the engine is waiting on for this run, already built through C6.3's component
+    /// (item 52). Empty for a node nothing is waiting on, and for a pane with no answering object.
+    var decisions: AgentNodeDecisions?
 
     /// Whether this row's branch can be opened, and whether it is.
     enum Disclosure: Hashable, Sendable { case leaf, expanded, collapsed }
@@ -57,6 +60,12 @@ struct AgentNodeRow: View {
                 }
                 if isSelected, let actions {
                     AgentNodeActionBar(content: content, actions: actions, transcriptURL: transcriptURL)
+                }
+                // Drawn on **every** node the engine is waiting on and not only the open one: the
+                // badge beside the title says a run is blocked, and a card the user has to open a
+                // node to find is one they will not find.
+                if let decisions {
+                    decisions
                 }
             }
             Spacer(minLength: 0)

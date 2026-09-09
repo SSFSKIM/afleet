@@ -149,7 +149,22 @@ struct AgentOutline: View {
                      toggle: { model.toggle(row.id) },
                      select: { model.select(row.id) },
                      actions: model.actions,
-                     transcriptURL: model.transcriptURL(of: row.id))
+                     transcriptURL: model.transcriptURL(of: row.id),
+                     decisions: decisions(of: row, in: model))
+    }
+
+    /// The node's waiting cards, or nil when there are none to draw.
+    ///
+    /// Built here rather than inside the card view, because the view's whole claim is that it hosts
+    /// C6.3's component: a host that also decided which requests were its own would be two things.
+    static func decisions(of row: AgentTreeView.Row, in model: AgentsModel) -> AgentNodeDecisions? {
+        guard let answering = model.answering else { return nil }
+        let waiting = model.decisions(of: row.id)
+        guard !waiting.isEmpty else { return nil }
+        return AgentNodeDecisions(label: AgentNodeDecisions.label(of: row.content),
+                                  cards: AgentNodeDecisions.cards(for: waiting, in: model.channel,
+                                                                  answering: answering,
+                                                                  isStale: model.isOverlayStale))
     }
 
     private func bring(_ run: AgentRunID?, into scroll: ScrollViewProxy) {

@@ -150,6 +150,23 @@ struct AgentRunRead: Hashable, Sendable {
     static func items(of run: AgentRunID, in timeline: ChannelTimeline) -> [TimelineItem] {
         timeline.items.filter { $0.provenance.agentID == run }
     }
+
+    /// The requests the engine is waiting on **for one run** (child spec D6, item 52).
+    ///
+    /// `DecisionItem.agentID` is set by the wire reducer from the request payload, so this one
+    /// expression is the node's cards live and from disk — a filter over C3's overlay, never a
+    /// reduction of this leaf's own (§7.3).
+    ///
+    /// Only `.pending`: a settled request is a reading and not a card to answer, and the node's
+    /// waiting badge counts the same set. Ordered by the item's own instant, with the request id
+    /// breaking a tie, because a dictionary has no order and a node whose two cards swapped places
+    /// between two body evaluations would move the button under the user's cursor.
+    static func decisions(of run: AgentRunID, in timeline: ChannelTimeline) -> [DecisionItem] {
+        timeline.overlay.decisions.values
+            .filter { $0.agentID == run && $0.state == .pending }
+            .sorted { ($0.timestamp ?? .distantPast, $0.requestID.rawValue)
+                        < ($1.timestamp ?? .distantPast, $1.requestID.rawValue) }
+    }
 }
 
 /// One channel's read, rebuilt when the tree moved and not when the channel merely streamed

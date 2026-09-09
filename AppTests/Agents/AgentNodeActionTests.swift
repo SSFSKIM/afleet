@@ -314,7 +314,7 @@ final class AgentNodeActionTests: XCTestCase {
         await rig.settleConfirm()
         rig.model.actions?.answerPending()
         await rig.settle(actions: 1)
-        while rig.model.actions?.banner == nil { await Task.yield() }
+        _ = await Self.settle { rig.model.actions?.banner != nil }
 
         XCTAssertTrue(rig.model.actions?.backgroundingDisabled == true,
                       "a refusal that arrived through Background all left backgrounding available")
@@ -360,7 +360,7 @@ final class AgentNodeActionTests: XCTestCase {
         let expected = try XCTUnwrap(rig.model.transcriptURL(of: Rig.runID), "the tree composed no transcript path")
 
         try press("Open Transcript File", on: Rig.runID, in: rig)
-        while await rig.links.opened.isEmpty { await Task.yield() }
+        _ = await Self.settle { await rig.links.opened.isEmpty == false }
 
         let opened = await rig.links.opened
         XCTAssertEqual(opened.count, 1, "one press raised \(opened.count) link(s)")
@@ -475,19 +475,19 @@ final class AgentNodeActionTests: XCTestCase {
         /// Waits for the round trip a button press started. Counted rather than timed: the press
         /// starts a `Task`, and a test that waited a duration would be asserting about the scheduler.
         func settle(sends: Int) async {
-            while await lifecycle.sent.count < sends { await Task.yield() }
-            while model.actions?.inFlight == true { await Task.yield() }
+            _ = await AgentNodeActionTests.settle { await self.lifecycle.sent.count >= sends }
+            _ = await AgentNodeActionTests.settle { self.model.actions?.inFlight != true }
         }
 
         /// The same, for the half of Y5 that goes out as a `LifecycleAction`.
         func settle(actions count: Int) async {
-            while await lifecycle.actions.count < count { await Task.yield() }
+            _ = await AgentNodeActionTests.settle { await self.lifecycle.actions.count >= count }
         }
 
         /// Waits for the confirm to be raised. *Stop everything* takes the fleet's census first, so
         /// the dialog appears one suspension after the button was pressed.
         func settleConfirm() async {
-            while model.actions?.pending == nil { await Task.yield() }
+            _ = await AgentNodeActionTests.settle { self.model.actions?.pending != nil }
         }
 
         /// One running, foreground agent run — the shape §8.4 makes *Move to background* available
@@ -559,6 +559,22 @@ final class AgentNodeActionTests: XCTestCase {
         XCTAssertTrue(ViewTree.press(button), "the \(label) button carried no action", file: file, line: line)
     }
 
+    /// Yields until the condition holds or the budget runs out, and answers whether it held.
+    ///
+    /// **Bounded on purpose.** Every wait in this tree is fulfilled by the event it waits for and
+    /// none of them has a deadline — but a *broken* implementation leaves one unfulfilled for ever,
+    /// and a spin that never ends turns a failing assertion into a suite that never reports. The
+    /// budget is a count of scheduler turns rather than a duration, so it decides nothing about
+    /// speed; what it bounds is the failure.
+    @MainActor
+    static func settle(until condition: @MainActor () async -> Bool, turns: Int = 20_000) async -> Bool {
+        for _ in 0..<turns {
+            if await condition() { return true }
+            await Task.yield()
+        }
+        return await condition()
+    }
+
     /// A channel state for a double that has to answer `perform`. Invented throughout (§11).
     static func state(_ key: ChannelKey) -> ChannelState {
         ChannelState(key: key,
@@ -620,6 +636,11 @@ actor ActionDouble: LifecycleAPI {
     func stageReply(_ reply: Result<JSONValue, WireError>) { replies.append(reply) }
     func always(_ outcome: Result<ChannelState, LifecycleError>) { self.outcome = outcome }
     func failPerform(with error: any Error) { performError = error }
+    /// Runs **inside** `perform`, once. `LifecycleDouble`'s seam, needed here for the same reason: a
+    /// reservation is held only while the answer is on the wire, so the second host's press has to
+    /// happen in that window and nowhere else.
+    private var interlude: (@Sendable () async -> Void)?
+    func duringPerform(_ body: @escaping @Sendable () async -> Void) { interlude = body }
     func setLive(_ ids: [String]) { live = ids }
 
     func send(_ request: AnyControlRequest, on key: ChannelKey) async throws -> JSONValue {
@@ -632,6 +653,9 @@ actor ActionDouble: LifecycleAPI {
     func perform(_ action: LifecycleAction, on key: ChannelKey) async throws -> ChannelState {
         actions.append(action)
         channels.append(key)
+        let running = interlude
+        interlude = nil
+        await running?()
         if let performError { throw performError }
         guard let outcome else { unreachable("perform with no staged outcome") }
         return try outcome.get()

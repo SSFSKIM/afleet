@@ -477,7 +477,15 @@ final class AppModel: FilesTabHost {
                 // send them by anywhere earlier.
                 let agents = AgentsTab(timelines: { [timelines] key in timelines.model(for: key).timeline },
                                        selection: agentSelection,
-                                       lifecycle: workspace.fleet)
+                                       lifecycle: workspace.fleet,
+                                       // Contract Y2 and Y7: a card answered on a node raises
+                                       // `HostSignal.decisionAnswered` on the channel's own fold —
+                                       // the engine sends no frame back for an answer — and it
+                                       // reserves the request in the app's **one** set, so the same
+                                       // card answered here and in Activity cannot both reach the
+                                       // wire. Two closures over the one registry, never a second.
+                                       fold: ChannelFold(timelines: timelines),
+                                       reservations: decisions)
                 do {
                     try panels.register(agents)
                 } catch {

@@ -36,13 +36,27 @@ final class AgentsTab: PanelTab {
     /// a named one, because a test that took the user's clipboard while it ran would be a side effect
     /// nobody asked for.
     private let pasteboard: NSPasteboard
+    /// How a decision answered on a node reaches the channel's fold (contract Y7). Two closures over
+    /// the app's one `ChannelTimelineRegistry`, the shape `ThreadTab` takes and for its reason: the
+    /// engine sends **no frame back for an answer**, so `HostSignal.decisionAnswered` on the fold is
+    /// the only thing that can move the item out of `.pending`, and a second registry here would be
+    /// the duplicate-capability path the C6 cut exists to prevent.
+    private let fold: ChannelFold
+    /// The app's **one** reservation set, `AppModel.decisions`. A set of this panel's own would let
+    /// a card answered here and the same card answered in Activity both reach the wire, and the
+    /// second would come back `decisionGone` — an error about afleet's bookkeeping dressed as an
+    /// error about the engine.
+    private let reservations: DecisionReservations
 
     init(timelines: @escaping AgentsModel.TimelineReach, selection: AgentSelectionStore,
-         lifecycle: (any LifecycleAPI)? = nil, pasteboard: NSPasteboard = .general) {
+         lifecycle: (any LifecycleAPI)? = nil, pasteboard: NSPasteboard = .general,
+         fold: ChannelFold = ChannelFold(), reservations: DecisionReservations = DecisionReservations()) {
         self.timelines = timelines
         self.selection = selection
         self.lifecycle = lifecycle
         self.pasteboard = pasteboard
+        self.fold = fold
+        self.reservations = reservations
     }
 
     /// Available for every channel (child spec D10). A channel with no runs and a channel whose
@@ -57,7 +71,8 @@ final class AgentsTab: PanelTab {
                     actions: lifecycle.map {
                         AgentNodeActions(lifecycle: $0, channel: context.key, links: context.links,
                                          pasteboard: pasteboard)
-                    })
+                    },
+                    answering: lifecycle.map(makeAnswering))
     }
 
     func makeView(session: any PanelTabSession, context: ChannelContext,
@@ -71,6 +86,19 @@ final class AgentsTab: PanelTab {
     func panelView(session: any PanelTabSession, surface: PanelSurface) -> AgentsPanelView? {
         guard let model = session as? AgentsModel else { return nil }
         return AgentsPanelView(model: model, surface: surface)
+    }
+
+    /// The object a decision card's answer leaves by, built per session and wired to the two things
+    /// it must not own (contract Y7).
+    ///
+    /// The reservation set is the **app's** and is handed in; the raise is this channel's fold. Both
+    /// are ways for the mount to be silently wrong — a private set disables only this surface's
+    /// buttons, and a raise that went nowhere leaves the card reading `.pending` for ever with every
+    /// other assertion green. It is C6.1's `makeAnswering()` shape, on this leaf's own seam.
+    private func makeAnswering(_ lifecycle: any LifecycleAPI) -> DecisionAnswering {
+        let answering = DecisionAnswering(lifecycle: lifecycle, reservations: reservations)
+        answering.raise = { [fold] key, signal in await fold.raise(key, signal) }
+        return answering
     }
 
     // MARK: - The command link (child spec D15, tracker 207)
