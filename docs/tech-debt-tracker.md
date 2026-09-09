@@ -3713,3 +3713,36 @@ needs more. Nothing above is renumbered.
      wire has it; the reducer discards it) and keep one preview per agent stream, then the pane
      passes the preview whose agent is the run's. Owner: C3, with whoever next touches the
      preview's shape. Raised by C6.4 Task 4.
+
+178. **A node's backgrounding offer is cached on a key that cannot see the tool-use id change.**
+     C6.4's read is rebuilt when `AgentRunRead.Source` moves, and the mirror's third of that key
+     is `TaskCardEligibility` (`App/Decisions/TaskCardView.swift`), which records per task only
+     whether the action is available, the status and the two instants — deliberately, because
+     `RegistryEntry.lastFrameAt` is stamped by every `task_progress` heartbeat and a key over the
+     whole mirror would rebuild a chatty channel's tree read several times a second. The gap is
+     that eligibility requires a `tool_use_id` to *exist* and says nothing about its **value**, so
+     a mirror row whose id changes while the run stays running, foreground and backgroundable
+     leaves the cached `AgentNodeContent.backgroundToolUseID` naming the previous one, and
+     `background_tasks` would then name a tool use the engine has moved on from. No frame observed
+     in the corpus rewrites a live row's `tool_use_id` — `apply(taskStarted:)` and
+     `apply(taskProgress:)` only ever set it when the frame carries one, and a re-arm is the same
+     run — so this is a gap in the key rather than a reachable defect today, and the same gap is
+     the task card's, which is why it was not closed one-sidedly here. Closer: fold the id into
+     `TaskCardEligibility`'s row, which costs one string per task and changes nothing about the
+     heartbeat's cost. Owner: whoever owns `TaskCardEligibility`, with both of its readers.
+     Raised by C6.4 Task 5.
+
+179. **"Background tasks are disabled in this session." is remembered for the panel's life, not
+     the process's.** §6.4 says the refusal hides both backgrounding affordances *for that
+     process*, and `AgentNodeActions.backgroundingDisabled` (`App/Agents/AgentNodeActions.swift`)
+     is set when the engine sends it and is never cleared. The panel's session outlives the
+     process: a quiescent restart, a `.reopen` or any other replacement gives the channel a new
+     epoch, and a channel that was launched with backgrounding disabled and is relaunched without
+     it keeps the affordances hidden until the session is rebuilt. The failure is one-directional
+     and quiet — the user sees no *Move to background* on a channel that would now accept it, and
+     nothing says why — which is why it is filed rather than left unstated. It is deliberately not
+     "clear it on any success", which would put the affordance back after an unrelated request
+     succeeded. Closer: hold the reading against the `ProcessEpoch` it was learned in, and drop it
+     when the epoch moves — `HostSignal.processReplaced` already carries the epoch to the fold, so
+     the fact is on the wire the panel already reads. Owner: C6.4's successor. Raised by C6.4
+     Task 5.
