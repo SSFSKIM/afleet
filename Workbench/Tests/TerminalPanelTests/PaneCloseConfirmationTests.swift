@@ -142,6 +142,29 @@ final class PaneCloseConfirmationTests: XCTestCase {
         XCTAssertTrue(fresh.request == nil, "a restarted shell pane carries a request")
     }
 
+    /// A restart suspends while the pane it is replacing is torn down, and the user goes on using
+    /// the panel through that suspension. The fresh pane takes the selection only if the pane it
+    /// replaced still held it: a restart that assigned the selection unconditionally pulled the
+    /// tab back off whatever the user had chosen in the meantime — and persisted that.
+    func testARestartLeavesASelectionMadeWhileItWasSuspendedAlone() async throws {
+        let (session, _) = try makeSession()
+        let first = session.openShellPane()
+        let second = session.openShellPane()
+        XCTAssertEqual(session.selectedIndex, 1, "the pane being restarted did not begin selected")
+
+        let restarting = Task { await session.restart(second) }
+        await Task.yield()
+        await Task.yield()
+        session.select(0)
+        let restarted = await restarting.value
+        let fresh = try XCTUnwrap(restarted, "the shell pane did not restart")
+
+        XCTAssertEqual(session.selectedIndex, 0,
+                       "selected=\(String(describing: session.selectedIndex)) after a restart the user did not select")
+        XCTAssertTrue(session.selectedPane === first, "the restart took the selection the user had moved")
+        XCTAssertTrue(session.panes.last === fresh, "the fresh pane took another slot")
+    }
+
     func testAPaneWhoseChildHasAlreadyEndedClosesWithoutAsking() async throws {
         let (session, fixture) = try makeSession()
         let pane = session.run(PaneRequest(

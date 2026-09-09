@@ -203,6 +203,11 @@ public final class TerminalPanelSession: PanelTabSession {
         // child was being torn down has moved every position after its own, and the old one now
         // names a neighbour — or nothing at all.
         guard let index = panes.firstIndex(where: { $0 === pane }) else { return nil }
+        // Whether the pane being replaced still held the selection, asked at the position it
+        // actually sits in now. The user goes on using the panel through the suspension above, and
+        // a restart that took the selection unconditionally pulled the tab off the pane they chose
+        // — or the pane they opened — inside it, and wrote that over the document.
+        let wasSelected = selectedIndex == index
         panes.remove(at: index)
         reportedPanes.remove(ObjectIdentifier(pane))
         if paneAwaitingClose === pane { cancelPendingClose() }
@@ -213,8 +218,10 @@ public final class TerminalPanelSession: PanelTabSession {
             cwd: cwd ?? context.cwd,
             environment: context.environment.variables
         )
+        // The removal and the insertion are at one index, so every other position is unchanged and
+        // a selection standing on one of them still names the pane it named.
         panes.insert(fresh, at: index)
-        selectedIndex = index
+        if wasSelected { selectedIndex = index }
         paneCountDidChange?(self)
         schedulePersist()
         return fresh
