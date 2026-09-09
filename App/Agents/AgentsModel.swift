@@ -11,9 +11,12 @@ import PanelHostAPI
 /// run the user was reading on every switch would not be a panel at all. That is the whole reason
 /// X7 has sessions.
 ///
-/// **The read is derived on demand and never stored.** `read` recomputes from the channel model's
-/// published `ChannelTimeline`, which is what `@Observable` invalidates on; a cached copy here would
-/// be a second version of C3's tree with nothing keeping the two together.
+/// **The read is derived from the published timeline and never held past it.** `read` is computed
+/// from the channel model's published `ChannelTimeline`, which is what `@Observable` invalidates on;
+/// a copy kept beside that timeline would be a second version of C3's tree with nothing keeping the
+/// two together. What is kept is a cache keyed on the tree and the decisions themselves, so a read
+/// is answered from the last one exactly while both stand still and is rebuilt the instant either
+/// moves — which is holding the derivation, not the tree.
 @MainActor
 @Observable
 final class AgentsModel: PanelTabSession {
@@ -34,6 +37,8 @@ final class AgentsModel: PanelTabSession {
 
     @ObservationIgnored private let timelines: TimelineReach
     @ObservationIgnored private let store: AgentSelectionStore
+    /// The read, held only as long as the two values it is derived from stand still (child spec D7).
+    @ObservationIgnored private let reads = AgentRunReadCache()
 
     /// Which branches the user has **closed**. Per channel, so a tree opened in one channel does
     /// not collapse because another channel's was.
@@ -56,7 +61,7 @@ final class AgentsModel: PanelTabSession {
     /// The tree, as this pane reads it. A channel with no model has no fold and therefore no tree,
     /// which is `.noWire` — the same answer the read gives for a channel whose fold has none.
     var read: AgentRunRead {
-        AgentRunRead(timeline: timelines(channel) ?? ChannelTimeline())
+        reads.read(of: timelines(channel) ?? ChannelTimeline())
     }
 
     /// What the pane has open, and why it has nothing open when it has nothing open.

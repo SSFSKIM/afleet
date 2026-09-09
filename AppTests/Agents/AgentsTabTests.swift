@@ -138,6 +138,49 @@ final class AgentsTabTests: XCTestCase {
                        "another channel's disclosure set gained \(b.collapsed.count) node(s) from this one")
     }
 
+    // MARK: - The read across a streaming delta (child spec D7)
+
+    /// A publish that moved only the items answers the read the tree already had.
+    ///
+    /// Building one walks every run, sanitises four wire strings on each and counts the channel's
+    /// pending decisions — while the panel's body evaluates on every streaming delta, thirty a
+    /// second, and a delta changes no run at all. The floor is the second half: a tree that really
+    /// did move, and a decision that arrived, both rebuild it, or this would be a cache that never
+    /// notices anything.
+    func testAStreamingDeltaDoesNotRebuildTheRead() throws {
+        let published = PublishedTimeline(ChannelTimeline(agents: InventedAgents.treeOfRoots(2)))
+        let model = AgentsModel(channel: PanelFixtures.key(12), timelines: { [published] _ in published.timeline },
+                                store: AgentSelectionStore())
+        XCTAssertEqual(model.read.roots.count, 2, "the pane read \(model.read.roots.count) run(s) of the 2 published")
+
+        for index in 0..<30 {
+            published.timeline.durable.items.append(InventedAgents.call("toolu_invented01\(index)", agent: nil))
+            _ = model.read
+            _ = model.selection
+            _ = model.selectedRun
+        }
+
+        let cache = try XCTUnwrap(ViewTree.values(of: AgentRunReadCache.self, in: model).first,
+                                  "the session holds no read cache, so the read is rebuilt per access")
+        XCTAssertEqual(cache.builds, 1,
+                       "30 streaming delta(s) left the cache at \(cache.builds) build(s), not the 1 the tree "
+                       + "needs — a read built per access never reaches it")
+
+        // A run that arrived.
+        published.timeline.agents = InventedAgents.treeOfRoots(3)
+        XCTAssertEqual(model.read.roots.count, 3, "the pane read \(model.read.roots.count) run(s) of the 3 published")
+        XCTAssertEqual(cache.builds, 2,
+                       "a run that arrived left the read at \(cache.builds) build(s), so the tree never reaches it")
+
+        // And a card the engine is waiting on, which the badge is part of the same read.
+        published.timeline.overlay.decisions[RequestID(rawValue: "req_invented0009")] =
+            InventedAgents.decision("req_invented0009", agent: InventedAgents.run(0))
+        XCTAssertEqual(model.read.content(of: InventedAgents.run(0))?.waitingCount, 1,
+                       "the run's badge did not follow the card that arrived")
+        XCTAssertEqual(cache.builds, 3,
+                       "a card that arrived left the read at \(cache.builds) build(s), so the overlay never reaches it")
+    }
+
     // MARK: - What the tab is allowed to hold (X7)
 
     /// The tab's stored properties contain no `PanelHostModel` and no `ChannelTimelineRegistry`.
@@ -215,6 +258,14 @@ final class AgentsTabTests: XCTestCase {
 
     /// A session of another tab's kind, so the guard in `panelView` has something to refuse.
     private final class OtherSession: PanelTabSession {}
+
+    /// The channel's timeline as the fold publishes it: one value, replaced in place, which is what
+    /// the pane's closure reaches for on every access.
+    @MainActor
+    private final class PublishedTimeline {
+        var timeline: ChannelTimeline
+        init(_ timeline: ChannelTimeline) { self.timeline = timeline }
+    }
 
     /// Counts, never links: what the router did with a link that nothing claimed (§11).
     ///

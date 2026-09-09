@@ -1,4 +1,5 @@
 import Foundation
+import ClaudeWire
 import FleetKit
 
 /// The Agents tab's read of C3's `AgentRunTree`, derived from a `ChannelTimeline` in one pass.
@@ -102,6 +103,18 @@ struct AgentRunRead: Hashable, Sendable {
     /// resolves to nothing, and the pane says so rather than fabricating a selection (D5).
     func knows(_ id: AgentRunID) -> Bool { contents[id] != nil }
 
+    /// The two things this read is derived from. Everything else on the timeline — the items, the
+    /// streaming preview — is read by the transcript pane and never by the tree.
+    struct Source: Equatable, Sendable {
+        let agents: AgentRunTree?
+        let decisions: [RequestID: DecisionItem]
+
+        init(_ timeline: ChannelTimeline) {
+            agents = timeline.agents
+            decisions = timeline.overlay.decisions
+        }
+    }
+
     /// One run's items: the channel's items whose provenance names this agent, in the timeline's
     /// own order.
     ///
@@ -113,5 +126,37 @@ struct AgentRunRead: Hashable, Sendable {
     /// Static and pure so the transcript pane's contents are testable without a render pass.
     static func items(of run: AgentRunID, in timeline: ChannelTimeline) -> [TimelineItem] {
         timeline.items.filter { $0.provenance.agentID == run }
+    }
+}
+
+/// One channel's read, rebuilt when the tree moved and not when the channel merely streamed
+/// (child spec D7).
+///
+/// The read walks every node, sanitises four wire strings per node and counts the overlay's pending
+/// decisions. A panel body evaluates on every streaming delta — thirty a second, none of which
+/// changes a run — and the tree view asks for the read more than once per evaluation, so what a
+/// delta cost grew with the number of runs in the channel and with how often the pane was drawn.
+///
+/// Keyed on `AgentRunRead.Source`: the tree and the decisions, the two values the read is derived
+/// from, and not the whole timeline — a key that included the items would rebuild on exactly the
+/// deltas this exists to ignore. It is `TimelineNeighbourhoodCache`'s shape (C6.1) for
+/// `TimelineNeighbourhood`'s reason.
+@MainActor
+final class AgentRunReadCache {
+
+    /// How many reads this cache has had to build. Counted for the reason C6.1 counts its own: a
+    /// cost nothing can read is a cost nothing can hold.
+    private(set) var builds = 0
+
+    private var key: AgentRunRead.Source?
+    private var cached = AgentRunRead(timeline: ChannelTimeline())
+
+    func read(of timeline: ChannelTimeline) -> AgentRunRead {
+        let key = AgentRunRead.Source(timeline)
+        if let held = self.key, held == key { return cached }
+        cached = AgentRunRead(timeline: timeline)
+        self.key = key
+        builds += 1
+        return cached
     }
 }
