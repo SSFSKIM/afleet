@@ -268,6 +268,82 @@ final class AgentNodeActionTests: XCTestCase {
         }
     }
 
+    // MARK: - A session that does no background work at all (§6.4)
+
+    /// **G3: the refusal renders as a banner and hides *both* backgrounding affordances.**
+    ///
+    /// The sentence arrives as a control **error**, before the engine consults its task registry, so
+    /// it cannot be read out of a `{backgrounded: false}` body — the two arms are two paths and a
+    /// handler that drove both off one would never raise this banner.
+    ///
+    /// Four clauses. The outcome is a refusal, the banner carries the engine's own words, the node's
+    /// *Move to background* is gone and the tree's *Background all* is gone with it. *Stop
+    /// everything* stays, which is what makes this about backgrounding rather than about hiding
+    /// everything after any failure.
+    func testBackgroundingDisabledHidesBothAffordances() async throws {
+        let rig = try Rig(mirror: Rig.runningAgent())
+        await rig.lifecycle.stageReply(.failure(.controlError(AgentNodeActions.backgroundingRefusal)))
+        rig.model.select(Rig.runID)
+        XCTAssertNotNil(ViewTree.button(AgentTreeConfirm.backgroundAllTitle, in: try Self.topBarBody(in: rig)),
+                        "the tree offered no Background All before the refusal, so nothing was hidden by it")
+
+        try press("Move to Background", on: Rig.runID, in: rig)
+        await rig.settle(sends: 1)
+
+        let actions = try XCTUnwrap(rig.model.actions)
+        XCTAssertTrue(actions.lastBackgrounding == .refused, "the refusal was concluded as something else")
+        XCTAssertTrue(actions.backgroundingDisabled, "the session's refusal left backgrounding available")
+        XCTAssertTrue(actions.banner?.text == AgentNodeActions.backgroundingRefusal,
+                      "the banner says something other than the engine's own sentence")
+        XCTAssertNil(ViewTree.button("Move to Background", in: try Self.actionBody(of: Rig.runID, in: rig)),
+                     "the node still offers backgrounding in a session that refuses it")
+        XCTAssertNil(ViewTree.button(AgentTreeConfirm.backgroundAllTitle, in: try Self.topBarBody(in: rig)),
+                     "the tree still offers Background All in a session that refuses it")
+        XCTAssertNotNil(ViewTree.button(AgentTreeConfirm.stopEverythingTitle, in: try Self.topBarBody(in: rig)),
+                        "Stop Everything went with it, so the refusal hid more than backgrounding")
+    }
+
+    /// *Background all* meets the same refusal — it is one `background_tasks` with no tool-use id —
+    /// and hides the same two affordances, through the action route rather than the send route.
+    func testTheRefusalReachesTheSameReadingThroughBackgroundAll() async throws {
+        let rig = try Rig(mirror: Rig.runningAgent())
+        await rig.lifecycle.failPerform(with: WireError.controlError(AgentNodeActions.backgroundingRefusal))
+        rig.model.select(Rig.runID)
+
+        try pressTop(AgentTreeConfirm.backgroundAllTitle, in: rig)
+        await rig.settleConfirm()
+        rig.model.actions?.answerPending()
+        await rig.settle(actions: 1)
+        while rig.model.actions?.banner == nil { await Task.yield() }
+
+        XCTAssertTrue(rig.model.actions?.backgroundingDisabled == true,
+                      "a refusal that arrived through Background all left backgrounding available")
+        XCTAssertNil(ViewTree.button("Move to Background", in: try Self.actionBody(of: Rig.runID, in: rig)),
+                     "the node still offers backgrounding after the channel-wide action was refused")
+    }
+
+    /// **A failure that is not the refusal hides nothing.**
+    ///
+    /// Discriminating, and the reason the reading is taken from the sentence rather than from "a
+    /// control error on a backgrounding request": §6.4 hides the affordances for the process and
+    /// nothing puts them back, so a transient error that hid them would take backgrounding away from
+    /// a channel that can still do it, for as long as the panel lives.
+    func testATransientFailureRaisesTheBannerAndHidesNothing() async throws {
+        let rig = try Rig(mirror: Rig.runningAgent())
+        await rig.lifecycle.stageReply(.failure(.controlError("The request could not be completed.")))
+        rig.model.select(Rig.runID)
+
+        try press("Move to Background", on: Rig.runID, in: rig)
+        await rig.settle(sends: 1)
+
+        let actions = try XCTUnwrap(rig.model.actions)
+        XCTAssertNotNil(actions.banner, "a failed request left no banner at all")
+        XCTAssertFalse(actions.backgroundingDisabled,
+                       "a failure that is not the session's refusal disabled backgrounding for the session")
+        XCTAssertNotNil(ViewTree.button("Move to Background", in: try Self.actionBody(of: Rig.runID, in: rig)),
+                        "a transient failure took the affordance away for good")
+    }
+
     // MARK: - The two that send nothing
 
     /// **G3: *Open transcript file* is one `WorkspaceLink.file`, and no descriptor is opened.**
@@ -526,6 +602,10 @@ actor ActionDouble: LifecycleAPI {
     private(set) var actions: [LifecycleAction] = []
     private var replies: [Result<JSONValue, WireError>] = []
     private var outcome: Result<ChannelState, LifecycleError>?
+    /// What the next `perform` throws, when it is not a `LifecycleError`. `Fleet.perform` is
+    /// untyped-throws and `.backgroundAll` is one `background_tasks` request, so the engine's own
+    /// `WireError.controlError` really does surface from this member.
+    private var performError: (any Error)?
     /// What `liveTaskIDs` answers. Ids, because that is the member's shape; nothing this double
     /// serves ever prints one.
     private var live: [String] = []
@@ -539,6 +619,7 @@ actor ActionDouble: LifecycleAPI {
 
     func stageReply(_ reply: Result<JSONValue, WireError>) { replies.append(reply) }
     func always(_ outcome: Result<ChannelState, LifecycleError>) { self.outcome = outcome }
+    func failPerform(with error: any Error) { performError = error }
     func setLive(_ ids: [String]) { live = ids }
 
     func send(_ request: AnyControlRequest, on key: ChannelKey) async throws -> JSONValue {
@@ -551,6 +632,7 @@ actor ActionDouble: LifecycleAPI {
     func perform(_ action: LifecycleAction, on key: ChannelKey) async throws -> ChannelState {
         actions.append(action)
         channels.append(key)
+        if let performError { throw performError }
         guard let outcome else { unreachable("perform with no staged outcome") }
         return try outcome.get()
     }

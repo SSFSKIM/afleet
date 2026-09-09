@@ -142,11 +142,33 @@ final class AgentNodeActions {
             refresh()
         } catch {
             lastBackgrounding = .refused
-            banner = TaskCardModel.banner(for: error)
-            // §6.4: the session's own refusal, which arrives as a control error. A transport failure
-            // is not the session refusing and hides nothing.
-            if case WireError.controlError = error { backgroundingDisabled = true }
+            note(error)
         }
+    }
+
+    /// The engine's refusal when this session does no background work at all — root §8.4's table and
+    /// parity §20.13.2, where `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` removes the capability from the
+    /// process. It arrives as a control **error**, before the task registry is consulted, which is
+    /// why it cannot be read out of a `{backgrounded: false}` body.
+    static let backgroundingRefusal = "Background tasks are disabled in this session."
+
+    /// Whether a failure is that refusal, rather than any other way a request can fail.
+    ///
+    /// **Matched on the sentence and not merely on "a control error on a backgrounding request".**
+    /// §6.4 hides both affordances for the *process*, and this reading is not undone until the panel
+    /// is rebuilt — so a transient control error that hid them would take backgrounding away from a
+    /// channel that can still do it, with nothing to put it back. The sentence is the engine's own
+    /// and is what the table names.
+    static func refusesBackgrounding(_ error: any Error) -> Bool {
+        guard case WireError.controlError(let reason) = error else { return false }
+        return reason.contains(backgroundingRefusal)
+    }
+
+    /// What a failed backgrounding request leaves behind: the engine's own sentence as a banner, and
+    /// — only for the refusal — the session-wide reading that hides both affordances (§6.4).
+    private func note(_ error: any Error) {
+        banner = TaskCardModel.banner(for: error)
+        if Self.refusesBackgrounding(error) { backgroundingDisabled = true }
     }
 
     // MARK: - The two that send nothing
@@ -218,7 +240,11 @@ final class AgentNodeActions {
             _ = try await lifecycle.perform(confirm.action, on: channel)
             banner = nil
         } catch {
-            banner = TaskCardModel.banner(for: error)
+            // *Background all* is `background_tasks` with no `tool_use_id`, so it meets the same
+            // refusal the per-node action does and hides the same two affordances. *Stop everything*
+            // cannot, which `refusesBackgrounding(_:)` decides by the sentence rather than by which
+            // button was pressed.
+            note(error)
         }
     }
 
