@@ -88,10 +88,18 @@ final class AgentTreeGateTests: XCTestCase {
         XCTAssertEqual(closed.count, 1,
                        "closing the root left \(closed.count) row(s), so the nested run is not under it")
 
-        // The arm's premise, asserted rather than assumed: no sidecar was on disk to answer, so the
-        // file source produced nothing at all for this run.
-        XCTAssertTrue(tree.parentAnswers[child]?[.metaFile] == nil,
-                      "a sidecar answered the parent question on the arm that withholds every sidecar")
+        // The arm's premise, asserted rather than assumed: **no metadata source answered at all**,
+        // so the join is the only source that reached this run.
+        //
+        // Both of them, because there are two. The sidecar is the one this arm withholds, and the
+        // mirrored `agent_metadata` entry is the other — and an agreeing mirrored answer arriving
+        // after the join leaves `parentSource` at `.twoStepJoin` with nothing in `conflicts`, so a
+        // premise that named only the file source would hold while the sentence it states is false.
+        let answers = tree.parentAnswers[child] ?? [:]
+        XCTAssertEqual(answers.filter { $0.key != .twoStepJoin }.count, 0,
+                       "\(answers.filter { $0.key != .twoStepJoin }.count) metadata source(s) answered the parent "
+                       + "question on the arm that has none of them")
+        XCTAssertEqual(answers.count, 1, "the join left \(answers.count) answer(s) where it is the only source")
         XCTAssertEqual(tree.conflicts.count, 0,
                        "the tree holds \(tree.conflicts.count) parent disagreement(s) where one source answered")
     }
