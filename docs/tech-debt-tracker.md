@@ -4222,3 +4222,16 @@ needs more. Nothing above is renumbered.
      against a recording that folds two streams. Closer: filter `renderedUserMessages` to
      `StreamName.main` and re-run C6.2's rewind arms. Owner: C6.2's successor on the composer.
      Raised by corrective/c6-recomp-decisions at its review's fix wave.
+
+     **Closed 2026-09-10 — `corrective/c6-readbacks-rewind`.** `renderedUserMessages` now selects
+     `StreamName.main`, leaving main-stream replays eligible for the rewind cursor while restore
+     retains its separate non-replay rule. An agent item cannot be an edit target, and a refused
+     main edit resolves its preceding assistant on that same logical stream, never an interleaved
+     agent reply. Three mixed-stream regressions use only runtime copies/slices of signed
+     `rewind-turn` and `explore-depth-1` transcripts. They replay the existing honoured and
+     stale-target bodies plus G4's existing injected unseen-later-turn arm (the corpus has two
+     recorded response bodies, not three). They also check fork entry/dropped-turn identity,
+     sibling prefill and zero file rewinds. Red: 18 tests, 12 expected assertion failures across
+     the three new regressions. Green: all 18 `EditAndRewindTests` passed, with the actual
+     `** TEST SUCCEEDED **` verdict read from the captured log. Evidence:
+     `.build/corrective-logs/428-{red,green}.log`; fixture integrity/signature verification passed.

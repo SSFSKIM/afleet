@@ -10,8 +10,8 @@ import FleetKit
 /// `rewind_conversation` through `LifecycleAPI.send(_:on:)` and nothing else. No `rewind_files`
 /// request is emitted here in either direction, on either answer.
 ///
-/// **The request always carries `last_seen_user_message_uuid`, and its value is the newest user
-/// message this composer has rendered — never the edit target's own uuid.** The probe
+/// **The request always carries `last_seen_user_message_uuid`, and its value is the newest
+/// main-stream user message this composer has rendered — never substituted with the edit target's uuid.** The probe
 /// `spike_rewind_last_seen` measured all three arms on 2.1.263: naming the newest user message
 /// honours a target from before the running process, omitting the field refuses it with
 /// `"stale target"`, and naming the target itself refuses it with `"unseen later turn"`. The
@@ -24,19 +24,20 @@ import FleetKit
 @MainActor
 extension ComposerModel {
 
-    /// Every user message this channel's timeline has rendered, in the fold's own order.
+    /// Every main-conversation user message this channel's timeline has rendered, in the fold's own order.
     ///
     /// Read out of the `ChannelTimelineModel` the registry pointed this composer at — the channel's
     /// one fold (contract X4). There is no second place to learn what the user has been shown.
     var renderedUserMessages: [UserMessageItem] {
         guard let timelines else { return [] }
         return timelines.timeline.items.compactMap {
-            if case .userMessage(let message) = $0, !message.promptUUID.isEmpty { message } else { nil }
+            if case .userMessage(let message) = $0,
+               message.id.stream.name == .main, !message.promptUUID.isEmpty { message } else { nil }
         }
     }
 
     /// The uuid the request names as the last user message this host has seen: the newest rendered
-    /// one, and nil only for a composer whose timeline holds no user message at all.
+    /// main-stream one, and nil only when the timeline holds no main-conversation user message.
     var lastSeenUserMessageUUID: String? { renderedUserMessages.last?.promptUUID }
 
     /// The refusal dialog's *Edit the prompt*: the last prompt goes back into the field.
@@ -51,12 +52,10 @@ extension ComposerModel {
     /// (`cli.pretty.js:523721`, whose predicate takes a human-origin user message and rejects the
     /// synthetic ones).
     ///
-    /// **The stream filter is what makes it the user's prompt.** `renderedUserMessages` is the
-    /// merged timeline, and a subagent's stream carries user messages of its own — the run's
-    /// instructions, which the user never typed and which sort after the main thread's newest
-    /// prompt for as long as the run is live. Restoring one of those would put another agent's
-    /// errand in the field and call it the user's words. `isReplay` goes for the same reason: a
-    /// replayed `--agent` opening prompt is the engine's, not this user's.
+    /// **The stream filter is what makes it the user's prompt.** The timeline merges subagent
+    /// instructions with the main conversation; `renderedUserMessages` excludes those streams.
+    /// The restore also rejects `isReplay`: a replayed `--agent` opening prompt is the engine's,
+    /// not this user's. Rewind's last-seen cursor, unlike restore, still includes main-stream replays.
     func restoreLastPrompt() {
         guard draft.isEmpty, let last = Self.lastHumanPrompt(in: renderedUserMessages) else { return }
         draft = last.text
@@ -79,6 +78,7 @@ extension ComposerModel {
     /// Refused → the fallback below, on any body-level `error`, because the engine has ten of them
     /// and the composer's contract is that a refusal is never shown as a success.
     func edit(_ target: UserMessageItem) async {
+        guard target.id.stream.name == .main else { return }
         editNote = nil
         refusal = nil
         // What the field held when the edit was asked for. The request is an await and the user keeps typing across
@@ -170,7 +170,7 @@ extension ComposerModel {
         }
     }
 
-    /// The **last record** of the assistant item immediately preceding `target` in the fold's order, and nil when
+    /// The **last record** of the assistant item preceding `target` on the same stream, and nil when
     /// the edited message is the first thing in the conversation — which is a message with no fork point at all,
     /// not a fork from the beginning.
     ///
@@ -184,7 +184,9 @@ extension ComposerModel {
         let items = timelines.timeline.items
         guard let index = items.firstIndex(where: { $0.id == target.id }) else { return nil }
         for item in items[..<index].reversed() {
-            if case .assistantMessage(let assistant) = item { return assistant.recordUUIDs.last ?? assistant.id.key }
+            if case .assistantMessage(let assistant) = item, assistant.id.stream == target.id.stream {
+                return assistant.recordUUIDs.last ?? assistant.id.key
+            }
         }
         return nil
     }
