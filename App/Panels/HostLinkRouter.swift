@@ -28,6 +28,12 @@ final class HostLinkRouter: LinkRouterCapability {
     /// The one registry. Its fallbacks were given at construction and are not reachable from here.
     private let router: LinkRouter
 
+    /// Runs inside `open`, after the origin channel has been captured and before any of it is
+    /// read. A seam and never a behaviour: it is `nil` in the app, and it exists because "the
+    /// channel is a property of the action" is a claim about an ordering, and an ordering can only
+    /// be asserted from inside it.
+    var didCaptureOrigin: (@Sendable () async -> Void)?
+
     /// Where the no-channel diagnostic goes. Held as well as handed to the router because the
     /// branch below is the host's and not the registry's. The message names the link kind and
     /// never the link, so no path, no session id and no title reaches a log (§11).
@@ -103,6 +109,11 @@ final class HostLinkRouter: LinkRouterCapability {
     /// reported rather than presented.
     func open(_ link: WorkspaceLink, from destination: LinkDestination) async {
         let origin = self.host?.selectedChannel
+        // The barrier the ordering above is asserted at: it fires once the channel has been
+        // captured and before anything reads it, which is precisely the window in which the
+        // window can move. Nothing in the app sets it, and a test that instead yielded and hoped
+        // would be asserting the scheduler's habits rather than this type's rule (§17.7).
+        await didCaptureOrigin?()
         await LinkOrigin.$channel.withValue(origin) {
             await self.route(link, from: destination, origin: origin)
         }

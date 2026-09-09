@@ -126,11 +126,24 @@ final class BrowserWiringTests: XCTestCase {
             await app.panels.links.register(target)
         }
 
+        // The race is driven, not hoped for. A yield is a request to the scheduler and proves
+        // nothing about where the delivery got to: it could pass with the resolver having read its
+        // context before the window ever moved, which is the case this test exists for (§17.7).
+        // The barrier fires inside the routed call, once the origin has been captured and before
+        // anything reads it, and holds the delivery there until this test lets it go.
+        let barrier = RoutingBarrier()
+        let captured = expectation(description: "the routed call captured the channel it came from")
+        await barrier.expect(captured)
+        app.panels.links.didCaptureOrigin = { await barrier.wait() }
+
         let delivery = Task { await app.panels.links.open(.pullRequest(7), from: .currentPanel) }
-        // One yield is enough for the delivery to reach the registry and suspend there, and never
-        // enough for the handler — which needs this actor — to have run.
-        await Task.yield()
+        await fulfillment(of: [captured], timeout: 5)
+        XCTAssertTrue(runner.directories.isEmpty,
+                      "the resolver read its context before the origin was captured, so the "
+                      + "window moving below would not be a race at all")
+
         app.panels.focusChannel(movedTo)
+        await barrier.release()
         await delivery.value
 
         XCTAssertEqual(runner.directories, [BrowserWiringFixtures.clickedCwd],
@@ -345,5 +358,29 @@ private final class RecordingToolRunner: ToolRunning, @unchecked Sendable {
     private func record(_ cwd: URL) {
         lock.lock(); defer { lock.unlock() }
         stored.append(cwd)
+    }
+}
+
+/// The barrier that test suspends the routed call at: it reports that the call has reached the
+/// point being asserted about, and holds it there until the test has changed the world under it.
+actor RoutingBarrier {
+
+    private var arrival: XCTestExpectation?
+    private var held: CheckedContinuation<Void, Never>?
+    private var isReleased = false
+
+    func expect(_ expectation: XCTestExpectation) { arrival = expectation }
+
+    func wait() async {
+        arrival?.fulfill()
+        arrival = nil
+        guard !isReleased else { return }
+        await withCheckedContinuation { held = $0 }
+    }
+
+    func release() {
+        isReleased = true
+        held?.resume()
+        held = nil
     }
 }
