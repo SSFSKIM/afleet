@@ -63,6 +63,14 @@ ALLOWLIST: dict[str, str] = {
     # `TimelineListView.retained(_:by:)` filters the channel's rows through
     # `RetractionRegistry.retains(_:)` before the table is handed them, so D11's render-time filter
     # has a production caller.
+    # `shutdown`, `offersOwnedActions` and `readOnlyReason` were retired 2026-09-09 by the C7
+    # recomposition corrective, which found all three still exempted after the trackers they
+    # pointed at had closed. Tracker 71's Quit clause is `App/Header/QuitGuard.swift`, whose
+    # termination path calls `shutdown()`; tracker 74 closed at C6.2 Task 8, and the header's
+    # action menu now gates every owned action on `ChannelRow.offersOwnedActions`
+    # (`App/Header/ChannelHeaderActionsModel.swift`) while `App/Views/ChannelColumnView.swift`
+    # hands `readOnlyReason` to the composer mount. An entry whose tracker has closed is an
+    # exemption for a gap that no longer exists, which is the one thing this file cannot afford.
     # Requirements of a FleetKit protocol, called by FleetKit and never by App/.
     "confirm": "a `StrategyUI` requirement (FleetKit). `StrategyExecutor.run` calls it through the "
                "`ui:` the composer hands itself in as, so its caller is outside App/ by construction "
@@ -87,8 +95,6 @@ ALLOWLIST: dict[str, str] = {
     "configChange": "named so a reader of the router knows the second hook id exists; the default "
                     "arm answers it and branching on it would be one more place to forget",
     # Filed. An entry here is not an exemption — it is a pointer at the tracker line that owns it.
-    "shutdown": "tracker 71: what ends an owned child on quit is the pipe, and the Quit clause that "
-                "would call this is C6's",
     "liveSessionCount": "tracker 73: a count declared for a diagnostics line this child never emits",
     "liveChannelCount": "tracker 73: a count declared for a diagnostics line this child never emits",
     "targetCount": "tracker 73: a count declared for a diagnostics line this child never emits",
@@ -99,10 +105,6 @@ ALLOWLIST: dict[str, str] = {
                   "surface on the route's payload",
     "upgradeVersions": "tracker 73: RootView switches on AppRoute directly; the accessor is the "
                        "suite's surface on the route's payload",
-    "offersOwnedActions": "tracker 74: C5's sidebar offers no channel action, so the row's read-only "
-                          "affordance has no consumer yet",
-    "readOnlyReason": "tracker 74: C5's sidebar offers no channel action, so the row's read-only "
-                      "affordance has no consumer yet",
 }
 
 # Names the frameworks call and no afleet source does.
