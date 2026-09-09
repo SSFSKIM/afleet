@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import XCTest
 import AfleetCore
 import ClaudeWire
@@ -113,6 +114,45 @@ final class FileLinkTests: XCTestCase {
         let count = await router.opened.count
         XCTAssertEqual(count, 2,
                        "\(count) link(s) reached the router, so a relative path with no directory opened something")
+    }
+
+    // MARK: - What the label draws (round 2, sweep#2)
+
+    /// **The name a link draws is sanitised; the path it opens is not** (spec §12).
+    ///
+    /// `display` is engine-supplied text — a tool input's `file_path` — and it reached `Text`
+    /// through nothing but a split and a join. A bidi override in a filename reverses what follows
+    /// it, so a name ending `\u{202E}txt.exe` draws as though it ended `exe.txt`, and a zero-width
+    /// mark splits a name that reads as one. The destination is the other half of the rule: the
+    /// link must still open the file the call actually named, so sanitising is on what is drawn
+    /// and on nothing else. Every scalar here is invented text (§11).
+    func testTheDrawnNameIsSanitisedAndTheLinkStillOpensTheRealPath() async throws {
+        let name = "an-invented-file\u{202E}txt\u{200B}.exe"
+        let path = "/an-invented-project/" + name
+        let router = RecordingLinkRouter()
+        let context = InventedItems.context(links: router)
+
+        let body = FileLinkLabel(path: path, context: context).body
+        let drawn = ViewTree.values(of: String.self, in: body).filter { $0.contains("an-invented-file") }
+        XCTAssertEqual(drawn.count, 1, "the label drew \(drawn.count) name(s)")
+        let stripped = drawn.filter { $0.unicodeScalars.contains(where: TextSanitiser.isStripped) }
+        XCTAssertEqual(stripped.count, 0,
+                       "\(stripped.count) of the label's drawn string(s) still carry a stripped scalar")
+        XCTAssertEqual(drawn.first, "an-invented-project/an-invented-filetxt.exe",
+                       "the label drew a name of \(drawn.first?.unicodeScalars.count ?? 0) scalar(s)")
+
+        // The destination is the real path, sanitised of nothing: pressing the link opens the file
+        // the call named, not a different one.
+        let button = try XCTUnwrap(ViewTree.values(of: Button<Text>.self, in: body).first,
+                                   "the label drew no link to press")
+        XCTAssertTrue(ViewTree.press(button), "the link's action could not be invoked")
+        try await Self.settle(router, until: 1)
+        let opened = await router.opened
+        guard case .file(let url, _)? = opened.first else {
+            return XCTFail("the link produced \(opened.count) link(s) and none of them a file link")
+        }
+        XCTAssertEqual(url.lastPathComponent, name,
+                       "the link opened a name of \(url.lastPathComponent.unicodeScalars.count) scalar(s)")
     }
 
     // MARK: - Helpers

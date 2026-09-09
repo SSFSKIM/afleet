@@ -122,8 +122,14 @@ struct FileLinkLabel: View {
 
     /// The last two components, which is what a reader recognises a file by; the full path is the
     /// link's own and never printed in a diagnostic (§11).
+    ///
+    /// **Sanitised, because a filename is engine-supplied text** (§12). A tool input carries
+    /// whatever the model typed, and a bidi override inside a name reverses what follows it on
+    /// screen — `an-invented-file\u{202E}txt.exe` draws as though its extension were `.txt`. Only
+    /// what is *drawn* is stripped: `path` stays as the call wrote it, so the link keeps opening
+    /// the file the call actually named.
     private var display: String {
         let parts = path.split(separator: "/")
-        return parts.suffix(2).joined(separator: "/")
+        return TextSanitiser.sanitise(parts.suffix(2).joined(separator: "/"))
     }
 }
