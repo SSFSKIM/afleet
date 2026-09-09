@@ -30,7 +30,7 @@ final class AgentRunReadTests: XCTestCase {
         let noWire = AgentRunRead(timeline: ChannelTimeline())
         XCTAssertEqual(noWire.state, .noWire, "a channel with no tree did not read as the no-wire state")
 
-        let empty = AgentRunRead(timeline: ChannelTimeline(agents: Self.tree()))
+        let empty = AgentRunRead(timeline: ChannelTimeline(agents: InventedAgents.tree()))
         XCTAssertEqual(empty.state, .noRuns, "a channel with an empty tree did not read as the no-runs state")
 
         XCTAssertNotEqual(noWire.state, empty.state,
@@ -48,7 +48,7 @@ final class AgentRunReadTests: XCTestCase {
     /// from `spawn_depth` alone, or from `task_started` alone, would produce, since `task_started`
     /// carries no parent id.
     func testADepthTwoNodeIsNotARoot() throws {
-        let read = try Self.nestedDepthTwo()
+        let read = try InventedAgents.nestedDepthTwo()
 
         XCTAssertEqual(read.roots.count, 1,
                        "the recording's tree read as \(read.roots.count) root(s), not the 1 it holds")
@@ -68,15 +68,15 @@ final class AgentRunReadTests: XCTestCase {
     /// on every well-formed session and diverge exactly here, and the depth-1 filter would drop this
     /// run out of the tree with no sign that it existed.
     func testAnOrphanSurfacesAsARootWithItsDepthDrawn() throws {
-        var tree = Self.tree()
-        tree.apply(taskStarted: Self.taskStarted(taskID: "task_invented0001", toolUseID: "toolu_invented0001",
+        var tree = InventedAgents.tree()
+        tree.apply(taskStarted: InventedAgents.taskStarted(taskID: "task_invented0001", toolUseID: "toolu_invented0001",
                                                  agentType: "an-invented-agent", depth: 1),
-                   at: Self.epoch)
+                   at: InventedAgents.epoch)
         // Depth 2, and nothing anywhere names its parent: no metadata, no sidecar, and no frame
         // carrying the block that spawned it.
-        tree.apply(taskStarted: Self.taskStarted(taskID: "task_invented0002", toolUseID: "toolu_invented0002",
+        tree.apply(taskStarted: InventedAgents.taskStarted(taskID: "task_invented0002", toolUseID: "toolu_invented0002",
                                                  agentType: "an-invented-orphan", depth: 2),
-                   at: Self.epoch)
+                   at: InventedAgents.epoch)
 
         let read = AgentRunRead(timeline: ChannelTimeline(agents: tree))
 
@@ -97,9 +97,9 @@ final class AgentRunReadTests: XCTestCase {
     /// unattributed main thread passes the naive assertion and puts one subagent's work in another
     /// subagent's transcript.
     func testTheItemFilterExcludesTheMainThreadAndEverySibling() {
-        let mine = Self.call("toolu_invented0010", agent: "task_invented0001")
-        let siblings = Self.call("toolu_invented0011", agent: "task_invented0002")
-        let mainThread = Self.call("toolu_invented0012", agent: nil)
+        let mine = InventedAgents.call("toolu_invented0010", agent: "task_invented0001")
+        let siblings = InventedAgents.call("toolu_invented0011", agent: "task_invented0002")
+        let mainThread = InventedAgents.call("toolu_invented0012", agent: nil)
         let timeline = ChannelTimeline(durable: DurableProjection(items: [mainThread, mine, siblings]))
 
         let filtered = AgentRunRead.items(of: "task_invented0001", in: timeline)
@@ -118,16 +118,16 @@ final class AgentRunReadTests: XCTestCase {
     /// Every wire string a node draws passes `TextSanitiser` once, where the content is built
     /// (child spec D11, §12).
     func testEveryDrawnStringIsSanitised() throws {
-        var tree = Self.tree()
-        tree.apply(taskStarted: Self.taskStarted(taskID: "task_invented0004", toolUseID: "toolu_invented0004",
+        var tree = InventedAgents.tree()
+        tree.apply(taskStarted: InventedAgents.taskStarted(taskID: "task_invented0004", toolUseID: "toolu_invented0004",
                                                  agentType: "an\u{202E}invented\u{200B}agent",
                                                  description: "an\u{2028}invented\u{0007}errand",
                                                  depth: 1),
-                   at: Self.epoch)
-        tree.apply(taskProgress: Self.taskProgress(taskID: "task_invented0004",
+                   at: InventedAgents.epoch)
+        tree.apply(taskProgress: InventedAgents.taskProgress(taskID: "task_invented0004",
                                                    summary: "read\u{FEFF}ing an\u{202D}invented file",
                                                    lastToolName: "Re\u{200D}ad"),
-                   at: Self.epoch)
+                   at: InventedAgents.epoch)
 
         let read = AgentRunRead(timeline: ChannelTimeline(agents: tree))
         let content = try XCTUnwrap(read.content(of: "task_invented0004"), "the read holds no content for the run")
@@ -144,17 +144,17 @@ final class AgentRunReadTests: XCTestCase {
     /// The waiting badge's count is the channel's **pending** decisions whose `agent_id` is this
     /// node's, and a sibling's card is not on this node.
     func testTheWaitingCountComesFromTheDecisionsAgentID() throws {
-        var tree = Self.tree()
-        tree.apply(taskStarted: Self.taskStarted(taskID: "task_invented0005", toolUseID: "toolu_invented0005",
+        var tree = InventedAgents.tree()
+        tree.apply(taskStarted: InventedAgents.taskStarted(taskID: "task_invented0005", toolUseID: "toolu_invented0005",
                                                  agentType: "an-invented-agent", depth: 1),
-                   at: Self.epoch)
-        tree.apply(taskStarted: Self.taskStarted(taskID: "task_invented0006", toolUseID: "toolu_invented0006",
+                   at: InventedAgents.epoch)
+        tree.apply(taskStarted: InventedAgents.taskStarted(taskID: "task_invented0006", toolUseID: "toolu_invented0006",
                                                  agentType: "an-invented-sibling", depth: 1),
-                   at: Self.epoch)
+                   at: InventedAgents.epoch)
         var overlay = Overlay.empty
         overlay.decisions = [
-            RequestID(rawValue: "req_invented0001"): Self.decision("req_invented0001", agent: "task_invented0005"),
-            RequestID(rawValue: "req_invented0002"): Self.decision("req_invented0002", agent: "task_invented0006"),
+            RequestID(rawValue: "req_invented0001"): InventedAgents.decision("req_invented0001", agent: "task_invented0005"),
+            RequestID(rawValue: "req_invented0002"): InventedAgents.decision("req_invented0002", agent: "task_invented0006"),
         ]
 
         let read = AgentRunRead(timeline: ChannelTimeline(overlay: overlay, agents: tree))
@@ -164,10 +164,15 @@ final class AgentRunReadTests: XCTestCase {
         XCTAssertEqual(mine.waitingCount, 1, "the node reports \(mine.waitingCount) waiting decision(s), not 1")
         XCTAssertEqual(sibling.waitingCount, 1, "the sibling reports \(sibling.waitingCount) waiting decision(s), not 1")
     }
+}
 
-    // MARK: - Invented material
+/// The invented material every Agents suite in this directory is built from: a tree over an
+/// invented config home, frames decoded the way the wire decodes them, and items attributed to an
+/// agent stream. A word and a repeated nibble throughout, so nothing here can be mistaken for an
+/// engine byte or for anybody's own session (§11). Nothing is opened and nothing is written (X9).
+enum InventedAgents {
 
-    private static let epoch = Date(timeIntervalSince1970: 1_800_000_000)
+    static let epoch = Date(timeIntervalSince1970: 1_800_000_000)
 
     private static let session = SessionID("eeeeeeee-5555-4555-8555-eeeeeeeeeeee")!
 
@@ -177,6 +182,21 @@ final class AgentRunReadTests: XCTestCase {
         AgentRunTree(configHome: URL(fileURLWithPath: "/invented/config-home"),
                      sessionID: session, slug: "an-invented-slug")
     }
+
+    /// One tree holding `count` top-level runs, started in order, with invented ids.
+    static func treeOfRoots(_ count: Int) -> AgentRunTree {
+        var tree = tree()
+        for index in 0..<count {
+            tree.apply(taskStarted: taskStarted(taskID: "task_invented000\(index)",
+                                                toolUseID: "toolu_invented000\(index)",
+                                                agentType: "an-invented-agent", depth: 1),
+                       at: epoch)
+        }
+        return tree
+    }
+
+    /// The id `treeOfRoots(_:)` gives its nth run.
+    static func run(_ index: Int) -> AgentRunID { "task_invented000\(index)" }
 
     /// `nested-depth-2` folded through C3's own wire reducer — the same reducer a live channel runs,
     /// and the only source of the tree on this baseline.

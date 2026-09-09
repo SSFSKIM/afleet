@@ -447,6 +447,13 @@ final class AppModel: FilesTabHost {
             } catch {
                 assertionFailure("the Agents tab is registered on a host where nothing holds .agents")
             }
+            // Contract Y4, installed: the `Agent` chip's seam, which has been `NoAgentNavigation`
+            // since C6.1 landed it. It focuses the run's channel, selects this tab and writes the
+            // run into the app-scoped store the session reads when the host builds it — the shell
+            // and the host through closures, never references.
+            agentNavigation = AgentNavigator(selection: agentSelection,
+                                             focusChannel: { [shell] key in shell.select(key.session) },
+                                             selectTab: { [panels] in panels.select(.agents) })
         }
         await startActivity(over: reached)
         // **Last.** Publishing the route is what puts the actionable surfaces on screen — the

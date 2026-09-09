@@ -1,0 +1,122 @@
+import Foundation
+import XCTest
+import AfleetCore
+import ClaudeWire
+import FleetKit
+import PanelHostAPI
+@testable import Afleet
+
+/// C6.4 Task 2, contract Y4: what an `Agent` chip's click does once `NoAgentNavigation` is replaced.
+///
+/// C6.1's own gate proved the chip *calls* the seam against a counting double. This is the other
+/// end: the run lands on the session the host retains, in the channel the run belongs to.
+///
+/// Every identifier is invented (§11); nothing here writes anything (X9).
+@MainActor
+final class AgentNavigatorTests: XCTestCase {
+
+    /// The three things `show(run:in:)` does, and the one a chip clicked before the tab was ever
+    /// opened depends on: the run is written into the app-scoped store, and the session the host
+    /// builds *afterwards* reads it.
+    ///
+    /// The discriminating half is the last clause. A navigation that kept the run to itself — or
+    /// wrote it onto a session it built for the occasion — passes every assertion about the tab's
+    /// selection and lands the user on an Agents pane with nothing open.
+    func testNavigationSelectsTheTabAndTheRun() throws {
+        let rig = try NavigationRig(tree: InventedAgents.treeOfRoots(2))
+        let run = InventedAgents.run(1)
+
+        rig.navigator.show(run: run, in: rig.key)
+
+        XCTAssertEqual(rig.host.selected, .agents, "the navigation did not bring the Agents tab forward")
+        XCTAssertTrue(rig.store.selection(in: rig.key) == run, "the store does not hold the run the chip named")
+
+        // The session is built only now, which is the case the store exists for.
+        let model = try rig.session()
+        XCTAssertTrue(model.selectedRun == run, "the session the host built afterwards did not read the selection")
+        XCTAssertEqual(model.selection, .run(run), "the pane reports a selection state other than the open run")
+    }
+
+    /// A run in a channel that is **not** the one on screen focuses that channel **before** the tab.
+    ///
+    /// Failing-first against a navigator that selected only the tab: that one leaves the user
+    /// looking at another channel's Agents pane, with the run they clicked nowhere on it. The order
+    /// is asserted as well as the outcome, because selecting the tab first and the channel second
+    /// draws one frame of the wrong pane.
+    func testNavigationFocusesTheChannelFirst() throws {
+        let rig = try NavigationRig(tree: InventedAgents.treeOfRoots(1))
+        XCTAssertTrue(rig.shell.focus.isActivity, "the window must start off the run's channel for this to discriminate")
+
+        rig.navigator.show(run: InventedAgents.run(0), in: rig.key)
+
+        XCTAssertEqual(rig.order, ["channel", "tab"],
+                       "the navigation performed \(rig.order.count) step(s) in the wrong order")
+        XCTAssertTrue(rig.shell.focus.session == rig.key.session,
+                      "the window is not on the channel the run belongs to")
+        XCTAssertEqual(rig.host.selected, .agents, "the navigation did not bring the Agents tab forward")
+    }
+
+    /// A run id this channel's tree does not hold selects **nothing**, and the pane says so
+    /// (child spec D5).
+    ///
+    /// Discriminating: the alternative is a fabricated selection, which is exactly what a channel
+    /// with no wire would otherwise produce — a chip on an archived channel resolves nil today, and
+    /// a pane that invented a node for it would be worse than one that stated the fact.
+    func testAnUnknownRunSelectsNothingAndSaysSo() throws {
+        let rig = try NavigationRig(tree: InventedAgents.treeOfRoots(1))
+
+        rig.navigator.show(run: "task_invented9999", in: rig.key)
+
+        let model = try rig.session()
+        XCTAssertEqual(model.selection, .unknownRun,
+                       "a run the tree does not hold did not read as an unknown run")
+        XCTAssertNil(model.selectedRun, "a run the tree does not hold was selected anyway")
+        XCTAssertEqual(rig.host.selected, .agents,
+                       "the tab was not brought forward, so the user is not where the message is")
+    }
+
+    // MARK: - The rig
+
+    /// The shell, the host, the store and the navigator, wired the way `performLaunch` wires them —
+    /// the shell and the host reached through closures, never references — plus an order log, which
+    /// is what makes "before" assertable at all.
+    @MainActor
+    private struct NavigationRig {
+
+        let key = PanelFixtures.key(3)
+        let host = PanelHostModel()
+        let shell: ShellModel
+        let store = AgentSelectionStore()
+        let navigator: AgentNavigator
+        private let log = OrderLog()
+
+        var order: [String] { log.steps }
+
+        init(tree: AgentRunTree) throws {
+            let host = self.host
+            let shell = ShellModel(panels: host)
+            self.shell = shell
+            let store = self.store
+            let log = self.log
+            let timeline = ChannelTimeline(agents: tree)
+            try host.register(AgentsTab(timelines: { _ in timeline }, selection: store))
+            navigator = AgentNavigator(selection: store,
+                                       focusChannel: { key in log.note("channel"); shell.select(key.session) },
+                                       selectTab: { log.note("tab"); host.select(.agents) })
+        }
+
+        /// The session the host builds for this channel — built on demand, which is the point.
+        func session() throws -> AgentsModel {
+            let session = host.session(for: .agents, context: PanelFixtures.context(key))
+            return try XCTUnwrap(session as? AgentsModel, "the tab made something other than its own session")
+        }
+    }
+
+    /// What the navigation did, in order. Steps are the two words this file wrote — never a key,
+    /// a session id or a run id (§11).
+    @MainActor
+    private final class OrderLog {
+        private(set) var steps: [String] = []
+        func note(_ step: String) { steps.append(step) }
+    }
+}
