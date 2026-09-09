@@ -44,16 +44,8 @@ public final class GitHubTab: PanelTab {
 
     /// The same view, before it is erased — the seam C7.6's `BrowserTab` established, so that a
     /// test can ask what was made rather than hold an `AnyView`.
-    func panelView(session: any PanelTabSession, surface: PanelSurface) -> GitHubPanelPlaceholder? {
+    func panelView(session: any PanelTabSession, surface: PanelSurface) -> GitHubPanelView? {
         guard let session = session as? GitHubModel else { return nil }
-        return GitHubPanelPlaceholder(session: session)
+        return GitHubPanelView(session: session)
     }
-}
-
-/// **The seam T7 fills.** T7 owns `GitHubPanelView`; until it lands this is what the tab
-/// describes, so the surface parameter is wired and asserted now and the view is invented once, by
-/// the task that owns it. Nothing here draws.
-struct GitHubPanelPlaceholder: View {
-    let session: GitHubModel
-    var body: some View { EmptyView() }
 }

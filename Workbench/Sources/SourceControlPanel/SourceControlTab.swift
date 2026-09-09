@@ -106,10 +106,10 @@ public final class SourceControlTab: PanelTab {
     /// not a thing a test can ask what it was made of — which is the seam C7.6's `BrowserTab`
     /// established and the mistake it exists to prevent.
     func panelView(session: any PanelTabSession, surface: PanelSurface)
-        -> SourceControlPanelPlaceholder? {
+        -> SourceControlPanelView? {
         guard let session = session as? SourceControlModel else { return nil }
         presented.bind(session)
-        return SourceControlPanelPlaceholder(session: session)
+        return SourceControlPanelView(session: session)
     }
 
     // MARK: - the `.commit` target (Design §7)
@@ -198,14 +198,6 @@ public final class SourceControlTab: PanelTab {
 
     /// Makes `session`'s channel the one an unhosted delivery selects in.
     func present(_ session: SourceControlModel) { presented.bind(session) }
-}
-
-/// **The seam T7 fills.** T7 owns `SourceControlPanelView`; until it lands this is what the tab
-/// describes, so that `makeView` and its surface parameter are wired and asserted now and the view
-/// is invented once, by the task that owns it. Nothing here draws.
-struct SourceControlPanelPlaceholder: View {
-    let session: SourceControlModel
-    var body: some View { EmptyView() }
 }
 
 /// A weak, `Sendable` hold on the app, so a target's handler can ask it something without the tab
