@@ -537,8 +537,24 @@ public actor StreamIngestion {
     /// event belongs to the channel's `WireReducer`, which holds its own subscription of C4's per-subscriber fan-out,
     /// so ignoring it here loses nothing.
     func receive(_ event: WireEvent) async {
+        /// The live half's changes from the **replacement**, if this event is the first of a new process.
+        var replaced: [TimelineChange] = []
         if let epoch = Self.epoch(of: event) {
-            if epoch > currentEpoch { currentEpoch = epoch }
+            if epoch > currentEpoch {
+                // **A higher epoch is a new process, and this is the only place the actor sees one.**
+                // The supervisor takes `ProcessEpoch.first` for a channel's first spawn and `.next()`
+                // for every later one, and `.first` is this actor's own starting value — so the first
+                // process never trips this and every respawn does. The live half belongs to the
+                // process that produced it: its decisions, its banners, its outstanding prompts and
+                // its streaming tail are all about a process that is gone, and the replacement is
+                // folded **before** the event that announced it so the new process's own first frame
+                // is not swept away with them.
+                let before = Set(overlay.items.map(\.id))
+                if let changes = wire?.apply(.processReplaced(epoch), at: Date()) {
+                    replaced = liveChanges(changes, before: before)
+                }
+                currentEpoch = epoch
+            }
             if case .fileOnly(let since) = stateValue, epoch > since {
                 stateValue = .both
                 pendingStateChange = .both
@@ -548,7 +564,7 @@ public actor StreamIngestion {
         // same stream as the record half's changes — riding the effect this actor already publishes for the events it
         // handles itself, and on an effect of its own for the events it does not. Nothing is published when nothing
         // moved, which is the rule the record half already follows.
-        let live = foldLive(event)
+        let live = replaced + foldLive(event)
         switch event {
         case .frame(.transcriptMirror(let frame), let epoch):
             if buffer != nil { buffer?.append((frame, epoch, Date())) }

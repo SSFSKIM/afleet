@@ -144,6 +144,31 @@ public struct AgentRunTree: Hashable, Sendable {
         if nodes[f.taskID]!.endedAt == nil { nodes[f.taskID]!.endedAt = now }
     }
 
+    /// **The process behind these runs is gone.** Every run still reading `.running` ended with it, at `now`.
+    ///
+    /// `task_notification` is the only frame that ever says a run ended (parent §7.3) and a process that exits sends
+    /// none, so without this a node keeps `.running` and its elapsed timer for ever — the Agents tab advertising a
+    /// dead run as running, and offering *Stop* and *Move to background* on a process that is not there.
+    ///
+    /// `.stopped` and not `.failed` or `.completed`: §8.8's precedent for a run the wire cannot speak for is the
+    /// `taskRun` row's own reading — completed when the spawning call's result is on disk, and otherwise the reading
+    /// that says the run did not finish. A run that never notified did not complete, and the engine reported no
+    /// failure; it stopped when its process did, which is the state `killed`/`stopped` names. A node the file half
+    /// speaks for is corrected by `reconcile(fileReadings:)` afterwards, exactly as it is for a node no
+    /// `task_started` ever named.
+    ///
+    /// Returns whether anything moved, so a caller publishes only a real change.
+    @discardableResult
+    public mutating func processExited(at now: Date) -> Bool {
+        var moved = false
+        for id in order where nodes[id]?.status == .running {
+            nodes[id]!.status = .stopped
+            if nodes[id]!.endedAt == nil { nodes[id]!.endedAt = now }
+            moved = true
+        }
+        return moved
+    }
+
     /// A heartbeat from inside a run: it moves the `lastToolName` and `activityLine` of the node whose `toolUseID` is
     /// the frame's `parent_tool_use_id`, and nothing else. A frame with no parent belongs to the main stream.
     public mutating func apply(toolProgress f: ToolProgressFrame, at now: Date) {
