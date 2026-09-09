@@ -657,6 +657,81 @@ final class BrowserModelTests: XCTestCase {
         XCTAssertEqual(model.selected?.url, second, "the panel is not on the last tab the user asked for")
     }
 
+    /// The other door onto the same boundary: a caller that waits for the restoration itself.
+    ///
+    /// `performRestore` marks itself restored before the operations queued behind it resume, so
+    /// anything that waits on the read and then mutates — a routed link, a control the user reaches
+    /// the moment the panel draws — is let straight through in front of a queue that has not run
+    /// yet. The queue is what the order lives in, so a mutation made later joins it rather than
+    /// stepping around it.
+    func testAMutationMadeWhenTheReadLandsRunsBehindOneQueuedBeforeIt() async throws {
+        let backing = InMemoryScopedStore()
+        let saved = URL(string: "https://saved.example.invalid/")!
+        try await backing.write(BrowserTabSetDocument(tabs: [PersistedTab(url: saved, title: "Saved")],
+                                                      selectedIndex: 0),
+                                key: BrowserTabStore.storeKey)
+        await backing.holdReads()
+        let (model, _, _) = await makeModel(store: backing, restored: false)
+
+        let restoring = Task { await model.restore() }
+        let reading = expectation(description: "the restore reached the store")
+        await backing.expectReadArrival(reading)
+        await fulfillment(of: [reading], timeout: Self.webDeadline)
+
+        let first = URL(string: "https://queued-first.example.invalid/")!
+        model.openNewTab(url: first)
+        let second = URL(string: "https://after-the-read.example.invalid/")!
+        let later = Task { @MainActor in
+            await model.restore()
+            model.openNewTab(url: second)
+        }
+        for _ in 0..<Self.yields { await Task.yield() }
+
+        await backing.releaseReads()
+        await restoring.value
+        await later.value
+        await model.flush()
+
+        XCTAssertEqual(model.tabs.map(\.url), [saved, first, second],
+                       "a mutation made when the read landed ran in front of one queued before it")
+    }
+
+    /// And the reverse order: a link that arrived first is not overtaken by a control used after it.
+    ///
+    /// A routed open that waited on the restoration *on its own account* took its place in the
+    /// queue when the read landed rather than when the link arrived, so every mutation made in
+    /// between was ahead of it. It joins the queue where it was made, like everything else.
+    func testARoutedLinkKeepsItsPlaceInFrontOfAControlUsedAfterIt() async throws {
+        let backing = InMemoryScopedStore()
+        let saved = URL(string: "https://saved.example.invalid/")!
+        try await backing.write(BrowserTabSetDocument(tabs: [PersistedTab(url: saved, title: "Saved")],
+                                                      selectedIndex: 0),
+                                key: BrowserTabStore.storeKey)
+        await backing.holdReads()
+        let (model, _, _) = await makeModel(store: backing, restored: false)
+
+        let restoring = Task { await model.restore() }
+        let reading = expectation(description: "the restore reached the store")
+        await backing.expectReadArrival(reading)
+        await fulfillment(of: [reading], timeout: Self.webDeadline)
+
+        let link = URL(string: "https://routed-first.example.invalid/")!
+        let routed = Task { await model.openRouted(link, in: .newTab) }
+        // The task's body does not begin until this one suspends, so the link has genuinely arrived
+        // first only after these yields — and it can get no further than the queue.
+        for _ in 0..<Self.yields { await Task.yield() }
+        let clicked = URL(string: "https://clicked-second.example.invalid/")!
+        model.openNewTab(url: clicked)
+
+        await backing.releaseReads()
+        await restoring.value
+        await routed.value
+        await model.flush()
+
+        XCTAssertEqual(model.tabs.map(\.url), [saved, link, clicked],
+                       "a control used after a link reached the tab set in front of it")
+    }
+
     /// A bounded number of cooperative yields: enough for a call that does not wait to run to its
     /// return, and never enough for one that is waiting on a gate the test has not opened.
     private static let yields = 50
