@@ -69,13 +69,24 @@ final class TaskCardModel {
     /// kind that can be moved, so it never offers the action — which is the clause a card that
     /// offered the action on everything would get wrong without any other symptom.
     var offersMoveToBackground: Bool {
-        guard !backgroundingUnavailable, !inFlight, let entry else { return false }
-        guard entry.status == .running, entry.placement == .foreground, entry.toolUseID != nil else { return false }
-        return Self.isBackgroundable(entry.kind)
+        guard !backgroundingUnavailable, !inFlight else { return false }
+        return Self.isEligible(entry)
+    }
+
+    /// The registry half of the clause above, without the card's own in-flight and refusal state — what
+    /// the *mirror* says about a run, which is the half a host outside this model can also read.
+    ///
+    /// Separate so the row that keys its card can ask the same question the card answers: eligibility
+    /// appearing or disappearing is a different card, and a row that could not see it went on drawing
+    /// the one it built before the run's `task_started` reached the fold.
+    nonisolated static func isEligible(_ entry: RegistryEntry?) -> Bool {
+        guard let entry, entry.status == .running, entry.placement == .foreground,
+              entry.toolUseID != nil else { return false }
+        return isBackgroundable(entry.kind)
     }
 
     /// The task kinds the engine can move to the background: a local shell, and an agent run.
-    static func isBackgroundable(_ kind: TaskKind) -> Bool {
+    nonisolated static func isBackgroundable(_ kind: TaskKind) -> Bool {
         switch kind {
         case .localBash, .localAgent, .remoteAgent, .inProcessTeammate: true
         default: false
@@ -139,6 +150,37 @@ final class TaskCardModel {
         if case WireError.controlError(let reason) = error { return RowBanner(text: reason) }
         if let lifecycle = error as? LifecycleError { return RowBanner(lifecycle) }
         return RowBanner(text: "The request failed: \(type(of: error)).")
+    }
+}
+
+/// **What a task card can read out of a registry mirror**, and nothing else: for each task the mirror
+/// holds, whether §8.4's *Move to background* is available for it and the three fields the card draws.
+///
+/// The mirror itself moves on every task frame — `lastFrameAt` is stamped by a `task_progress`
+/// heartbeat as surely as by a `task_started` — and none of that reaches a card. Keying a cache or a
+/// reload comparison on the whole mirror therefore charges a chatty agent an O(items) rebuild per
+/// frame for nothing, while keying on nothing at all leaves a card that never learns its run became
+/// backgroundable. This is the middle: a run appearing, finishing, being moved to the background or
+/// losing its `tool_use_id` changes it, and a heartbeat does not.
+struct TaskCardEligibility: Hashable {
+
+    private let rows: [String: Row]
+
+    /// `eligible` is the clause §8.4 gates the action on; the other three are what the card draws out
+    /// of the entry — its status (`entry?.status ?? item.status`) and the two instants elapsed is
+    /// measured between.
+    private struct Row: Hashable {
+        let eligible: Bool
+        let status: TaskStatus
+        let startedAt: Date
+        let endedAt: Date?
+    }
+
+    init(_ mirror: RegistryMirror = RegistryMirror()) {
+        rows = mirror.entries.mapValues {
+            Row(eligible: TaskCardModel.isEligible($0), status: $0.status,
+                startedAt: $0.startedAt, endedAt: $0.endedAt)
+        }
     }
 }
 

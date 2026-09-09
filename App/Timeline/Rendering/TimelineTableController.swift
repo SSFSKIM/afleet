@@ -635,7 +635,14 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
         if previous.composer !== next.composer { return true }
         if previous.neighbourhood.toolCalls != next.neighbourhood.toolCalls
             || previous.neighbourhood.precedingTimestamps != next.neighbourhood.precedingTimestamps
+            || previous.neighbourhood.taskRuns != next.neighbourhood.taskRuns
             || previous.neighbourhood.agents != next.neighbourhood.agents { return true }
+        // The registry's *eligibility* and never the mirror: a mounted `taskRun` row keys its card on
+        // whether the mirror makes the run backgroundable, and a card built before the run's
+        // `task_started` reached the fold can only learn otherwise if the context it re-keys against
+        // reaches it. Comparing the whole mirror would put every heartbeat through this instead
+        // (tracker 406).
+        if previous.neighbourhood.eligibility != next.neighbourhood.eligibility { return true }
         return previous.collapse !== next.collapse
             || previous.editing !== next.editing
             || previous.retraction !== next.retraction

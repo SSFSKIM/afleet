@@ -163,4 +163,78 @@ final class TaskCardBackgroundingTests: XCTestCase {
         XCTAssertEqual(cache.builds, 2, "a changed registry did not invalidate the cached neighbourhood")
         XCTAssertEqual(after.registry.entries.count, 2)
     }
+
+    // MARK: - What the mirror costs, and what it re-keys
+
+    /// **A heartbeat is not a new neighbourhood, and a run appearing is.**
+    ///
+    /// `RegistryMirror` stamps `lastFrameAt` on every task frame, so keying the cache on the whole
+    /// mirror charged a chatty agent one O(items) rebuild per frame — the growth §8.3 forbids, arriving
+    /// through a value a card reads four fields out of. The pair is the discrimination: a cache keyed
+    /// on nothing would pass the first clause and fail the second.
+    func testAHeartbeatReusesTheNeighbourhoodAndAMembershipChangeRebuildsIt() {
+        var mirror = Self.mirrorWithRunningAgent()
+        let cache = TimelineNeighbourhoodCache()
+        _ = cache.neighbourhood(for: ChannelTimeline(registry: mirror))
+        XCTAssertEqual(cache.builds, 1)
+
+        // The same run, still running, one heartbeat later: only `lastFrameAt` moves.
+        var beating = mirror
+        beating.apply(.taskProgress(InventedItems.taskProgress(taskID: Self.runID)),
+                      at: InventedItems.epoch.addingTimeInterval(1), epoch: .first)
+        XCTAssertNotEqual(beating, mirror, "the heartbeat moved nothing, so reusing the neighbourhood proves nothing")
+        let reused = cache.neighbourhood(for: ChannelTimeline(registry: beating))
+        XCTAssertEqual(cache.builds, 1, "a heartbeat rebuilt the whole neighbourhood")
+        XCTAssertTrue(reused.registry.entries[Self.runID].map(TaskCardModel.isEligible) ?? false,
+                      "the reused neighbourhood no longer offers the action it was built offering")
+
+        // A second run: the set of tasks the card can be built over has changed.
+        mirror = beating
+        mirror.apply(.taskStarted(InventedItems.taskStarted(taskID: "task_invented_agent_02",
+                                                            toolUseID: "toolu_invented0002",
+                                                            agentType: "InventedAgentType")),
+                     at: InventedItems.epoch, epoch: .first)
+        let rebuilt = cache.neighbourhood(for: ChannelTimeline(registry: mirror))
+        XCTAssertEqual(cache.builds, 2, "a run the mirror had never held did not rebuild the neighbourhood")
+        XCTAssertEqual(rebuilt.registry.entries.count, 2)
+    }
+
+    /// **A row mounted before its run reached the fold gains the action when a publish adds it.**
+    ///
+    /// The card is `@State` behind `TaskCardSeam.identity(of:in:)`, and that identity read the task, the
+    /// status and the channel's capability — never the mirror. So a `taskRun` row drawn while the
+    /// registry did not yet hold the run kept the card it built then, and *Move to background* was
+    /// missing for the whole of that run's foreground life whatever the publish said (tracker 406).
+    ///
+    /// Both halves are asserted, because either alone leaves the gap open: the identity has to change,
+    /// **and** the table has to consider the context changed, or the mounted row never re-keys at all.
+    @MainActor
+    func testARowMountedBeforeItsTaskStartedGainsTheAction() throws {
+        let item = Self.run(Self.runID)
+        var before = InventedItems.context(neighbourhood: Self.neighbourhood(carrying: RegistryMirror()),
+                                           lifecycle: LifecycleDouble())
+        // The same context, one publish later: only the mirror has moved.
+        var after = before
+        after.neighbourhood = Self.neighbourhood(carrying: Self.mirrorWithRunningAgent())
+
+        XCTAssertNotEqual(TaskCardSeam.identity(of: item, in: before),
+                          TaskCardSeam.identity(of: item, in: after),
+                          "the row would hold the card it built before the run was in the registry")
+        XCTAssertTrue(TimelineTableController.differs(before, after),
+                      "the mounted row is never handed the context that would re-key it")
+
+        // And the card that identity now names really does offer the action, so the re-key is worth it.
+        XCTAssertFalse(try XCTUnwrap(before.makeTaskCard(item)).offersMoveToBackground)
+        XCTAssertTrue(try XCTUnwrap(after.makeTaskCard(item)).offersMoveToBackground)
+
+        // A heartbeat is not a new card: the identity and the comparison both hold still for it.
+        var beating = Self.mirrorWithRunningAgent()
+        beating.apply(.taskProgress(InventedItems.taskProgress(taskID: Self.runID)),
+                      at: InventedItems.epoch.addingTimeInterval(1), epoch: .first)
+        var later = before
+        later.neighbourhood = Self.neighbourhood(carrying: beating)
+        XCTAssertEqual(TaskCardSeam.identity(of: item, in: after), TaskCardSeam.identity(of: item, in: later))
+        XCTAssertFalse(TimelineTableController.differs(after, later),
+                       "a heartbeat forced every mounted row's roots to be refreshed")
+    }
 }

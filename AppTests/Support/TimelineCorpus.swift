@@ -188,6 +188,22 @@ enum InventedItems {
         return frame
     }
 
+    /// A `task_progress` heartbeat for a run already started: the frame that arrives repeatedly while a
+    /// run is live and moves nothing a card reads.
+    static func taskProgress(taskID: String) -> TaskProgress {
+        let object: [String: JSONValue] = ["type": .string("system"), "subtype": .string("task_progress"),
+                                           "task_id": .string(taskID),
+                                           "description": .string("an invented errand"),
+                                           "usage": .object([:]),
+                                           "uuid": .string("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+                                           "session_id": .string(stream.sessionID.description)]
+        guard let data = try? JSONValue.object(object).canonicalData(),
+              let frame = try? JSONDecoder().decode(TaskProgress.self, from: data) else {
+            preconditionFailure("an invented task_progress did not decode as one")
+        }
+        return frame
+    }
+
 
     /// A render context whose capabilities are the doubles a test hands it.
     ///

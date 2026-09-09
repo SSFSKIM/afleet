@@ -267,10 +267,16 @@ struct TimelineNeighbourhood {
     /// with no fold, which offers the action on nothing.
     var registry = RegistryMirror()
 
+    /// The part of that mirror anything downstream is allowed to compare — what a card can read of it.
+    /// The cache below and the table's reload comparison are both keyed by this and never by the
+    /// mirror, so a run's heartbeat costs nothing and a run's *eligibility* still re-keys the card.
+    private(set) var eligibility = TaskCardEligibility()
+
     /// The neighbourhood of one channel's items.
     init(items: [TimelineItem] = [], agents: AgentRunTree? = nil, registry: RegistryMirror = RegistryMirror()) {
         self.agents = agents
         self.registry = registry
+        self.eligibility = TaskCardEligibility(registry)
         var previous: Date?
         for item in items {
             if case .toolCall(let call) = item { toolCalls[call.toolUseID] = call }
@@ -296,10 +302,17 @@ struct TimelineNeighbourhood {
 /// was paid per delta grew with the history the reader had accumulated, which is the growth §8.3
 /// forbids. Held for the channel's lifetime and asked per publish.
 ///
-/// The key is the published timeline with its preview taken off: any change that can move an item,
-/// an overlay or the agent tree changes it, and the preview alone does not. Comparing it is cheap
-/// where it matters — the collections behind an unchanged half are the same storage, which their
-/// equality answers on identity without walking them.
+/// The key is the published timeline with its preview and its registry mirror taken off, and the
+/// mirror's *eligibility* beside it: any change that can move an item, an overlay or the agent tree
+/// changes the first, and the preview alone does not. Comparing it is cheap where it matters — the
+/// collections behind an unchanged half are the same storage, which their equality answers on
+/// identity without walking them.
+///
+/// **The mirror is out of the key on purpose.** `RegistryMirror` stamps `lastFrameAt` on every task
+/// frame, so a chatty agent moved the key thirty times a second and paid an O(items) rebuild for each
+/// — the growth §8.3 forbids, reintroduced by a field a card reads four values out of. What the card
+/// can read is `TaskCardEligibility`, and that is what is compared. The reused neighbourhood keeps the
+/// mirror it was built with, which differs from the current one only in what nothing reads.
 @MainActor
 final class TimelineNeighbourhoodCache {
 
@@ -313,7 +326,9 @@ final class TimelineNeighbourhoodCache {
     func neighbourhood(for timeline: ChannelTimeline) -> TimelineNeighbourhood {
         var key = timeline
         key.preview = nil
-        if let held = self.key, held == key { return cached }
+        key.registry = RegistryMirror()
+        let eligibility = TaskCardEligibility(timeline.registry)
+        if let held = self.key, held == key, eligibility == cached.eligibility { return cached }
         cached = TimelineNeighbourhood(items: timeline.items, agents: timeline.agents, registry: timeline.registry)
         self.key = key
         builds += 1

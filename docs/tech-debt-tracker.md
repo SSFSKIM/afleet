@@ -3344,6 +3344,16 @@ them), four new below. Numbers 384–393 are C7.4's; C6.1 continues from 394.
      gap is a `background_tasks_changed` that unlists a row while nothing else about it moves. Closer:
      add `registry` to the comparison, or key the card on the mirror's row rather than on the item.
      Owner: C6.1. Filed 2026-09-09.
+     **Closed 2026-09-09 by the same corrective's fix wave, and it was wider than filed.** The reload
+     comparison was the second half; the first was `TaskCardSeam.identity(of:in:)`, which read the
+     task, the status and the channel's capability and never the mirror — so a row mounted before its
+     run's `task_started` reached the fold kept the card it built then, and *Move to background* was
+     absent for the whole of that run's foreground life whatever any comparison said. Both now fold in
+     the mirror's **eligibility** for the task (`TaskCardEligibility`, `TaskCardModel.isEligible`) and
+     not the mirror itself, which also takes the neighbourhood cache off the mirror: `lastFrameAt` is
+     stamped by every task frame, so keying on the whole value charged a chatty agent one O(items)
+     rebuild per heartbeat — the growth §8.3 forbids, arriving through a field a card reads four values
+     out of.
 
 407. **A tree node built from a `.meta.json` sidecar reads `.running` on a channel that ended long
      ago.** Nothing on disk records an agent run's terminal status: the sidecar carries `agentType`,

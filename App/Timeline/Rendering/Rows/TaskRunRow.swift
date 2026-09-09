@@ -96,10 +96,20 @@ struct TaskCardSeam: View {
     /// *Stop* after the channel was released, because `TaskCardView` holds its model in `@State`
     /// under this very identity.
     ///
+    /// Keyed by the mirror's **eligibility** for this task fourth, for `offersTaskCard`'s reason at one
+    /// remove: §8.4 offers *Move to background* only for a run C3's registry knows, and a row mounted
+    /// before that run's `task_started` reached the fold was built over a mirror that did not hold it.
+    /// Without this clause that card never gained the action for the whole of the run's foreground
+    /// life, however the publish reached the row — the identity is what decides that the card is the
+    /// same card (tracker 406).
+    ///
     /// Not keyed by the whole item: `task_progress` arrives repeatedly while a run is live, and
     /// rebuilding on each one would drop a refusal banner and an in-flight request the reader is
-    /// watching.
+    /// watching. Not keyed by the whole mirror either, and for the same reason: a heartbeat moves it.
     static func identity(of item: TaskRunItem, in context: TimelineRenderContext?) -> String {
-        "\(item.taskID)#\(item.status.rawValue)#\(context?.offersTaskCard == true ? "actionable" : "read-only")"
+        let eligible = TaskCardModel.isEligible(context?.neighbourhood.registry.entries[item.taskID])
+        return "\(item.taskID)#\(item.status.rawValue)"
+            + "#\(context?.offersTaskCard == true ? "actionable" : "read-only")"
+            + "#\(eligible ? "backgroundable" : "not-backgroundable")"
     }
 }
