@@ -253,6 +253,40 @@ struct TimelineNeighbourhood {
     }
 }
 
+/// The channel's neighbourhood, rebuilt only when the items behind it moved.
+///
+/// **Why a cache and not a construction.** Building one traverses every item in the channel and
+/// fills two dictionaries from them, and `ChannelTimeline.items` merges and sorts the durable and
+/// overlay halves to hand it that traversal. The list's body evaluates on every streaming publish —
+/// thirty a second while a message streams — and a preview delta changes no item at all, so what
+/// was paid per delta grew with the history the reader had accumulated, which is the growth §8.3
+/// forbids. Held for the channel's lifetime and asked per publish.
+///
+/// The key is the published timeline with its preview taken off: any change that can move an item,
+/// an overlay or the agent tree changes it, and the preview alone does not. Comparing it is cheap
+/// where it matters — the collections behind an unchanged half are the same storage, which their
+/// equality answers on identity without walking them.
+@MainActor
+final class TimelineNeighbourhoodCache {
+
+    /// How many neighbourhoods this cache has had to build. Counted for the reason the table's
+    /// reloads are: a cost nothing can read is a cost nothing can hold.
+    private(set) var builds = 0
+
+    private var key: ChannelTimeline?
+    private var cached = TimelineNeighbourhood()
+
+    func neighbourhood(for timeline: ChannelTimeline) -> TimelineNeighbourhood {
+        var key = timeline
+        key.preview = nil
+        if let held = self.key, held == key { return cached }
+        cached = TimelineNeighbourhood(items: timeline.items, agents: timeline.agents)
+        self.key = key
+        builds += 1
+        return cached
+    }
+}
+
 // MARK: - The environment value
 
 private struct TimelineRenderContextKey: EnvironmentKey {

@@ -388,6 +388,143 @@ final class TimelineListTests: XCTestCase {
                        "the table was told of \(controller.hostedHeightNotes) height change(s) by its hosted rows")
     }
 
+    // MARK: - The neighbourhood across a preview delta (review scalpel-2#3)
+
+    /// A publish that moved only the preview reuses the neighbourhood the items already had.
+    ///
+    /// Building one walks every item in the channel and fills two dictionaries from them, and the
+    /// merge that hands it those items sorts both halves of the timeline — while the list's body
+    /// evaluates on every streaming delta, thirty a second, and a delta changes no item at all. So
+    /// what a delta cost grew with the history behind it. The floor is the second half: items that
+    /// really did move rebuild it, or this would be a cache that never notices anything.
+    func testAPreviewOnlyPublishReusesTheNeighbourhood() {
+        let cache = TimelineNeighbourhoodCache()
+        var timeline = ChannelTimeline(durable: DurableProjection(items: Self.items(50)))
+        let first = cache.neighbourhood(for: timeline)
+        XCTAssertEqual(first.precedingTimestamps.count, 49,
+                       "the neighbourhood of 50 item(s) knows \(first.precedingTimestamps.count) preceding instant(s), not 49")
+
+        timeline.preview = Self.preview("a first sentence.")
+        _ = cache.neighbourhood(for: timeline)
+        timeline.preview = Self.preview("a first sentence. And a second one, arriving a character at a time.")
+        let third = cache.neighbourhood(for: timeline)
+
+        XCTAssertEqual(cache.builds, 1,
+                       "two preview delta(s) rebuilt the neighbourhood \(cache.builds) time(s), not once for the items")
+        XCTAssertEqual(third.precedingTimestamps.count, 49,
+                       "the reused neighbourhood knows \(third.precedingTimestamps.count) preceding instant(s), not the 49 it was built with")
+
+        timeline.durable.items = Self.items(51)
+        let fourth = cache.neighbourhood(for: timeline)
+        XCTAssertEqual(cache.builds, 2,
+                       "an item that arrived left the neighbourhood at \(cache.builds) build(s), so the items never reach it")
+        XCTAssertEqual(fourth.precedingTimestamps.count, 50,
+                       "the rebuilt neighbourhood knows \(fourth.precedingTimestamps.count) preceding instant(s), not 50")
+    }
+
+    /// The list reads the channel's neighbourhood rather than building its own.
+    ///
+    /// The cache above is only worth having if the construction site uses it, and the site is one
+    /// argument inside a context the column builds per body evaluation.
+    func testTheContextReadsTheChannelsNeighbourhood() async throws {
+        let app = AppModel(registry: RowRegistry())
+        let model = ChannelTimelineModel(key: ChannelKey(configHome: Self.stream.configHome,
+                                                         session: Self.stream.sessionID),
+                                         workspace: nil)
+        let view = TimelineListView(model: model)
+        _ = view.context(in: app)
+        _ = view.context(in: app)
+
+        XCTAssertEqual(model.neighbourhoods.builds, 1,
+                       "two context(s) built the channel's neighbourhood \(model.neighbourhoods.builds) time(s), not once")
+    }
+
+    // MARK: - Reaching a row by index (review scalpel-2#2)
+
+    /// The indexed accessors answer exactly what the list of rows answers, with and without a
+    /// preview, at both ends and in the middle.
+    ///
+    /// The list is the whole history concatenated afresh on every access, and the table asks for a
+    /// row per visible row per layout — `heightOfRow` asked for it before it even consulted its
+    /// height cache. So the arithmetic replaces it on the hot paths, and this is what says the two
+    /// agree: an off-by-one at the preview's index would draw the last message into the preview's
+    /// row, and a preview the index cannot find would lose the reader's anchor on every delta.
+    func testIndexedRowAccessAgreesWithTheList() {
+        let controller = TimelineTableController()
+        for preview in [nil, Self.preview("a streaming line")] as [StreamingPreview?] {
+            controller.apply(TimelineRenderInput(rows: Self.rows(5), preview: preview))
+            let list = controller.rows
+            XCTAssertEqual(controller.rowCount, list.count,
+                           "the table counts \(controller.rowCount) row(s) against a list of \(list.count)")
+            for index in list.indices {
+                XCTAssertEqual(controller.row(at: index)?.key, list[index].key,
+                               "row \(index) of \(list.count) is a different row read by index")
+                XCTAssertEqual(controller.index(ofKey: list[index].key), index,
+                               "the key at row \(index) of \(list.count) is found at another index")
+            }
+            XCTAssertNil(controller.row(at: -1), "the table answered a row for index -1")
+            XCTAssertNil(controller.row(at: list.count), "the table answered a row one past its last")
+            XCTAssertNil(controller.index(ofKey: "item-nothing-here"),
+                         "the table found an index for a key it does not hold")
+        }
+    }
+
+    // MARK: - The scroll after a hosted row grew (review scalpel-1#1)
+
+    /// A card that grows after it is mounted leaves a pinned reader at the bottom.
+    ///
+    /// The document grows with no publish behind it, so nothing takes the anchor and nothing settles
+    /// the scroll: a viewport pinned to the bottom keeps its old offset, is no longer at the bottom,
+    /// and every later publish then holds it where the growth left it. Growth away from the bottom
+    /// is the same fault seen from the other side — the row the reader is on is shoved down by the
+    /// whole height of what grew above it.
+    func testHostedGrowthKeepsAPinnedViewportAtTheBottom() throws {
+        let controller = TimelineTableController()
+        try FrameTimeHarness.hosted(controller.scrollView, size: Self.viewport) { window in
+            Self.commit(Self.rows(60), to: controller, in: window)
+            XCTAssertGreaterThan(controller.tableView.bounds.height, Self.viewport.height,
+                                 "the table is no taller than its viewport, so nothing here could scroll")
+            XCTAssertTrue(controller.isAtBottom, "a first render did not land at the bottom")
+
+            // The last row's card finishes mounting and is 400 points tall.
+            let last = controller.rows.count - 1
+            let host = try XCTUnwrap(controller.tableView(controller.tableView, viewFor: nil, row: last) as? TimelineRowHostView,
+                                     "the table mounted a row that cannot report its own height")
+            host.update(root: AnyView(Color.clear.frame(width: 200, height: 400)), context: nil)
+            window.layoutIfNeeded()
+
+            XCTAssertTrue(controller.isAtBottom,
+                          "a row that grew by 400 point(s) left a pinned viewport \(Int(controller.tableView.bounds.height - controller.scrollView.contentView.documentVisibleRect.maxY)) point(s) short of the bottom")
+        }
+    }
+
+    /// The same growth, away from the bottom: the reader's row does not move.
+    func testHostedGrowthAboveTheViewportHoldsTheAnchoredRow() throws {
+        let controller = TimelineTableController()
+        try FrameTimeHarness.hosted(controller.scrollView, size: Self.viewport) { window in
+            Self.commit(Self.rows(60), to: controller, in: window)
+            Self.scroll(controller, to: controller.tableView.bounds.height / 2)
+            XCTAssertFalse(controller.scroll.isPinnedToBottom,
+                           "the viewport still reports itself pinned after scrolling into the middle")
+
+            let anchor = try XCTUnwrap(Self.topRowKey(of: controller),
+                                       "no row was found at the viewport's top edge, so there is no anchor to hold")
+            let before = try XCTUnwrap(Self.offset(ofRowKeyed: anchor, in: controller),
+                                       "the anchored row has no rectangle before the growth")
+
+            // The first row's card mounts, 400 points tall, far above where the reader is sitting.
+            let host = try XCTUnwrap(controller.tableView(controller.tableView, viewFor: nil, row: 0) as? TimelineRowHostView,
+                                     "the table mounted a row that cannot report its own height")
+            host.update(root: AnyView(Color.clear.frame(width: 200, height: 400)), context: nil)
+            window.layoutIfNeeded()
+
+            let after = try XCTUnwrap(Self.offset(ofRowKeyed: anchor, in: controller),
+                                      "the anchored row is not in the table after the growth")
+            XCTAssertEqual(after, before, accuracy: 2,
+                           "the anchored row moved \(Int(abs(after - before))) point(s) when a row above it grew")
+        }
+    }
+
     // MARK: - The mounted row across reloads (review sweep#4, scalpel-1#3)
 
     /// A reload updates the row that is already mounted rather than building a second one.
@@ -552,6 +689,11 @@ final class TimelineListTests: XCTestCase {
 
     private static func rows(_ count: Int, from first: Int = 0) -> [TimelineRow] {
         (first..<(first + count)).map { row(index: $0) }
+    }
+
+    /// The same invented items, as the timeline holds them.
+    private static func items(_ count: Int) -> [TimelineItem] {
+        rows(count).map(\.item)
     }
 
     /// A paragraph long enough that its height is a function of the width it is measured at, and

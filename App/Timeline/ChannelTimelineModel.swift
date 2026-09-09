@@ -160,6 +160,15 @@ final class ChannelTimelineModel {
     /// only `decision` and `sentFile` — C6.3's — still draw C5's placeholder.
     var rows: [TimelineRow] { timeline.items.map(TimelineRow.init) }
 
+    /// The reads a row makes of the timeline around it, rebuilt only when the items moved.
+    ///
+    /// **On the model for the reason `retraction` is.** The list builds one per body evaluation and
+    /// a body evaluates on every streaming publish, so the cache has to outlive the view value it is
+    /// read from — and the channel a reader switches away from and back to keeps the one it had.
+    var neighbourhood: TimelineNeighbourhood { neighbourhoods.neighbourhood(for: timeline) }
+
+    @ObservationIgnored let neighbourhoods = TimelineNeighbourhoodCache()
+
     private(set) var header = ChannelHeader()
 
     /// What the header's readback strip draws (child spec §10): the branch, and the four values the

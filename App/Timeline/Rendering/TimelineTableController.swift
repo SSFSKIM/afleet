@@ -56,7 +56,31 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
     private var previewText = ""
 
     /// What the table draws: the items, then the streaming preview if there is one.
+    ///
+    /// **Reached by index and not as an array on every hot path.** Materialising this concatenates
+    /// the whole history into a fresh array, and the table asks for a row far more often than it
+    /// asks for a list of them: `numberOfRows`, `viewFor` and `heightOfRow` are each called per
+    /// visible row per layout, and `heightOfRow` asked for the array *before* it consulted its
+    /// cache — so N height queries on a channel of N messages copied N messages N times, which is
+    /// the one shape §8.3 forbids. The three accessors below answer the same questions in index
+    /// arithmetic; this property stays for the callers that genuinely want the list.
     var rows: [RenderedRow] { previewRow.map { itemRows + [$0] } ?? itemRows }
+
+    /// How many rows the table holds: the items, and the preview when there is one.
+    var rowCount: Int { itemRows.count + (previewRow == nil ? 0 : 1) }
+
+    /// The row at a table index, or nil for an index the table does not hold. The preview sits one
+    /// past the last item, which is where `applyPreview` inserts and removes it.
+    func row(at index: Int) -> RenderedRow? {
+        if itemRows.indices.contains(index) { return itemRows[index] }
+        return index == itemRows.count ? previewRow : nil
+    }
+
+    /// The table index of a row key, or nil for a key this table no longer holds.
+    func index(ofKey key: String) -> Int? {
+        if let previewRow, previewRow.key == key { return itemRows.count }
+        return itemRows.firstIndex { $0.key == key }
+    }
 
     /// Row heights by the row's own key. `ItemID` carries a config-home path and is never logged; it
     /// is a dictionary key here and nothing else.
@@ -341,9 +365,8 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
         guard !scroll.isPinnedToBottom else { return nil }
         let visible = scrollView.contentView.documentVisibleRect
         let index = tableView.row(at: NSPoint(x: 1, y: visible.minY + 1))
-        let all = rows
-        guard index >= 0, all.indices.contains(index) else { return nil }
-        return ViewportAnchor(key: all[index].key, offset: tableView.rect(ofRow: index).minY - visible.minY)
+        guard index >= 0, let anchored = row(at: index) else { return nil }
+        return ViewportAnchor(key: anchored.key, offset: tableView.rect(ofRow: index).minY - visible.minY)
     }
 
     /// Puts the viewport back where the reader left it — at the bottom if it was pinned there, and
@@ -359,7 +382,7 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
             return
         }
         if appended > 0 { scroll.unseenCount += appended }
-        guard let anchor, let index = rows.firstIndex(where: { $0.key == anchor.key }) else { return }
+        guard let anchor, let index = index(ofKey: anchor.key) else { return }
         let target = tableView.rect(ofRow: index).minY - anchor.offset
         scrollTo(y: target)
     }
@@ -405,7 +428,7 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
         let surviving = Set(rows.map(\.key))
         heights = heights.filter { surviving.contains($0.key) }
         tableView.reloadData()
-        reloadedRows = Array(self.rows.indices)
+        reloadedRows = Array(0..<rowCount)
 
         // §6's "never on the main thread": a fenced block that missed the cache above rendered
         // unhighlighted, which is the correct thing to draw and the wrong thing to leave. The fill
@@ -455,10 +478,9 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
     /// Returns the phase costs of this one update, which is what S7 attributes a slow frame to.
     @discardableResult
     func appendToLastRow(_ fragment: String) -> RenderPhases {
-        let all = rows
-        guard let index = all.indices.last else { return RenderPhases() }
+        let index = rowCount - 1
+        guard var row = self.row(at: index) else { return RenderPhases() }
         var phases = RenderPhases()
-        var row = all[index]
 
         let parse = RenderClock.start()
         row.append(fragment, markdown: markdown, highlighter: highlighter, phases: &phases)
@@ -474,35 +496,32 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
 
     // MARK: - NSTableView
 
-    func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
+    func numberOfRows(in tableView: NSTableView) -> Int { rowCount }
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        let all = rows
-        guard all.indices.contains(row) else { return Self.emptyRowHeight }
-        let key = all[row].key
-        if let cached = heights[key] { return cached }
+        guard let rendered = self.row(at: row) else { return Self.emptyRowHeight }
+        if let cached = heights[rendered.key] { return cached }
         heightMeasurements += 1
         let width = max(tableView.bounds.width, Self.measuringWidth)
         measuredWidth = width
-        let measured = height(of: all[row], width: width)
-        heights[key] = measured
+        let measured = height(of: rendered, width: width)
+        heights[rendered.key] = measured
         return measured
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let all = rows
-        guard all.indices.contains(row) else { return nil }
-        let key = all[row].key
+        guard let rendered = self.row(at: row) else { return nil }
+        let key = rendered.key
         // SwiftUI hosted per visible row, which is what contract Y1's `AnyView` builder requires and
         // what S7's `hosting` signpost measures — and **the same host across reloads of one key**.
         // A card's in-flight guard and a question's half-typed draft are SwiftUI state, which lives
         // in the hosting view: a fresh one per reload throws them away, and a message streaming
         // beside a card reloads thirty times a second.
         if let existing = hosts[key] {
-            existing.update(root: root(for: all[row]), context: context)
+            existing.update(root: root(for: rendered), context: context)
             return existing
         }
-        let host = TimelineRowHostView(key: key, root: root(for: all[row]), context: context)
+        let host = TimelineRowHostView(key: key, root: root(for: rendered), context: context)
         host.onHeightChange = { [weak self] key, height in self?.hostedRow(key, measured: height) }
         hosts[key] = host
         return host
@@ -553,13 +572,24 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
     /// The only invalidation this table had accompanied a reload it issued itself, so a disclosure
     /// opening, a card mounting asynchronously and anything else that changes a row's size without a
     /// publish behind it was drawn into the height the row had before.
+    ///
+    /// **The growth moves the document, so it settles the scroll exactly as a publish does.** A row
+    /// that grows adds its whole difference to the table's height with no publish behind it: a
+    /// viewport pinned to the bottom keeps its old offset and is no longer at the bottom — and once
+    /// it is not, every later publish holds it where the growth left it instead of following the
+    /// stream. The anchor is taken before the height moves and settled after it, the two calls
+    /// `apply` makes around its own commit, so an unpinned reader keeps the row they were on too.
     func hostedRow(_ key: String, measured height: CGFloat) {
         let height = max(Self.emptyRowHeight, ceil(height))
         guard abs((heights[key] ?? -1) - height) > 1 else { return }
+        let anchor = anchorAtViewportTop()
         heights[key] = height
         hostedHeightNotes += 1
-        guard let index = rows.firstIndex(where: { $0.key == key }) else { return }
+        guard let index = index(ofKey: key) else { return }
         tableView.noteHeightOfRows(withIndexesChanged: IndexSet(integer: index))
+        // Nothing was appended: growth is not arrival, and a row growing out of sight is not an
+        // unseen message.
+        settleScroll(anchor: anchor, appended: 0)
     }
 
     /// The viewport's width changed: the table follows it, and the heights follow the table.
@@ -578,7 +608,7 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
         self.measuredWidth = nil
         heights = [:]
         for host in hosts.values { host.widthChanged() }
-        let count = rows.count
+        let count = rowCount
         guard count > 0 else { return }
         tableView.noteHeightOfRows(withIndexesChanged: IndexSet(integersIn: 0..<count))
     }
