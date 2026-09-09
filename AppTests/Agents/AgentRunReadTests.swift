@@ -179,13 +179,30 @@ final class AgentRunReadTests: XCTestCase {
         let read = AgentRunRead(timeline: ChannelTimeline(agents: tree))
         let content = try XCTUnwrap(read.content(of: "task_invented0004"), "the read holds no content for the run")
 
-        for drawn in [content.agentType, content.description, content.activityLine, content.lastToolName] {
-            guard let drawn else { continue }
-            let stripped = drawn.unicodeScalars.filter(TextSanitiser.isStripped).count
-            XCTAssertEqual(stripped, 0, "a drawn string kept \(stripped) scalar(s) the sanitiser strips")
+        // Both halves, per field. The control characters are gone **and** the readable text is still
+        // there: a content boundary that blanked a field, or dropped it, or handed back the whole
+        // string minus everything printable would pass a strip-count assertion on its own — and an
+        // absent field would pass one that skipped nil. Each expectation is the wire string with
+        // exactly the strip set removed.
+        let drawn: [(String?, String)] = [(content.agentType, "aninventedagent"),
+                                          (content.description, "aninventederrand"),
+                                          (content.activityLine, "reading aninvented file"),
+                                          (content.lastToolName, "Read")]
+        XCTAssertEqual(drawn.count, 4, "the node draws \(drawn.count) wire string(s), not the 4 D11 names")
+        for (index, field) in drawn.enumerated() {
+            guard let value = field.0 else {
+                // Reported rather than thrown, so one dropped field does not hide the other three.
+                XCTFail("wire string \(index + 1) of \(drawn.count) is drawn as nothing at all, "
+                        + "and dropping a field is not sanitising it")
+                continue
+            }
+            let stripped = value.unicodeScalars.filter(TextSanitiser.isStripped).count
+            XCTAssertEqual(stripped, 0,
+                           "wire string \(index + 1) of \(drawn.count) kept \(stripped) scalar(s) the sanitiser strips")
+            XCTAssertTrue(value == field.1,
+                          "wire string \(index + 1) of \(drawn.count) lost \(field.1.count - value.count) "
+                          + "readable character(s) with the control characters")
         }
-        // And the sanitising is a strip, not a blanking: the readable text survives it.
-        XCTAssertTrue(content.description.contains("invented"), "the sanitiser removed the readable text with the rest")
     }
 
     /// The waiting badge's count is the channel's **pending** decisions whose `agent_id` is this
