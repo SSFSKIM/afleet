@@ -27,6 +27,11 @@ struct PanelColumnView: View {
                let cwd = row.cwd,
                let context = app.panels.context(for: row.key, cwd: cwd) {
                 PanelTabColumn(host: app.panels, shell: shell, context: context)
+                    // Tracker 350: while the keyboard is in this column, the composer's Escape and
+                    // Shift+Tab stand down, so a full-screen TUI in a pane receives them. The
+                    // region carries this column's rect and nothing else — it draws nothing, takes
+                    // no click and never becomes first responder.
+                    .background(PanelKeyboardRegion(focus: shell.keyboard))
             } else {
                 PlaceholderColumn(title: shell.panelTab.defaultTitle,
                                   detail: "Pick a channel in the sidebar to give the panel a context.")

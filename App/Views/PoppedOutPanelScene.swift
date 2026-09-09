@@ -42,6 +42,10 @@ struct PoppedOutPanelScene: View {
         // placeholder has no channel left, and the item must be offered for *nothing* rather than
         // for whatever the main window happens to be showing.
         .focusedSceneValue(\.poppedOutPanel, panel)
+        // Tracker 350, the pop-out's half: this window holds nothing but a panel, so while it is
+        // key every ordinary key in it is the panel's. The region spans the window rather than
+        // carrying a rect — there is no composer here for the keyboard to be in instead.
+        .background(PanelKeyboardRegion(focus: app.shell.keyboard, spansWindow: true))
         .frame(minWidth: 420, minHeight: 320)
         .onDisappear {
             guard let panel else { return }
