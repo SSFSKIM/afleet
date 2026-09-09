@@ -79,8 +79,8 @@ final class AgentsTabTests: XCTestCase {
         XCTAssertTrue(first is AgentsModel, "the tab's session is not an AgentsModel")
     }
 
-    /// The disclosure set is the session's, so one channel's open tree does not collapse because
-    /// another channel's did.
+    /// The disclosure set is the session's, so one channel's closed branch does not close the same
+    /// branch in another channel's tree.
     func testTheDisclosureSetIsPerChannel() throws {
         let host = PanelHostModel()
         try host.register(AgentsTab(timelines: { _ in nil }, selection: AgentSelectionStore()))
@@ -89,11 +89,11 @@ final class AgentsTabTests: XCTestCase {
         let b = try XCTUnwrap(host.session(for: .agents, context: PanelFixtures.context(PanelFixtures.key(1)))
                                 as? AgentsModel, "the tab made something other than its own session")
 
-        a.expanded.insert("task_invented0001")
+        a.toggle("task_invented0001")
 
-        XCTAssertEqual(a.expanded.count, 1, "the channel's own disclosure set holds \(a.expanded.count) node(s), not 1")
-        XCTAssertEqual(b.expanded.count, 0,
-                       "another channel's disclosure set gained \(b.expanded.count) node(s) from this one")
+        XCTAssertEqual(a.collapsed.count, 1, "the channel's own disclosure set holds \(a.collapsed.count) node(s), not 1")
+        XCTAssertEqual(b.collapsed.count, 0,
+                       "another channel's disclosure set gained \(b.collapsed.count) node(s) from this one")
     }
 
     // MARK: - What the tab is allowed to hold (X7)

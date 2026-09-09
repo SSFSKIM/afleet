@@ -35,9 +35,17 @@ final class AgentsModel: PanelTabSession {
     @ObservationIgnored private let timelines: TimelineReach
     @ObservationIgnored private let store: AgentSelectionStore
 
-    /// Which nodes are disclosed. Per channel, so a tree opened in one channel does not collapse
-    /// because another channel's was.
-    var expanded: Set<AgentRunID> = []
+    /// Which branches the user has **closed**. Per channel, so a tree opened in one channel does
+    /// not collapse because another channel's was.
+    ///
+    /// The closed set and not the open one: a tree arrives fully disclosed, because the nesting is
+    /// the whole reason this surface exists, and a set of open ids would need seeding from a tree
+    /// that has not been read yet.
+    var collapsed: Set<AgentRunID> = []
+
+    func toggle(_ run: AgentRunID) {
+        if collapsed.contains(run) { collapsed.remove(run) } else { collapsed.insert(run) }
+    }
 
     init(channel: ChannelKey, timelines: @escaping TimelineReach, store: AgentSelectionStore) {
         self.channel = channel

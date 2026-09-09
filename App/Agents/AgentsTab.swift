@@ -82,8 +82,8 @@ final class AgentsTab: PanelTab {
     }
 }
 
-/// What the panel draws. Task 3 replaces this body with the run tree and its two empty states; the
-/// three cases are named here because the tab's registration and this leaf's states land together.
+/// What the panel draws: the run tree, or one of the two sentences a channel with nothing to draw
+/// gets. Later tasks of this leaf put the per-run transcript beside it.
 struct AgentsPanelView: View {
 
     let model: AgentsModel
@@ -92,31 +92,6 @@ struct AgentsPanelView: View {
     let surface: PanelSurface
 
     var body: some View {
-        switch model.read.state {
-        case .tree(let roots):
-            VStack(alignment: .leading) {
-                Text("^[\(roots.count) run](inflect: true)")
-                selectionLine
-            }
-        case .noRuns:
-            Text("No agent runs in this channel.")
-        case .noWire:
-            Text("This channel's agent runs are not visible: the run tree is built from a live session's frames, and this channel has none.")
-        }
-    }
-
-    /// What the pane has open. A run id is **drawable** and never printable (§11): it is shown here
-    /// and stated in no report. A run the tree does not hold is said so rather than selected
-    /// (child spec D5).
-    @ViewBuilder
-    private var selectionLine: some View {
-        switch model.selection {
-        case .run:
-            if let run = model.selectedRun { Text(verbatim: run).monospaced() }
-        case .unknownRun:
-            Text("That agent run is not in this channel's tree.")
-        case .none:
-            EmptyView()
-        }
+        AgentTreeView(model: model)
     }
 }
