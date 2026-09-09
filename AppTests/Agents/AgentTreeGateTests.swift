@@ -9,10 +9,12 @@ import PanelHostAPI
 
 /// Gate **G1**: the run tree, on `nested-depth-2`, replayed through the app's own ingestion.
 ///
-/// **The wire half is the only half that carries a tree.** `StreamIngestion.agents` is `wire?.agents`
-/// (tracker 187 on `main`), so a channel opened from its transcript files alone has none — which is
-/// the second of the two empty states this gate asserts, and it is asserted on a real file-only
-/// channel rather than on a hand-made absence.
+/// **Both parent sources reach the tree.** Since the C3 corrective, `StreamIngestion` feeds the
+/// mirrored `agent_metadata` record and the `.meta.json` sidecars beside the transcript into the
+/// tree for live *and* file-only channels, so `agents` is non-nil once `open` has built the fold.
+/// G1's sentence — the depth-2 tree renders from the two-step join **before** the sidecar is written
+/// and is corrected by it afterwards — therefore has two reachable arms, and they are two tests: one
+/// on a channel whose sidecars are not yet on disk, one on a channel whose are.
 ///
 /// **Every wait is fulfilled by the delivery it waits for.** Pushing an event into a fan-out is not
 /// consuming it, and counting yields after a push measures the scheduler. So each replay ends with a
@@ -43,8 +45,15 @@ final class AgentTreeGateTests: XCTestCase {
     /// either alone answers `.none` here. The outline's own half is the last clause — closing the
     /// root hides the child, which is what "under" means on screen and what a flat list of nodes in
     /// the same order cannot do.
+    ///
+    /// **This is G1's first arm: before the `.meta.json` is written.** The channel is opened with the
+    /// recording's sidecars withheld from disk — the ordinary case §7.3 describes, where the engine
+    /// has spawned the run and not yet flushed its sidecar — so no metadata source can answer the
+    /// parent question and the join is the only source that reaches it. The withholding is the whole
+    /// discrimination: with the sidecars in place `StreamIngestion.loadMetadata` answers during
+    /// `open`, before a single frame is replayed, and this arm's `parentSource` clause fails.
     func testTheDepthTwoTreeRendersFromTheTwoStepJoin() async throws {
-        let rig = try await AgentGateRig(fixture: "nested-depth-2")
+        let rig = try await AgentGateRig(fixture: "nested-depth-2", sidecars: false)
         defer { Task { await rig.finish() } }
         let replayed = try await rig.replay()
         let settled1 = await rig.settleOnBarrier()
@@ -78,6 +87,109 @@ final class AgentTreeGateTests: XCTestCase {
         let closed = AgentTreeView.visibleRows(read: read, collapsed: [root])
         XCTAssertEqual(closed.count, 1,
                        "closing the root left \(closed.count) row(s), so the nested run is not under it")
+
+        // The arm's premise, asserted rather than assumed: no sidecar was on disk to answer, so the
+        // file source produced nothing at all for this run.
+        XCTAssertTrue(tree.parentAnswers[child]?[.metaFile] == nil,
+                      "a sidecar answered the parent question on the arm that withholds every sidecar")
+        XCTAssertEqual(tree.conflicts.count, 0,
+                       "the tree holds \(tree.conflicts.count) parent disagreement(s) where one source answered")
+    }
+
+    /// **G1's second arm: after the sidecar exists.** The same recording opened with its `.meta.json`
+    /// sidecars in place — every archived channel, and every live one once the engine has flushed
+    /// them — has the parent question answered by the file source during `open`, before a frame is
+    /// replayed.
+    ///
+    /// What is asserted is what D1 rules and **not a re-parenting**: `AgentRunTree.link` is
+    /// first-source-wins, C3 pins that with its own test, and a surface demanding the parent move on
+    /// a late source would be asserting against the fold's stated invariant. So: the nesting is the
+    /// same nesting, the answering source is the metadata source rather than the join, the join's own
+    /// answer is **retained** beside it in `parentAnswers`, and the two agree — which is why nothing
+    /// is in `conflicts`.
+    ///
+    /// The source is `.metaFile` and not `.agentMetadata`. Both are metadata sources and the child
+    /// spec's D1 and the acceptance clause name the mirror's; on a channel opened from disk the
+    /// sidecar is read while `open` is still buffering, so it is the one that speaks first. The
+    /// divergence is reported rather than papered over — the observable fact is that a *metadata*
+    /// source answered and the join did not.
+    func testTheSidecarAnswersTheParentAndTheJoinsAnswerIsRetained() async throws {
+        let rig = try await AgentGateRig(fixture: "nested-depth-2")
+        defer { Task { await rig.finish() } }
+        _ = try await rig.replay()
+        let settledBarrier = await rig.settleOnBarrier()
+        XCTAssertTrue(settledBarrier, "the replay never reached the model")
+        let armed = await rig.settleOnRuns(2)
+        XCTAssertTrue(armed, "the replay armed a tree with 2 runs in it")
+
+        let read = rig.read()
+        XCTAssertEqual(read.roots.count, 1, "the tree read as \(read.roots.count) root(s), not the 1 it holds")
+        let root = try XCTUnwrap(read.roots.first, "the tree offered no root")
+        let child = try XCTUnwrap(read.children(of: root).first, "the root has no child")
+        XCTAssertEqual(AgentTreeView.visibleRows(read: read, collapsed: [root]).count, 1,
+                       "the nested run is not drawn under the root")
+
+        let tree = try XCTUnwrap(rig.model.timeline.agents, "the channel carries no run tree after the replay")
+        XCTAssertEqual(tree.node(child)?.parentSource, .metaFile,
+                       "the nested run's parent was not answered by the sidecar the channel was opened with")
+        // The join ran and its answer is kept: a fold that let a later source erase the earlier
+        // answers would show the same parent and the same nesting, and would have lost the evidence
+        // that the two sources ever agreed.
+        let answers = try XCTUnwrap(tree.parentAnswers[child], "the tree kept no parent answer for the nested run")
+        XCTAssertEqual(answers.count, 2,
+                       "the nested run kept \(answers.count) parent answer(s) where 2 sources spoke")
+        XCTAssertTrue(answers[.twoStepJoin] == answers[.metaFile] && answers[.twoStepJoin] != nil,
+                      "the two-step join's answer was not retained beside the sidecar's")
+        XCTAssertTrue(answers[.twoStepJoin] == tree.node(child)?.parent,
+                      "the join's retained answer is not the parent the tree holds")
+        XCTAssertEqual(tree.conflicts.count, 0,
+                       "two agreeing sources left \(tree.conflicts.count) disagreement(s) on the tree")
+    }
+
+    /// And where two sources **disagree**, the disagreement is visible rather than hidden: the tree
+    /// keeps the parent the first source gave, and says so.
+    ///
+    /// Driven on the join-only arm — the join has answered, and a sidecar then arrives naming a
+    /// different parent, which is the ordering §7.3 makes possible and the one `conflicts` exists
+    /// for. The sidecar is invented whole (an invented parent id, an invented type) and written into
+    /// the test's own temporary tree; the record is applied through C3's own reader, so what is
+    /// asserted is the fold's behaviour and not a hand-built tree.
+    ///
+    /// The discriminating clause is the pair: a fold that silently took the later answer and a fold
+    /// that silently dropped it draw the *same* tree, and only `conflicts` tells them apart.
+    func testASecondSourceThatDisagreesIsRecordedAndDoesNotReParent() async throws {
+        let rig = try await AgentGateRig(fixture: "nested-depth-2", sidecars: false)
+        defer { Task { await rig.finish() } }
+        _ = try await rig.replay()
+        let settledBarrier = await rig.settleOnBarrier()
+        XCTAssertTrue(settledBarrier, "the replay never reached the model")
+        let armed = await rig.settleOnRuns(2)
+        XCTAssertTrue(armed, "the replay armed a tree with 2 runs in it")
+
+        let read = rig.read()
+        let root = try XCTUnwrap(read.roots.first, "the tree offered no root")
+        let child = try XCTUnwrap(read.children(of: root).first, "the root has no child")
+        var tree = try XCTUnwrap(rig.model.timeline.agents, "the channel carries no run tree after the replay")
+        XCTAssertEqual(tree.node(child)?.parentSource, .twoStepJoin,
+                       "the join did not answer, so a later disagreement would disagree with nothing")
+
+        try tree.apply(metaFile: try rig.disagreeingSidecar(taskID: child), at: Date())
+
+        XCTAssertEqual(tree.node(child)?.parentSource, .twoStepJoin,
+                       "a later source re-parented the run, which first-source-wins refuses")
+        XCTAssertTrue(tree.node(child)?.parent == root, "the disagreeing source moved the run's parent")
+        XCTAssertEqual(tree.conflicts.count, 1,
+                       "the tree recorded \(tree.conflicts.count) disagreement(s) where 2 sources named "
+                       + "2 different parents")
+        let answers = try XCTUnwrap(tree.parentAnswers[child], "the tree kept no parent answer for the nested run")
+        XCTAssertEqual(answers.count, 2,
+                       "the tree kept \(answers.count) parent answer(s) where 2 sources spoke")
+        XCTAssertTrue(answers[.metaFile] != answers[.twoStepJoin],
+                      "the disagreeing source's own answer was not kept as it gave it")
+        var timeline = rig.model.timeline
+        timeline.agents = tree
+        XCTAssertEqual(AgentTreeView.visibleRows(read: AgentRunRead(timeline: timeline), collapsed: [root]).count, 1,
+                       "the nested run left the branch it was drawn under")
     }
 
     /// A second `task_started` for an id the tree already holds is **one** node that ran twice —
@@ -377,8 +489,13 @@ private struct AgentGateRig {
     static func rowKey(of lead: String) -> String { "cluster:\(lead)" }
 
     /// `owned: false` opens the channel from its transcript files alone and never opens an event
-    /// stream — every archived and every foreign session, and the arm where the tree is nil.
-    init(fixture: String, owned: Bool = true) async throws {
+    /// stream — every archived and every foreign session.
+    ///
+    /// `sidecars: false` copies the recording's transcripts **without** their `.meta.json` files, so
+    /// the channel opens on a session whose sidecars the engine has not flushed yet — §7.3's ordinary
+    /// case, and G1's "before the `.meta.json` is written". Nothing else about the open changes: the
+    /// same frames are replayed into the same fold, and the only source withheld is the file one.
+    init(fixture: String, owned: Bool = true, sidecars: Bool = true) async throws {
         self.fixture = fixture
         temp = try TempTree()
         home = try ScratchConfigHome(tree: temp)
@@ -387,9 +504,9 @@ private struct AgentGateRig {
         }
         let projects = home.root.appending(path: "projects", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: projects, withIntermediateDirectories: true)
-        try FileManager.default.copyItem(at: main.slugDirectory,
-                                         to: projects.appending(path: "\(fixture)-\(main.slug)",
-                                                                directoryHint: .isDirectory))
+        let copied = projects.appending(path: "\(fixture)-\(main.slug)", directoryHint: .isDirectory)
+        try FileManager.default.copyItem(at: main.slugDirectory, to: copied)
+        if !sidecars { try Self.removeSidecars(under: copied) }
         key = ChannelKey(configHome: home.configHome.root, session: main.session)
 
         let index = TranscriptIndex(configHome: home.configHome, storage: InMemoryIndexStorage())
@@ -500,6 +617,29 @@ private struct AgentGateRig {
                    "task_type": .string("local_agent"),
                    "uuid": .string("bbbbbbbb-5555-4555-8555-bbbbbbbbbbbb"),
                    "session_id": .string("cccccccc-4444-4444-8444-cccccccccccc")])
+    }
+
+    /// Every `.meta.json` under a copied transcript tree, removed before the channel is opened.
+    /// Counted and asserted: a copy that held none would make the withholding a no-op and the arm
+    /// above would be measuring nothing.
+    private static func removeSidecars(under directory: URL) throws {
+        var removed = 0
+        let files = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: nil)
+        for case let url as URL in files ?? .init() where url.lastPathComponent.hasSuffix(".meta.json") {
+            try FileManager.default.removeItem(at: url)
+            removed += 1
+        }
+        guard removed > 0 else { throw AgentGateBail("the copied transcripts carry no sidecar to withhold") }
+    }
+
+    /// An invented `agent-<taskId>.meta.json` naming an invented parent: a second source that
+    /// **disagrees** with what the tree already holds. Every value in it is this test's own — the
+    /// task id is the one the tree is keyed on and is written into the file name, never printed.
+    func disagreeingSidecar(taskID: String) throws -> URL {
+        try temp.file("sidecars/agent-\(taskID).meta.json",
+                      #"{"agentType": "an-invented-type", "description": "an invented disagreement", "#
+                      + #""toolUseId": "toolu_invented_conflict", "parentAgentId": "a0000000invented0", "#
+                      + #""spawnDepth": 2}"#)
     }
 
     private static func frame(_ object: [String: JSONValue]) throws -> WireEvent {
