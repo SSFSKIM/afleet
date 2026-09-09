@@ -713,7 +713,8 @@ with sixteen budgeted turns unspent (C6.2 four, C6.3 six, C6.4 six). Those are h
 not complete acceptance coverage; the checklist now also names items 3, 47 and 43 and separates
 implementation blockers from policy-blocked live evidence. Tracker 162 remains a cross-owner C6
 acceptance prerequisite, not an exclusion. Fixes for 397 (readbacks after drain/reopen) and 428
-(rewind's main-stream UUID) are **in progress on a sibling branch**, not closed. Tracker 435 still
+(rewind's main-stream UUID) are **merged and verified** at `b2f1607`: focused regressions failed
+first, then passed; the independent review was clean. The tested executable tree matches the merge. Tracker 435 still
 lacks relay-conclusion persistence across rebuild without observation; 427 still lacks production
 item-builder performance coverage. Other corrective entries (436–441), leaf debt and the deferred
 Codex review route remain recorded with their owners.
@@ -723,8 +724,8 @@ integrated tree by the CLI or fixtures exactly as specified. This includes shell
 of tracker 162 and C6 verification of item 3's afleet-selected UUID, new transcript and first-turn
 AI title, item 47's new-channel trust entry through owned spawn, and the isolated-settings spawn
 consumer used by permission legs. Acceptance-affecting gaps must be resolved and verified, including
-397/428's pending fixes and 435's unobserved-rebuild relay conclusion; an in-progress fix is not
-proof. The required human/live legs must then actually be witnessed on an account that permits
+435's unobserved-rebuild relay conclusion. The 397/428 fixes have merged with verification; they
+do not establish the remaining requirements. The required human/live legs must then actually be witnessed on an account that permits
 them, including item 43's malformed-answer denial and continued channel, with the X9 witness;
 `send-message-delivery` must be human-reviewed and signed, verified, and its replay test execute
 without skipping. Preserve S7's measured workload and report tracker 427 as deferred performance
@@ -796,3 +797,10 @@ leaf executed against differently without a corrective now on `main`.
   now covers items 3, 47 and 43 without claiming a witness. Outcomes states the full closure
   conditions; 397/428 are in progress, 435 and 427 remain evidence gaps. Historical test and S7
   measurements are unchanged; S7 does not measure production item builders.
+- 2026-09-10 follow-up corrective `b2f1607`: tracker 397 readbacks resubscribe after buffered
+  archival/reopen without retrying nil streams or cancelled consumers; tracker 428 rewind and fork
+  targets stay on the main conversation. Focused red-to-green suites: 14 readback tests and 18
+  rewind tests, zero skips on green. Independent `astra-high` review clean. Full test run: 2,506
+  total, 2,476 passed, 30 skipped, zero failures across 19 bundles; 281 Python tests passed; import
+  and wiring checks clean. The merge's executable tree matches the tested branch. Acceptance stays
+  open for the prerequisites above; no live witness or fixture signature was added.
