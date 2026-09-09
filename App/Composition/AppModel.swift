@@ -312,6 +312,24 @@ final class AppModel: FilesTabHost, SourceControlTabHost {
 
     /// Which channel a delivery belongs to.
     ///
+    /// **The link's own channel comes first, and that is tracker 240 closed at this seam.**
+    /// `HostLinkRouter.open` captures the channel the action was raised in, at entry, and publishes
+    /// it as `LinkOrigin.channel` for the whole routed call; a target's handler runs inside that
+    /// call, so the capture is still there when it asks. Both answers below read the host's state
+    /// *now*, and routing suspends twice before a handler runs with the main actor free throughout
+    /// — so a delivery raised in one channel and answered from the present lands in whichever
+    /// channel the window drifted to, and the next save writes there. Reading the capture removes
+    /// the drift instead of mitigating it, and because the capture is also the fact `lastPopOut`
+    /// was standing in for, it closes the crossing two overlapping `.newWindow` preparations could
+    /// make of that one slot (tracker 362 and 370).
+    ///
+    /// **No X7 signature moves for it.** The capability already carries the channel, one
+    /// indirection away, and a parameter on `LinkRouterCapability.open` would make every conformer
+    /// restate what the app is the only holder of.
+    ///
+    /// The two answers below remain, for a delivery with **no** origin — a link opened outside a
+    /// routed action, which is what the menu bar and a harness raise.
+    ///
     /// `.currentPanel` is the channel the main window is showing. `.newWindow` is the channel the
     /// host popped a window out for immediately before this delivery — `HostLinkRouter` captured
     /// it when the action was taken, precisely because the window may have moved on since, and
@@ -326,6 +344,7 @@ final class AppModel: FilesTabHost, SourceControlTabHost {
     /// select a commit in whichever channel Files was last popped out for. One rule, two tab ids,
     /// and neither answers with the other's window.
     private func channel(for destination: LinkDestination, poppedOutAs tab: PanelTabID) -> ChannelKey? {
+        if let origin = LinkOrigin.channel { return origin }
         guard destination == .newWindow,
               let window = panels.lastPopOut, window.tab == tab,
               panels.poppedOut.contains(window) else { return panels.selectedChannel }

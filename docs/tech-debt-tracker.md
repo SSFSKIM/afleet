@@ -2739,17 +2739,6 @@ the gap between 141 and 157 is C6.1's and C6.2's reservations and is expected. (
      `COPYFILE_ACL | COPYFILE_XATTR` onto the temporary, or an exchange primitive. Closer: that
      call, once someone edits a file whose ACL matters. Owner: C7.5's follow-up.
 
-240. **`LinkRouterCapability.open` does not say which channel the link came from.** Every channel's
-     Files session registers a `.file` and a `.diff` target with the same tab and specificity, and
-     `LinkRouter.mostSpecific` compares specificity and tab order — never channel identity. So the
-     registry alone cannot deliver a link to the session it came from. C5 recorded the same gap in
-     `HostLinkRouter` ("`LinkRouterCapability.open(_:from:)` carrying the channel would remove the
-     case altogether, and that is an X7 amendment"); C7.5 mitigates it by registering **once per
-     tab** and routing to the channel the panel is presenting, which is right for a click the user
-     just made and wrong for a link delivered to a channel that is not on screen. Closer: the X7
-     amendment of C7.5's Parent revision 4 — the capability carries the originating `ChannelKey`
-     and `LinkTarget` may match on it. Owner: C5's fence; C7.6 and C7.7 register per channel too.
-
 241. **Re-baselining the editor after a save can overwrite a keystroke.** W4's vocabulary is closed
      and `readBuffer` deliberately leaves the dirty flag alone, so the only way to tell Monaco "this
      is the saved state now" is `setText` — which replaces the buffer. A character typed between the
@@ -2867,15 +2856,6 @@ the gap between 141 and 157 is C6.1's and C6.2's reservations and is expected. (
      number of scratch files live. Closer: ask per component and exempt the aliases by name, if a
      case ever appears that needs it. Owner: C7.5's follow-up. Found by C7.5's fix wave D.
 
-362. **The channel a `.newWindow` delivery lands in is carried by one slot, so two such links in
-     flight at once can cross.** `PanelHostModel.lastPopOut` records the pop-out the router just
-     prepared and the Files tab resolves its channel from it, which is what stops a delivery from
-     following a window that has moved on. Two `.newWindow` opens overlapping — two Cmd-clicks
-     before the first delivery lands — leave the second's pop-out in that slot for both, and the
-     first file opens in the second's channel. The real closer is entry 240's X7 amendment: the
-     capability carrying the originating `ChannelKey` makes the delivery name its own channel and
-     the slot disappear. Owner: X7's amendment, whichever leaf opens it. Found by C7.5's fix wave D.
-
 343. **Two presentations dispatched concurrently cannot be ordered by intent.** The presentation
      generation says which call claimed the surface last, and a call that has been dispatched but
      has not run yet has claimed nothing — so a suspension taken *before* a presentation (opening a
@@ -2944,23 +2924,15 @@ the gap between 141 and 157 is C6.1's and C6.2's reservations and is expected. (
      and re-arms when they disagree. File: `FileWatch.swift`. Owner: C7.5.
      Filed 2026-09-09 at C7.5's third review round (hard stop).
 
-370. **Two `.newWindow` preparations in flight can deliver one window's file into the other's
-     session.** `PanelHostModel.lastPopOut` is a single slot, so overlapping A and B pop-out
-     preparations leave B's window in it for both deliveries and A's file opens in B's channel —
-     where the next save writes it. This is entry 362 seen from the delivery side rather than the
-     channel side: same slot, same crossing, and the same closer, which is entry 240's X7
-     amendment carrying the originating `ChannelKey` on the delivery so the slot disappears.
-     File: `PanelHostModel` (C5) with `FilesTab.swift` as the consumer. Owner: C5/C7.2.
-     Filed 2026-09-09 at C7.5's third review round (hard stop).
-
 371. **A `.newWindow` delivery whose pop-out closed first opens the file in a hidden session.**
-     The delivery resolves its channel from the prepared pop-out, and when that window has gone by
-     the time the link lands the resolution falls back to the main window's selection — so the file
-     opens in a session no window is drawing, and the user sees nothing happen. A fallback is right
-     for a link that never named a window; it is wrong for one that named a window which is gone.
-     Closer: refuse the delivery outright when the prepared window is no longer there, which is the
-     same shape as fix wave D's "with a host, a lookup that answers nothing opens nothing".
-     File: `FilesTab.swift`. Owner: C7.5. Filed 2026-09-09 at C7.5's third review round (hard stop).
+     Restated 2026-09-09 by the C7 recomposition corrective that closed entry 240: the delivery no
+     longer follows the main window's selection — it lands in the channel the action was raised in,
+     which is the channel the closed window was showing — so the file is at least in the right
+     session. It is still a session nothing is drawing when the main window has moved elsewhere, and
+     the user sees nothing happen. Closer: refuse the delivery outright when the prepared window is
+     no longer there, which is the same shape as fix wave D's "with a host, a lookup that answers
+     nothing opens nothing". File: `FilesTab.swift`. Owner: C7.5.
+     Filed 2026-09-09 at C7.5's third review round (hard stop).
 
 372. **Cmd+S from a window that is not a Files scene saves the main window's buffer.**
      `FilesSaveButton` reads the focused-scene value and treats its *absence* as "this is the main
@@ -3727,7 +3699,8 @@ four whole-branch review rounds.
 285. **`AppModel.filesSession(for:)` and `sourceControlSession(for:)` are the same six lines twice**,
      differing only in a tab id and a cast; a third panel host makes it three. The generic that
      removes the duplication needs `PanelTabSession` subtype resolution the host does not expose.
-     It belongs next to tracker 240, whose X7 amendment would touch both methods anyway.
+     Both now resolve through one private `channel(for:poppedOutAs:)`, which is where the link's
+     originating channel is read, so the duplication is the two public wrappers and their casts.
      Owner: C5's fence.
 
 286. **G4's source-level surface gate is scoped to two file names.** The scan that closes "a
@@ -3807,3 +3780,36 @@ four whole-branch review rounds.
      a value four leaves construct, for a question whose production answer is the same everywhere.
      Closer: none proposed; it is recorded so the next test that reaches for it knows the rule.
      Owner: C6.1.
+
+420. **The host's remembered selection grows with the channels one run visits.** `PanelHostModel`
+     keeps a `[ChannelKey: PanelTabID]` so returning to a channel is immediate rather than a store
+     round trip, and nothing but the channel leaving the index takes an entry out of it — where the
+     session cache next to it is bounded at sixteen channels. The value is one enum and the set is
+     the same one W6 already writes a document per channel for, so the cost is bytes rather than
+     PTYs; it is still the one per-channel map in the host with no bound on it. Closer: an LRU over
+     the same order the session cache uses, once a measurement says it is worth the second eviction
+     path. Owner: C5's fence.
+
+421. **A W6 document outlives the channel it belongs to.** `releaseChannel(_:)` forgets the
+     channel's remembered tab and leaves `panel.host.<configHomeHash>.<sessionId>` on disk, and the
+     Files and Terminal documents have the same shape — nothing sweeps a panel document for a
+     session that has left the index. Harmless per document and unbounded across a long-lived config
+     home. Closer: a sweep at launch over `workbench`'s keys against the index, which is one pass and
+     wants to be written once for all three panels rather than three times. Owner: C7 as a whole,
+     under W6.
+
+422. **A selection made in the last quarter-second of a run is not written.** The host's document
+     writer coalesces on the panels' own interval and nothing flushes it at termination, so quitting
+     immediately after Cmd+3 relaunches on the previous tab. It is the shape every panel store has —
+     `FilesPanelStore` and `TerminalPanelState` included — and the flush would have to reach all of
+     them from one place the app does not have yet. Closer: a termination hook that flushes every
+     panel store, or an interval short enough that the window does not matter. Owner: C5's fence,
+     with C7's stores as the other half.
+
+423. **The host keys its own document with the Files panel's hash function.** §11's twelve-hex
+     config-home hash is spelled three times — `RawCapture.configHomeHash` in ClaudeWire, and once
+     each in `FilesPanelStore` and `TerminalPanelState`, which cannot import it because X1 forbids
+     Workbench a ClaudeWire dependency. The host needs the same hash and the URL a `ChannelKey`
+     carries, so it borrows `FilesPanelStore`'s rather than adding a fourth copy: correct, and an
+     edge from C5's host to a C7 leaf that exists only for a string. Closer: the hash on a type in
+     `PanelHostAPI` or `AfleetCore`, which every one of the four can reach. Owner: C7 under W6.

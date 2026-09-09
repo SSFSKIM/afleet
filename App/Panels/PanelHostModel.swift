@@ -134,6 +134,17 @@ final class PanelHostModel: PanelHost {
     /// same `RecentURLFeed` instance — rather than two feeds over one timeline.
     @ObservationIgnored private var contexts: [ChannelKey: ChannelContext] = [:]
 
+    /// The tab each channel was last showing, and the authority for the rest of this run.
+    ///
+    /// The document is what survives a relaunch; this is what makes returning to a channel
+    /// immediate. A load is asynchronous and the coalescing writer lands on its own interval, so a
+    /// host that asked the store on every focus would show the wrong tab for a frame or restore a
+    /// value it had just replaced. One `PanelTabID` per channel visited, which is the same set W6
+    /// already writes a document for.
+    @ObservationIgnored private var selectionByChannel: [ChannelKey: PanelTabID] = [:]
+    /// W6's documents. Nil until `attach(to:…)`, which is also the call that binds the store.
+    @ObservationIgnored private var documents: PanelHostStore?
+
     @ObservationIgnored private var workspace: Workspace?
     @ObservationIgnored private var timelines: ChannelTimelineRegistry?
     @ObservationIgnored private var lifecycle: (any LifecycleAPI)?
@@ -153,11 +164,17 @@ final class PanelHostModel: PanelHost {
     /// `lifecycle` is the seam pane exits leave through. Production passes nil and gets
     /// `workspace.fleet`; a test passes a double, which is the only way an exit's journey can be
     /// asserted on.
+    /// `document` is the same kind of seam for W6's selection document. Production passes nil and
+    /// gets the workspace's own store, scoped to `workbench` exactly as a panel's is; a test passes
+    /// a double, which is the only way a refused write can be asserted on.
     func attach(to workspace: Workspace, timelines: ChannelTimelineRegistry,
-                lifecycle: (any LifecycleAPI)? = nil) {
+                lifecycle: (any LifecycleAPI)? = nil,
+                document: (any ScopedStore)? = nil) {
         self.workspace = workspace
         self.timelines = timelines
         self.lifecycle = lifecycle ?? workspace.fleet
+        self.documents = PanelHostStore(store: document ?? WorkbenchScopedStore(store: workspace.store))
+        selectionByChannel = [:]
         sessions = [:]
         recency = []
         cwds = [:]
@@ -279,6 +296,32 @@ final class PanelHostModel: PanelHost {
     func select(_ id: PanelTabID) {
         guard tabs[id] != nil, selected != id else { return }
         selected = id
+        rememberSelection(id)
+    }
+
+    /// The channel the main window is on owns this selection from now on (W6).
+    ///
+    /// **The channel is the one that is focused, and never the one a caller named.** Every caller
+    /// that moves the selection moves it in the main window — Cmd+N, the tab bar, a link bringing
+    /// its panel forward, `run(_:for:)` raising Terminal — and the main window is showing whatever
+    /// `focusChannel` last said. A selection recorded against another channel would be restored
+    /// into a window that never made it.
+    ///
+    /// The memory is written before the document is asked for, so returning to the channel is
+    /// immediate whatever the writer is doing; a host with no workspace yet — the app selects
+    /// Thread in its initialiser — has neither a channel nor a store and records nothing.
+    private func rememberSelection(_ id: PanelTabID) {
+        guard let channel = selectedChannel else { return }
+        selectionByChannel[channel] = id
+        guard let documents else { return }
+        Task { await documents.save(id, for: channel) }
+    }
+
+    /// Puts a remembered tab up without recording it again. A restore is not a selection: it is
+    /// the selection this channel already made, arriving back.
+    private func restoreSelection(_ id: PanelTabID) {
+        guard tabs[id] != nil, selected != id else { return }
+        selected = id
     }
 
     /// The tab Cmd+N names for this channel, or nil when the index is past what the channel can
@@ -375,14 +418,39 @@ final class PanelHostModel: PanelHost {
     /// longer exist.
     func releaseChannel(_ key: ChannelKey) {
         releaseSessions(of: key)
+        // The remembered tab goes with the sessions: the channel is out of the index, so nothing
+        // can focus it again until it comes back — and if it does, its document answers.
+        selectionByChannel[key] = nil
         poppedOut.removeAll { $0.channel == key }
         if selectedChannel == key { selectedChannel = nil }
     }
 
     /// The main window moved to this channel. Exempts it from eviction; nil when the window is
     /// showing Activity or no channel at all.
+    /// **And it restores the channel's tab** (W6). Within one run that is immediate, from the
+    /// host's own memory; on the first visit of a run it is the document, which is what a relaunch
+    /// has. A channel neither remembers nor has a document for keeps whatever is up, because a
+    /// window arriving somewhere new has been given no instruction to move.
+    ///
+    /// The asynchronous half re-checks two things it could not know when it started: that the
+    /// window is still on this channel, and that nothing has been selected in it since. Either
+    /// would make the document a stale answer to a question that has already been answered — the
+    /// user's own selection, or another channel's.
     func focusChannel(_ key: ChannelKey?) {
         selectedChannel = key
+        guard let key else { return }
+        if let remembered = selectionByChannel[key] {
+            restoreSelection(remembered)
+            return
+        }
+        guard let documents else { return }
+        Task { [weak self] in
+            guard let tab = await documents.load(key) else { return }
+            guard let self, self.selectedChannel == key,
+                  self.selectionByChannel[key] == nil else { return }
+            self.selectionByChannel[key] = tab
+            self.restoreSelection(tab)
+        }
     }
 
     private func remember(_ context: ChannelContext) {
