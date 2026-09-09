@@ -18,9 +18,14 @@ struct AgentChipContent: Equatable {
 
     /// The unmatched-`tool_use` rule of §8: `set_in_progress_tool_use_ids` never reaches the wire
     /// (parity §41.16.2), so running is exactly a call with no result yet.
+    ///
+    /// **The group's, not the lead's.** A group of parallel calls draws one row, and that row's
+    /// status is what a reader takes for the group: it runs while any member does and fails when one
+    /// failed, so a lead that finished first cannot report *Done* over work still in flight.
     var status: ToolCallItem.Status
 
-    /// The span from the call to its result, or to now while it is still running.
+    /// The span from the call to its result, or to now while it is still running — and for a group,
+    /// to its *last* member's end, which is when the group ended.
     var elapsed: TimeInterval?
 
     /// The run `AgentNavigating.show(run:in:)` would be given — `nil` for a channel with no tree.
@@ -34,6 +39,10 @@ struct AgentChipContent: Equatable {
     /// How many `Agent` calls share this one's `message.id`. Parallel calls the model issued in one
     /// message are one group row, not N chips (§7.3's reducer rule).
     var groupCount: Int = 1
+
+    /// The one line under the chip's title: the result form of the call the group's status comes
+    /// from.
+    var headline: String = ""
 
     /// Whether this call is the one that draws the group. The first by `tool_use_id` in sorted
     /// order, so the choice does not depend on which row the table happened to build first.
@@ -61,36 +70,66 @@ enum AgentChip {
             type = input.subagentType
             description = input.description
         }
-        let siblings = group(of: call, in: context)
+        let members = members(of: call, in: context)
+        // The row is the group's, so everything on it is the group's: one member still working
+        // keeps the whole row running, and the lead finishing first says nothing about the rest.
+        let status = status(of: members)
         var elapsed: TimeInterval?
         if let at = call.timestamp {
-            elapsed = max(0, (call.status == .running ? now : (endedAt(of: call) ?? now)).timeIntervalSince(at))
+            elapsed = max(0, (status == .running ? now : (endedAt(of: members) ?? now)).timeIntervalSince(at))
         }
         return AgentChipContent(agentType: type,
                                 description: description,
-                                status: call.status,
+                                status: status,
                                 elapsed: elapsed,
                                 runID: context?.neighbourhood.agents?.node(withToolUse: call.toolUseID)?.id,
-                                groupCount: siblings.count,
-                                isGroupLead: siblings.first == call.toolUseID)
+                                groupCount: members.count,
+                                headline: ToolResultForms.form(for: speaker(of: members, status: status) ?? call).headline,
+                                isGroupLead: members.first?.toolUseID == call.toolUseID)
     }
 
-    /// The `tool_use_id`s of every `Agent` call sharing this one's `message.id`, sorted.
+    /// Every `Agent` call sharing this one's `message.id`, sorted by `tool_use_id`.
     ///
     /// A call with no `message.id` is its own group: two calls the host cannot prove were issued
     /// together are two rows, which is the safe direction to be wrong in.
-    static func group(of call: ToolCallItem, in context: TimelineRenderContext?) -> [String] {
-        guard let messageID = call.messageID, let context else { return [call.toolUseID] }
+    static func members(of call: ToolCallItem, in context: TimelineRenderContext?) -> [ToolCallItem] {
+        guard let messageID = call.messageID, let context else { return [call] }
         let siblings = context.neighbourhood.toolCalls.values
             .filter { $0.name == "Agent" && $0.messageID == messageID }
-            .map(\.toolUseID)
-        return siblings.isEmpty ? [call.toolUseID] : siblings.sorted()
+            .sorted { $0.toolUseID < $1.toolUseID }
+        return siblings.isEmpty ? [call] : siblings
     }
 
-    /// When a finished call's result landed. The item carries the call's instant, and the result
-    /// updates the item in place, so the honest answer for a finished call with no separate
+    /// The `tool_use_id`s of the group above, in the same order.
+    static func group(of call: ToolCallItem, in context: TimelineRenderContext?) -> [String] {
+        members(of: call, in: context).map(\.toolUseID)
+    }
+
+    /// The status the group reads: running while any member is, failed when one failed and none is
+    /// still running, denied on the same rule, and done only when every member is.
+    ///
+    /// A group is one row over N runs, and a reader takes that row's status as the group's answer.
+    /// Reading the lead's alone reports on one member: a lead that finished first would say *Done*
+    /// over siblings that are still working or that failed, which is the reading a reader acts on.
+    static func status(of members: [ToolCallItem]) -> ToolCallItem.Status {
+        if members.contains(where: { $0.status == .running }) { return .running }
+        if members.contains(where: { $0.status == .failed || $0.isError == true }) { return .failed }
+        if members.contains(where: { $0.status == .denied }) { return .denied }
+        return members.first?.status ?? .completed
+    }
+
+    /// The member whose result the group's one headline is drawn from: the first in the group's own
+    /// order that is in the state the group reports, so the sentence and the status agree.
+    static func speaker(of members: [ToolCallItem], status: ToolCallItem.Status) -> ToolCallItem? {
+        members.first { $0.status == status || (status == .failed && $0.isError == true) } ?? members.first
+    }
+
+    /// When the group finished: its last member's end. The item carries the call's instant, and the
+    /// result updates the item in place, so the honest answer for a finished call with no separate
     /// timestamp is the item's own.
-    private static func endedAt(of call: ToolCallItem) -> Date? { call.timestamp }
+    private static func endedAt(of members: [ToolCallItem]) -> Date? {
+        members.compactMap(\.timestamp).max()
+    }
 }
 
 // MARK: - The chip
@@ -117,7 +156,7 @@ struct AgentChipRow: View {
                     HStack(spacing: 6) {
                         Image(systemName: "person.2.fill").font(.caption2)
                         Text(content.title).font(.caption.weight(.medium))
-                        Text(ToolResultForms.form(for: item).headline)
+                        Text(content.headline)
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                         if let elapsed = content.elapsed {
