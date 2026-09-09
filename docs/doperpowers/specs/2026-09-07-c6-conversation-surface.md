@@ -42,7 +42,14 @@ on `main` after the last leaf merges — not the sum of the leaves' gates:
 - Item 24's link emission: a path in a Read row emits a `WorkspaceLink.file` with its line,
   routed through X7's `LinkRouterCapability`.
 - **S7** passes on the ten-message corpus at thirty updates per second under 16 ms per frame,
-  or the WKWebView fallback is adopted with a Revision Note on the parent.
+  or the WKWebView fallback is adopted with a Revision Note on the parent. **Met 2026-09-09 at
+  C6.1's merge:** p50 3.51 ms, p99 7.66 ms, worst 10.34 ms over 1,781 samples and 60 s against the
+  finished renderer — inside the bound, but the spike's 1.47 ms was a minimal renderer and the
+  tenfold headroom is now twofold; every later row kind spends from what is left. The verdict
+  had three branches (pass; pass with an AppKit fast path, a Y1 amendment the architect would
+  apply on `main`; the fallback) and the first held. A markdown-heavy turn beside the terminal is
+  a human leg. The merge review's host-reuse fix (one hosting view per surviving row) moved the
+  gate under the day's parallel load from 12.85 ms to 7.76 ms at p99 — a gain, not a cost.
 - With the `nested-depth-2` fixture the depth-2 tree renders from the two-step join before the
   `.meta.json` is written and is corrected by it afterwards.
 - The differential invariant of §7.3 is untouched: this unit adds no reducer; every item the
@@ -136,7 +143,7 @@ in the first wave: the composer needs only C5's model and X5, not the renderer.
 
 | Leaf | Owns | Directory | Branch |
 |---|---|---|---|
-| **C6.1 Timeline renderer** | the channel column's list, every item row kind except decisions and sent files, streaming, markdown, clusters, thinking, chips, members, turn summaries, hidden meta, the header's readbacks, S7 | `App/Timeline/Rendering/`, `App/Timeline/ChannelTimelineModel.swift` (from C5) | `child/c6-timeline-renderer` |
+| **C6.1 Timeline renderer** | the channel column's list, every item row kind except decisions and sent files, streaming, markdown, clusters, thinking, chips, members, turn summaries, hidden meta, the header's readbacks, S7 | `App/Timeline/Rendering/`, `App/Timeline/Header/` (the readbacks — amended 2026-09-09 at C6.1's merge: C6.2's `App/Header/` hosts the readout view C6.1 produces), `App/Timeline/ChannelTimelineModel.swift` (from C5) | `child/c6-timeline-renderer` |
 | **C6.2 Composer and channel header** | the composer, the router UI, `@` and `!`, paste and drop, the queue chip, edit via rewind and *Fork from here*, ghost text, the mode, model and effort pickers, the bypass gate, the header's menus and actions, restart-required settings | `App/Composer/`, `App/Header/` | `child/c6-composer` |
 | **C6.3 Decision cards and threads** | the six card kinds and the two dialog cards, their answer mappings, reply-to-card, the Thread tab and its five thread kinds, the consent sheets, the trust banner and its terminal action, the sent-file item, Activity's adoption of the card component | `App/Decisions/`, `App/Threads/`, `App/Consent/` | `child/c6-decisions` |
 | **C6.4 Agents panel** | the Agents tab: the run tree, the per-run transcript over C6.1's view, node actions, *Stop everything* and *Background all*, subagent cards on nodes, chip navigation, item 51's delivery states | `App/Agents/` | `child/c6-agents` |
@@ -252,8 +259,12 @@ coalesces at thirty updates per second into the current message's tail; only the
 is parsed as markdown (block boundaries from the delta stream), the tail as plain text.
 Markdown through Apple's `swift-markdown` into attributed text; the highlighter is the leaf's
 call at grill time (a pure-Swift grammar set is preferred over a JavaScript engine because a
-`WKWebView` per code block is exactly what S7 exists to avoid); tables native; diagrams in a
-lazily created `WKWebView` per block. Clusters labelled from `tool_use_summary`, falling back
+`WKWebView` per code block is exactly what S7 exists to avoid — the leaf chose `PhraseHQ/HighlightKit`,
+MIT, pinned exactly, for token-level fidelity with the engine's highlight.js, behind a live
+unhighlighted fallback); tables native; diagrams **deferred** behind a `TimelineRendering` seam
+with a tracker entry naming mermaid.js 11.16.1 — a ` ```mermaid ` fence renders as a code block,
+as the terminal does (amended 2026-09-09 at C6.1's merge from its Parent revisions). Clusters
+labelled from `tool_use_summary`, falling back
 to counts and elapsed. Thinking as a collapsible with the `system/thinking_tokens` estimate.
 Members per §8.3. Hidden meta (`isSynthetic`) not rendered; the raw view keeps it. Turn
 summary rows; compaction as a divider (§7.3's stated reopen behaviour). The header's
@@ -338,8 +349,10 @@ leaves in one target could settle them.
   files; streaming; markdown; clusters; thinking; agent chips; members; hidden meta; turn
   summaries; compaction divider; the header's readbacks; the S7 spike and its fallback. It
   extends C5's `ChannelTimelineModel` rather than replacing it and fills Y1's registry.
-- **Acceptance:** G1 (required): the ten-message S7 corpus (recorded assistant messages from
-  `Fixtures/`, with tables, nested lists, fenced code, thinking) renders through the native
+- **Acceptance:** G1 (required): the ten-message S7 corpus (invented markdown content — tables,
+  nested lists, fenced code, thinking — at the recorded cadence of `nested-depth-2`; a recorded
+  ten-message corpus is noted for C1's next fixture re-pin and this gate did not wait for it,
+  ruled 2026-09-08 from C6.1's `[parent-impact]`) renders through the native
   path; a harness drives thirty updates per second for sixty seconds and the frame time stays
   under 16 ms at the 99th percentile, measured with `CADisplayLink`/`os_signpost`, or the
   WKWebView fallback is adopted behind `TimelineRendering` with a Revision Note on the parent.
@@ -364,6 +377,16 @@ leaves in one target could settle them.
   double; a path in a permission card emits a `WorkspaceLink` through `links`; `TaskCardView` is
   mounted on `taskRun` and `RetractionRegistry.retains(_:)` is consulted before drawing, with the
   two allowlist lines removed.
+  **Outcome 2026-09-09:** G1–G7 met — S7 as above; G2 on four fixtures (16/31/12/17 items, one row
+  each, both directions over a non-empty floor, clusters labelled and unlabelled, 9 thinking
+  frames duration-only, 3 `isMeta` + 1 `isSynthetic` corpus-wide and none a row, one compaction
+  row, the chip resolving the run's task id on a counting double); G3 one test; G4 seventeen; G5
+  live at zero turns, 107 ms of 5,000, zero unattributed changes; G6 (Y6) five tests; G7 (Y7)
+  four. Floor 1626 at the tip. What the green does not cover, said plainly by the leaf: no
+  chip or disclosure is clicked (reflection cannot enter a `@ViewBuilder`), the nil-tree chip
+  arm has no subject in the scratch history, the differential clause catches a filter dropping a
+  row rather than a builder drawing nothing, and G5 proves the budget on two rows (tracker 132 is
+  the scale item).
 - **Edges:** blocked-by: the Y1 skeleton on `main`; blocks: C6.3 (row slot), C6.4 (view
   reuse); conditional on nothing.
 - **Contracts:** Y1 (fills), Y2 (hosts the card in the `decision` slot and `TaskCardView` on
@@ -373,8 +396,8 @@ leaves in one target could settle them.
 - **Design inheritance:** §8.3 (advisory), §7.3 (binding as consumed), S7 (the spike is the
   leaf's), X4.
 - **Track hint:** controlled. Tracker entries **127–141**.
-- **Status:** not-dispatched, dispatchable on approval of this cut. Worktree
-  `../afleet-c6/timeline-renderer`.
+- **Status:** **merged** 2026-09-09 at `947c7cc` from `child/c6-timeline-renderer` `9e4420f`
+  (95 commits). Worktree `../afleet-c6/timeline-renderer` retired.
 
 ### C6.2: Composer and channel header — plan
 
@@ -584,7 +607,7 @@ recomposition, it is a corrective child of this composite).
 | Leaf | Artifact | Status |
 |---|---|---|
 | Y1 skeleton | landed by the orchestrator on `main` at `5e24f1a` (row registry keyed by `TimelineCategory`, seven leaf directories, Y4's `AgentNavigating` seam) | landed 2026-09-08 |
-| C6.1 Timeline renderer | spec and plan `2026-09-08-c6.1-timeline-renderer.md` on `child/c6-timeline-renderer` (worktree `../afleet-c6/timeline-renderer`) | dispatched 2026-09-08 from `5e24f1a` |
+| C6.1 Timeline renderer | `2026-09-08-c6.1-timeline-renderer.md`; Outcomes in the child spec | **merged** 2026-09-09 at `947c7cc` from `child/c6-timeline-renderer` `9e4420f` (95 commits); G1–G7 met, S7 p99 7.66 ms; floor 1626; tracker 127–141, 321–335, 375–383, 394–397 |
 | C6.2 Composer and header | `2026-09-08-c6.2-composer.md`; Outcomes in the child spec | **merged** 2026-09-08 at `c2dae0f` from `child/c6-composer` `4902242` (72 commits); G1–G5, G7 met, G6 half live and half blocked by organisation policy (manual witness); floor 1336 at the tip; tracker 142–156 (146, 151 closed by `main` correctives; 153 named as Y6; 147, 156 open) and 196–231 from the five-round merge review (208 and 218 closed; 209, 210 and 226 are recomposition items for C3/C4; five panel rounds, twelve waves) |
 | C6.3 Decision cards and threads | `2026-09-08-c6.3-decisions.md`; Outcomes in the child spec | **merged** 2026-09-09 at `0fe2797` from `child/c6-decisions` `79f4a9a` (79 commits); G1–G4 met; G5's prompted half blocked by organisation policy with six turns unspent (manual witness), its zero-turn half live; floor 1463 at the tip; tracker 157–171; the in-timeline row lands when C6.1 merges (Y1's registry) |
 | C6.4 Agents panel | spec and plan `…-c6.4-agents.md` on `child/c6-agents` | blocked-by C6.1, C6.3 |
@@ -658,3 +681,9 @@ Parent-Level Acceptance as written, then the retrospective.
   to the `performLaunch` handover (binds C6.4 identically); the C7.6 conditional edge added; the
   Y1 paragraph records skeleton 2 and the fold. Parent §8.4 corrected in five places with two facts
   added, as C6.3's `[parent-impact]` states them. 
+- 2026-09-09 reconciliation of C6.1 (merge `947c7cc` from `child/c6-timeline-renderer` `9e4420f`,
+  95 commits). S7 met with the margin recorded; readbacks' directory; HighlightKit named and
+  diagrams deferred; G1's corpus wording; the `Agent` tool name confirmed literal (the composite
+  already speaks it). Y2's task-card host and Y7 were applied at C6.3's merge. The pattern the leaf
+  named — state written for a reader that did not exist, four times across the cut — is the
+  recomposition's first check. Three whole-diff panel rounds at merge (19 confirmed with three P1s → 21 P2 → 18 P2, the third the hard stop) and eight fix waves A–H; sixteen standing findings filed as tracker 333–335, 375–383 and 394–397, 397 (readbacks stopping for good after a drain) the first corrective for C6 recomposition.
