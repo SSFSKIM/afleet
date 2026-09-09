@@ -152,7 +152,7 @@ final class SourceControlTabTests: XCTestCase {
 
         await router.open(.commit(Self.hash), from: .currentPanel)
 
-        XCTAssertEqual(host.showing?.deliveryNotice, .noRepository(hash: Self.hash),
+        XCTAssertEqual(host.showing?.deliveryNotice, .notReadable(hash: Self.hash, tool: .git),
                        "the link did not reach the channel the host is showing, hash intact")
         XCTAssertNil(host.poppedOut?.deliveryNotice)
         XCTAssertEqual(host.selections, 1, "the panel was left behind whichever tab was up")
@@ -170,7 +170,7 @@ final class SourceControlTabTests: XCTestCase {
 
         await router.open(.commit(Self.hash), from: .newWindow)
 
-        XCTAssertEqual(host.poppedOut?.deliveryNotice, .noRepository(hash: Self.hash),
+        XCTAssertEqual(host.poppedOut?.deliveryNotice, .notReadable(hash: Self.hash, tool: .git),
                        "the link followed the channel the window happens to be on now")
         XCTAssertNil(host.showing?.deliveryNotice)
         XCTAssertEqual(host.selections, 0,
@@ -188,7 +188,7 @@ final class SourceControlTabTests: XCTestCase {
 
         await router.open(.commit(Self.hash), from: .currentPanel)
 
-        XCTAssertEqual(session.deliveryNotice, .noRepository(hash: Self.hash))
+        XCTAssertEqual(session.deliveryNotice, .notReadable(hash: Self.hash, tool: .git))
     }
 
     /// With a host, the host's answer is the whole answer: nil means this delivery has no channel
@@ -208,6 +208,93 @@ final class SourceControlTabTests: XCTestCase {
                      "a hosted delivery fell back to the session the render path drew")
         XCTAssertEqual(host.selections, 0,
                        "the panel was brought forward for a delivery that opened nothing")
+    }
+
+    // MARK: - 4. G3's successful delivery, routed over a repository that can be read
+    //
+    // The three above prove *which channel* a delivery lands in, over channels that are in no
+    // repository — so every one of them is satisfied by a notice. G3's first clause is the other
+    // half and is about the case the feature exists for: the link selects the commit. It is
+    // routed rather than driven on the model, because "the session selected when someone called
+    // it" is not the claim; the claim is that a link handed to the registry arrives and selects.
+    //
+    // The panel these three route into has already read its repository, which is the state a tab
+    // the user has visited is in. A delivery into a session whose first read has not landed yet is
+    // the model's own race and is proved where the model is.
+
+    /// A `.commit` whose hash is in the loaded window selects that commit and loads its detail.
+    func testACommitLinkRoutedIntoALoadedRepositorySelectsThatCommitAndItsFiles() async throws {
+        let repository = try await GitRepository(tree, name: "routed")
+        let first = try await repository.commit("the first commit", files: ["a.txt": "1\n"])
+        _ = try await repository.commit("the second commit", files: ["a.txt": "2\n", "b.txt": "1\n"])
+        let session = await activatedModel(repository)
+        XCTAssertTrue(session.state.commits.contains { $0.hash == first },
+                      "the hash under test is not in the window this delivery is routed into")
+        let router = LinkRouter(externalOpener: { _ in }, diagnostic: { _ in })
+        let host = StubSourceControlTabHost()
+        let tab = SourceControlTab(host: host)
+        host.showing = session
+        await tab.registerLinkTargets(through: TabRouterCapability(router: router))
+
+        await router.open(.commit(first), from: .currentPanel)
+
+        XCTAssertNil(session.deliveryNotice,
+                     "a delivery into a repository that reads raised a notice instead of selecting")
+        XCTAssertEqual(session.selection, .commit(first),
+                       "the routed link selected nothing, or selected some other row")
+        guard case .commit(let detail)? = session.readout.detail else {
+            return XCTFail("the selected commit's detail was not loaded")
+        }
+        XCTAssertEqual(detail.hash, first, "the detail pane is showing another commit")
+        XCTAssertEqual(session.changes.map(\.path), ["a.txt"],
+                       "the routed selection did not load the commit's own file list")
+        XCTAssertEqual(host.selections, 1, "the commit was selected behind whichever tab was up")
+    }
+
+    /// A hash outside the loaded window is found by the bounded walk, and the window grows to hold
+    /// the row that was selected — over a window deliberately smaller than the history.
+    func testACommitLinkRoutedForAHashOutsideTheWindowIsFoundByPaging() async throws {
+        let repository = try await GitRepository(tree, name: "paged")
+        let oldest = try await repository.commit("the oldest commit", files: ["a.txt": "1\n"])
+        for ordinal in 2...5 {
+            _ = try await repository.commit("commit \(ordinal)", files: ["a.txt": "\(ordinal)\n"])
+        }
+        let session = await activatedModel(repository, windowLimit: 2)
+        XCTAssertEqual(session.state.commits.count, 2, "the window under test is not the bounded one")
+        XCTAssertFalse(session.state.commits.contains { $0.hash == oldest },
+                       "the hash under test is already in the window and nothing would be paged")
+        let router = LinkRouter(externalOpener: { _ in }, diagnostic: { _ in })
+        let host = StubSourceControlTabHost()
+        let tab = SourceControlTab(host: host)
+        host.showing = session
+        await tab.registerLinkTargets(through: TabRouterCapability(router: router))
+
+        await router.open(.commit(oldest), from: .currentPanel)
+
+        XCTAssertNil(session.deliveryNotice, "the bounded walk did not reach the commit")
+        XCTAssertEqual(session.selection, .commit(oldest))
+        XCTAssertTrue(session.state.commits.contains { $0.hash == oldest },
+                      "the row the delivery selected is not in the window the panel draws")
+    }
+
+    /// An abbreviation — what a timeline row is likeliest to carry — resolves by prefix over the
+    /// same route.
+    func testAnAbbreviatedHashRoutedIntoALoadedRepositoryResolvesByPrefix() async throws {
+        let repository = try await GitRepository(tree, name: "abbreviated")
+        let first = try await repository.commit("the first commit", files: ["a.txt": "1\n"])
+        _ = try await repository.commit("the second commit", files: ["a.txt": "2\n"])
+        let session = await activatedModel(repository)
+        let router = LinkRouter(externalOpener: { _ in }, diagnostic: { _ in })
+        let host = StubSourceControlTabHost()
+        let tab = SourceControlTab(host: host)
+        host.showing = session
+        await tab.registerLinkTargets(through: TabRouterCapability(router: router))
+
+        await router.open(.commit(String(first.prefix(8))), from: .currentPanel)
+
+        XCTAssertNil(session.deliveryNotice, "an abbreviation the history holds once was not resolved")
+        XCTAssertEqual(session.selection, .commit(first),
+                       "the prefix selected another row, or none")
     }
 
     /// `LinkRouterCapability` has no per-registration withdrawal, so a released session — or a
@@ -301,12 +388,37 @@ final class SourceControlTabTests: XCTestCase {
     /// Invented, never a hash from any repository the author has (§11).
     private static let hash = "4f1c9a7bd3e05628a1c47bb90f2d6e8137ac54d2"
 
-    /// A model over a directory in no repository and with nothing on `PATH`, so a delivery is
-    /// answered by `.noRepository` — which is the whole of what these tests read: the link arrived,
-    /// with its hash intact.
+    /// A model over a directory with nothing on `PATH`, so its repository cannot be **read** and
+    /// a delivery is answered by `.notReadable` naming `git` — which is the whole of what these
+    /// tests read: the link arrived, in this session and not the other, with its hash intact.
+    ///
+    /// The notice is `.notReadable` and not `.noRepository` because a delivery waits for the
+    /// session's first read before answering (§7): the read happens, `git` does not resolve, and
+    /// §5 keeps "your folder is in no repository" and "`git` failed" apart. A model that answered
+    /// `.noRepository` here would be saying which of the two it was without having looked.
     private func makeModel() -> SourceControlModel {
         SourceControlModel(cwd: tree.root, environment: pathlessEnvironment(),
                            watchesForChanges: false)
+    }
+
+    /// `nonisolated` deliberately: handing a `GitRepository` to a main-actor method merges it into
+    /// the main actor's region, after which every later `await repository.run(…)` is a send the
+    /// compiler rejects.
+    private nonisolated static func environment(_ repository: GitRepository) -> ResolvedEnvironment {
+        ResolvedEnvironment(variables: repository.environment, shell: "/bin/zsh",
+                            capturedAt: Date(timeIntervalSince1970: 1_614_800_000),
+                            mode: .processFallback)
+    }
+
+    /// A model over a real repository that has **already read it** — the state a panel the user
+    /// has visited is in, and the state a delivery that is meant to select has to find.
+    private func activatedModel(_ repository: GitRepository,
+                                windowLimit: Int = GitLog.defaultLimit) async -> SourceControlModel {
+        let model = SourceControlModel(cwd: repository.root,
+                                       environment: Self.environment(repository),
+                                       windowLimit: windowLimit, watchesForChanges: false)
+        await model.activate()
+        return model
     }
 
     /// Builds a tab and its session, registers, and lets both go. Separate so nothing in the

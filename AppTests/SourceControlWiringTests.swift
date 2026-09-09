@@ -8,8 +8,9 @@ import Workbench
 /// C7.7 T8: the lines this leaf adds to the app — the two tabs' registration (spec Design §2,
 /// §11), the one `.commit` target (Design §7) and `AppModel`'s `SourceControlTabHost` conformance.
 ///
-/// Every identifier is invented and every tree is built under the process's temporary directory by
-/// `PanelRig`; no assertion names a path, a repository or a buffer (§6.3, §11).
+/// Every identifier is invented and every tree is built under the process's temporary directory —
+/// by `PanelRig`, or by the test's own `TempTree` where it hands the host a channel of its own; no
+/// assertion names a path, a repository or a buffer (§6.3, §11).
 @MainActor
 final class SourceControlWiringTests: XCTestCase {
 
@@ -18,8 +19,10 @@ final class SourceControlWiringTests: XCTestCase {
     /// repository, which is what the availability rule is for — and the host can build a session
     /// and a view for each without anything else having run first.
     func testTheAppRegistersBothTabsAndBuildsASessionAndViewForEach() throws {
+        let tree = try TempTree()
+        defer { try? FileManager.default.removeItem(at: tree.root) }
         let app = AppModel(registry: RowRegistry())
-        let context = PanelFixtures.context()
+        let context = inertContext(cwd: try tree.directory("channel"))
 
         XCTAssertTrue(app.panels.isRegistered(.sourceControl), "the app model does not hold the Source Control tab")
         XCTAssertTrue(app.panels.isRegistered(.github), "the app model does not hold the GitHub tab")
@@ -147,6 +150,30 @@ final class SourceControlWiringTests: XCTestCase {
                       "a Files pop-out claimed a Source Control delivery")
     }
 
+    /// The channel context the test above hands the host, rooted in **its own** temporary tree and
+    /// with nothing on `PATH`.
+    ///
+    /// Not the shared `PanelFixtures.context()`. Asking the host for these two sessions is no
+    /// longer inert: both tabs' `makeSession` now schedules a read of the channel's directory, and
+    /// the shared fixture names a directory nobody created while carrying a real executable path.
+    /// A suite that pointed that one cwd at an existing repository — which nothing in it forbids —
+    /// would have this test reading, and possibly watching, a repository it does not own, with
+    /// every registration assertion still green. An empty `PATH` resolves no binary, so nothing
+    /// here spawns a process; the fixture stays as it is for the suites that share it.
+    private func inertContext(cwd: URL, key: ChannelKey = PanelFixtures.key(0)) -> ChannelContext {
+        ChannelContext(key: key,
+                       session: key.session,
+                       cwd: cwd,
+                       environment: ResolvedEnvironment(
+                           variables: ["PATH": ""], shell: "/bin/zsh",
+                           capturedAt: Date(timeIntervalSince1970: 1_614_800_000),
+                           mode: .processFallback),
+                       store: WiringUnusedStore(),
+                       links: WiringUnusedLinks(),
+                       recentURLs: WiringUnusedFeed(),
+                       reportPaneExit: { _ in })
+    }
+
     /// An invented forty-character hash. It names no commit in any repository, which is what makes
     /// the notice above the deterministic answer (§11).
     private static let hash = "0123456789abcdef0123456789abcdef01234567"
@@ -163,4 +190,24 @@ final class SourceControlWiringTests: XCTestCase {
         XCTFail("the tabs registered in the initialiser never registered their link targets",
                 file: file, line: line)
     }
+}
+
+/// The capabilities the context above carries. This suite is about registration, sessions and
+/// views; none of the three is read, and each answers nothing rather than reaching anywhere.
+private struct WiringUnusedStore: ScopedStore {
+    func read<T: Codable & Sendable>(_ type: T.Type, key: String) async throws -> T? { nil }
+    func write<T: Codable & Sendable>(_ value: T, key: String) async throws {}
+    func remove(key: String) async throws {}
+    func keys() async throws -> [String] { [] }
+}
+
+private struct WiringUnusedLinks: LinkRouterCapability {
+    func register(_ target: LinkTarget) async {}
+    func unregister(tab: PanelTabID) async {}
+    func open(_ link: WorkspaceLink, from destination: LinkDestination) async {}
+}
+
+private struct WiringUnusedFeed: RecentURLFeed {
+    func current(limit: Int) async -> [SeenURL] { [] }
+    var updates: AsyncStream<[SeenURL]> { AsyncStream { $0.finish() } }
 }

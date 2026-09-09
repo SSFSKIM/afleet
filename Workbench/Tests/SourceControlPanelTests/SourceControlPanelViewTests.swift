@@ -17,6 +17,7 @@ import CoreGraphics
 import Foundation
 import XCTest
 import AfleetCore
+import LinkRouting
 import PanelHostAPI
 import SourceControlCore
 @testable import SourceControlPanel
@@ -627,6 +628,91 @@ final class SourceControlPanelViewTests: XCTestCase {
 
     // MARK: - 5. G4 at the view layer (§9.2 binding)
 
+    // MARK: - G1.4: the click, through a real registry, to the tab that owns `.diff`
+
+    /// C7.5's Files target as far as this leaf can see it: it claims `.diff` and records what it
+    /// was handed.
+    ///
+    /// A **recording target on a real `LinkRouter`** and not a capability double, because the
+    /// double answers `open` itself and so passes whether or not a receiving target exists: a
+    /// panel that withdrew `.files` a line before emitting still satisfies it, and in the app that
+    /// click opens no diff. What C7.5's own target then draws is proved at C7.5 (its G3), and this
+    /// leaf imports no panel.
+    private func recordingDiffTarget(into received: ReceivedLinks) -> LinkTarget {
+        LinkTarget(tab: .files, specificity: 60,
+                   handles: { link in
+                       if case .diff = link { return true }
+                       return false
+                   },
+                   open: { link, destination in received.record(link, destination) })
+    }
+
+    /// Clicking a file in the **working tree's** list: the control the row draws is performed, and
+    /// what arrives at the registered target is the working-tree diff of that path.
+    func testClickingAWorkingTreeFileReachesTheDiffTargetThroughARealRouter() async throws {
+        let tree = try ScratchTree()
+        defer { tree.remove() }
+        let repository = try await detailRepository(tree)
+        let router = LinkRouter(externalOpener: { _ in }, diagnostic: { _ in })
+        let received = ReceivedLinks()
+        await router.register(recordingDiffTarget(into: received))
+        let session = model(root: repository.root, environment: Self.environment(repository),
+                            links: TabRouterCapability(router: router))
+        await session.activate()
+        await session.selectWorkingTree()
+        let root = try XCTUnwrap(session.state.root, "the fixture's repository did not read")
+        let rows = SourceControlPanelView
+            .detailPresentation(for: try XCTUnwrap(session.readout.detail)).files
+        let row = try XCTUnwrap(rows.first { $0.path == "README.md" },
+                                "the working tree's list has no row for the modified file")
+        let control = try XCTUnwrap(SourceControlPanelView.control(for: row),
+                                    "a modified file offers no diff to click")
+
+        await control.perform(on: session)
+
+        XCTAssertEqual(received.links.count, 1,
+                       "the click reached no registered target, or reached more than one")
+        XCTAssertEqual(received.links.first?.link,
+                       .diff(DiffRef(repository: root, path: "README.md",
+                                     base: .workingTreeAgainstHEAD)),
+                       "the link that arrived is not this row's working-tree diff")
+        XCTAssertEqual(received.links.first?.destination, .currentPanel)
+    }
+
+    /// Clicking a file in a **commit's** list carries that commit's base, and a Cmd-click carries
+    /// its own destination — both over the same real registry (§9.4).
+    func testClickingACommitsFileReachesTheDiffTargetWithThatCommitsBase() async throws {
+        let tree = try ScratchTree()
+        defer { tree.remove() }
+        let repository = try await detailRepository(tree)
+        let router = LinkRouter(externalOpener: { _ in }, diagnostic: { _ in })
+        let received = ReceivedLinks()
+        await router.register(recordingDiffTarget(into: received))
+        let session = model(root: repository.root, environment: Self.environment(repository),
+                            links: TabRouterCapability(router: router))
+        await session.activate()
+        let root = try XCTUnwrap(session.state.root, "the fixture's repository did not read")
+        let hash = try XCTUnwrap(session.readout.rows.compactMap(\.commit)
+                                    .first { $0.subject == "the first commit" }?.hash,
+                                 "the fixture's own first commit is not on screen")
+        await session.select(commit: hash)
+        let rows = SourceControlPanelView
+            .detailPresentation(for: try XCTUnwrap(session.readout.detail)).files
+        let row = try XCTUnwrap(rows.first { $0.path == "README.md" },
+                                "the commit's list has no row for the file it added")
+        let control = try XCTUnwrap(SourceControlPanelView.control(for: row))
+
+        await control.perform(on: session, from: .newWindow)
+
+        XCTAssertEqual(received.links.count, 1, "the click reached no registered target")
+        XCTAssertEqual(received.links.first?.link,
+                       .diff(DiffRef(repository: root, path: "README.md",
+                                     base: .commitAgainstParent(hash))),
+                       "the link that arrived does not name the selected commit's own base")
+        XCTAssertEqual(received.links.first?.destination, .newWindow,
+                       "a Cmd-click asked for a window of its own and the link did not say so")
+    }
+
     /// Every control either view offers is one of its readout's actions, and every action the
     /// readout declares is offered by some surface of the view.
     ///
@@ -697,6 +783,312 @@ final class SourceControlPanelViewTests: XCTestCase {
                        "each listed pull request offers exactly one way to open it")
     }
 
+    // MARK: - 6. G4 at the surface itself: the one door, over the view sources (§9.2, binding)
+
+    /// **No interactive element in either view file acts except through a `Control`.**
+    ///
+    /// The two tests above read `controls(for:)`, which is a *helper's* list. A `Button` written
+    /// straight into a body, with no `Control` behind it, leaves both of them green while a
+    /// forbidden action sits on the user's screen — and §9.2 is binding, so the gate cannot rest
+    /// there. A SwiftUI body is not a value this device can read, so the surface is asserted where
+    /// it is written: over the two files' own source text, reached through `#filePath`.
+    ///
+    /// Four things are asserted of each file, and each of them can fail:
+    ///
+    /// 1. every call this file makes on the session lies inside `Control.perform`;
+    /// 2. every interactive element's action closure calls `perform`;
+    /// 3. every `perform` this file declares takes or stores a `Control` — which is what makes 2
+    ///    mean the door and not a coincidence of spelling;
+    /// 4. no element outside a reader's vocabulary is named at all, and the one command-click
+    ///    gesture is the pinned line that forwards its modifier's own action.
+    ///
+    /// It **fails when it scans nothing**: an unreadable file throws, and a file with no session
+    /// call or no interactive element in it is a scan that asserted nothing and says so.
+    func testNeitherViewFileActsOnTheSessionOutsideTheControlDoor() throws {
+        var scanned: [(name: String, calls: Int, elements: Int)] = []
+        for name in PanelViewSource.files {
+            let source = try PanelViewSource.read(name)
+            let door = try XCTUnwrap(source.controlDoor(),
+                                     "\(name) declares no single Control.perform, so this scan has "
+                                     + "no door to measure anything against")
+
+            let calls = source.sessionCallSites()
+            XCTAssertFalse(calls.isEmpty,
+                           "\(name): no call on the session was found at all — the scan asserted "
+                           + "nothing rather than passing")
+            for site in calls where !door.body.contains(site) {
+                XCTFail("\(name):\(source.line(at: site)) calls a method on the session outside "
+                        + "Control.perform")
+            }
+
+            let elements = source.interactiveElements()
+            XCTAssertFalse(elements.isEmpty,
+                           "\(name): no interactive element was found at all — the scan asserted "
+                           + "nothing rather than passing")
+            for element in elements {
+                guard let body = source.actionClosure(after: element.index) else {
+                    XCTFail("\(name):\(source.line(at: element.index)) builds a \(element.token) "
+                            + "whose action this scan could not read")
+                    continue
+                }
+                XCTAssertTrue(body.contains("perform("),
+                              "\(name):\(source.line(at: element.index)) builds a \(element.token) "
+                              + "that acts without a Control")
+            }
+
+            for site in source.performDeclarations() where site != door.declaration {
+                XCTAssertTrue(source.trimmedLine(at: site).contains("Control"),
+                              "\(name):\(source.line(at: site)) declares a `perform` that is not "
+                              + "about a Control, so an element could act through it")
+            }
+
+            for token in PanelViewSource.forbiddenElements {
+                guard let first = source.occurrences(of: token).first else { continue }
+                XCTFail("\(name):\(source.line(at: first)) offers `\(token)`, which no Control "
+                        + "builds and no reader needs")
+            }
+            let gestures = source.occurrences(of: "simultaneousGesture")
+            XCTAssertEqual(gestures.map(source.trimmedLine(at:)),
+                           [PanelViewSource.commandClickLine],
+                           "\(name) attaches a gesture this gate has not read: the only one it "
+                           + "admits is the command-click that forwards its modifier's own action")
+
+            scanned.append((name, calls.count, elements.count))
+        }
+
+        XCTAssertEqual(scanned.map(\.name), PanelViewSource.files,
+                       "the gate scanned "
+                       + scanned.map { "\($0.name): \($0.calls) session calls, "
+                                     + "\($0.elements) interactive elements" }
+                                .joined(separator: "; ")
+                       + " — not both view files")
+    }
+
+}
+
+/// One of this panel's two view files, read as text for the gate above.
+///
+/// Line comments are blanked **in place** rather than removed, so a sentence in a doc comment can
+/// neither trip an assertion nor satisfy one while every offset — and so every line number this
+/// type reports — stays the file's own. Nothing here ever puts a path in an assertion: a finding
+/// names a file by its own name and a line number (§6.3, §11).
+struct PanelViewSource {
+
+    /// The files this gate is about. Both are C7.7's; no other target is read.
+    static let files = ["SourceControlPanelView.swift", "GitHubPanelView.swift"]
+
+    /// Elements a reader has no use for. Not "everything SwiftUI can do" — a list that tried to be
+    /// that would be a list of what was thought of — but every element that *originates* an action
+    /// or an edit and that neither view builds today, so adding one is a decision this gate makes
+    /// someone take deliberately.
+    static let forbiddenElements = [
+        "Toggle(", "TextField(", "SecureField(", "TextEditor(", "Picker(", "DatePicker(",
+        "ColorPicker(", "Stepper(", "Slider(", "Menu(", "NavigationLink(", "Link(",
+        ".contextMenu", ".onTapGesture", ".onLongPressGesture", ".onSubmit", ".onKeyPress",
+        ".draggable", ".dropDestination", ".onDrag", ".onDrop", ".swipeActions",
+    ]
+
+    /// The one gesture either file attaches, pinned: it forwards the action its modifier was
+    /// handed, and the use sites of that modifier are interactive elements the scan checks like
+    /// any other.
+    static let commandClickLine =
+        "content.simultaneousGesture(TapGesture().modifiers(.command).onEnded(action))"
+
+    /// What the door is: the declaration of `Control.perform` and the byte range of its body.
+    struct Door {
+        let declaration: Int
+        let body: Range<Int>
+    }
+
+    /// An element that originates an action, and the token the finding names it by.
+    struct Element {
+        let token: String
+        let index: Int
+    }
+
+    let name: String
+    private let characters: [Character]
+
+    enum ScanFailure: Error, CustomStringConvertible {
+        case unreadable(String)
+
+        var description: String {
+            switch self {
+            case .unreadable(let name):
+                return "\(name) was not readable beside this test's own sources, so G4's surface "
+                     + "scan asserted nothing"
+            }
+        }
+    }
+
+    /// Reads `name` out of the package this test file itself lives in: the test file is at
+    /// `Workbench/Tests/SourceControlPanelTests/`, and the sources three levels up at
+    /// `Workbench/Sources/SourceControlPanel/`.
+    static func read(_ name: String, testFile: StaticString = #filePath) throws -> PanelViewSource {
+        let workbench = URL(filePath: "\(testFile)")
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let url = workbench.appending(path: "Sources/SourceControlPanel/\(name)")
+        guard let raw = try? String(contentsOf: url, encoding: .utf8), !raw.isEmpty else {
+            throw ScanFailure.unreadable(name)
+        }
+        return PanelViewSource(name: name, characters: Array(Self.blankingLineComments(raw)))
+    }
+
+    private init(name: String, characters: [Character]) {
+        self.name = name
+        self.characters = characters
+    }
+
+    /// Replaces every `//` tail with spaces, leaving the newlines and every offset in place.
+    private static func blankingLineComments(_ raw: String) -> String {
+        var out = ""
+        var inString = false
+        var escaped = false
+        var inComment = false
+        var previous: Character?
+        for character in raw {
+            if inComment {
+                out.append(character == "\n" ? character : " ")
+                if character == "\n" { inComment = false }
+                previous = character
+                continue
+            }
+            if inString {
+                out.append(character)
+                if escaped { escaped = false } else if character == "\\" { escaped = true }
+                else if character == "\"" { inString = false }
+                previous = character
+                continue
+            }
+            if character == "\"" { inString = true; out.append(character); previous = character; continue }
+            if character == "/", previous == "/" {
+                out.removeLast()
+                out.append("  ")
+                inComment = true
+                previous = character
+                continue
+            }
+            out.append(character)
+            previous = character
+        }
+        return out
+    }
+
+    // MARK: - reading it
+
+    /// Every index at which `token` occurs.
+    func occurrences(of token: String) -> [Int] {
+        let needle = Array(token)
+        guard !needle.isEmpty, characters.count >= needle.count else { return [] }
+        return (0...(characters.count - needle.count)).filter { start in
+            !zip(needle.indices, needle).contains { characters[start + $0.0] != $0.1 }
+        }
+    }
+
+    /// The one-based line `index` falls on.
+    func line(at index: Int) -> Int {
+        characters[..<min(index, characters.count)].reduce(1) { $1 == "\n" ? $0 + 1 : $0 }
+    }
+
+    /// The whole line `index` falls on, trimmed. It is this repository's own source and never a
+    /// byte a tool printed.
+    func trimmedLine(at index: Int) -> String {
+        var start = min(index, characters.count - 1)
+        while start > 0, characters[start - 1] != "\n" { start -= 1 }
+        var end = start
+        while end < characters.count, characters[end] != "\n" { end += 1 }
+        return String(characters[start..<end]).trimmingCharacters(in: .whitespaces)
+    }
+
+    /// `Control.perform`: the one place either file is allowed to call the session.
+    func controlDoor() -> Door? {
+        let declarations = occurrences(of: "func perform(on session:")
+        guard declarations.count == 1, let declaration = declarations.first,
+              let body = bracedBody(after: declaration) else { return nil }
+        return Door(declaration: declaration, body: body)
+    }
+
+    /// Every index at which this file calls a method on the session — `session.<name>(`. A
+    /// property read (`session.readout`) is not one: the parenthesis is what makes it a call.
+    func sessionCallSites() -> [Int] {
+        occurrences(of: "session.").filter { start in
+            if start > 0, Self.isIdentifier(characters[start - 1]) { return false }
+            var index = start + "session.".count
+            var sawName = false
+            while index < characters.count, Self.isIdentifier(characters[index]) {
+                sawName = true
+                index += 1
+            }
+            guard sawName else { return false }
+            while index < characters.count, characters[index] == " " { index += 1 }
+            return index < characters.count && characters[index] == "("
+        }
+    }
+
+    /// Every element in this file that originates an action: a `Button`, and a use of one of the
+    /// command-click view modifiers.
+    func interactiveElements() -> [Element] {
+        let buttons = occurrences(of: "Button").filter { start in
+            if start > 0, Self.isIdentifier(characters[start - 1]) { return false }
+            let after = start + "Button".count
+            return after >= characters.count || !Self.isIdentifier(characters[after])
+        }
+        return (buttons.map { Element(token: "Button", index: $0) }
+                + occurrences(of: ".modifier(").map { Element(token: ".modifier", index: $0) })
+            .sorted { $0.index < $1.index }
+    }
+
+    /// Every declaration of something named `perform` — a function or a stored closure.
+    func performDeclarations() -> [Int] {
+        (occurrences(of: "func perform") + occurrences(of: "let perform")
+            + occurrences(of: "var perform")).sorted()
+    }
+
+    /// The body of the action closure an element opens, or nil when there is none within reach —
+    /// which is a finding and not a pass: an element whose action this scan cannot read is one it
+    /// cannot vouch for.
+    func actionClosure(after index: Int) -> String? {
+        var start = index
+        let bound = min(characters.count, index + Self.actionReach)
+        while start < bound, characters[start] != "{" { start += 1 }
+        guard start < bound, let body = bracedBody(after: start - 1) else { return nil }
+        return String(characters[body])
+    }
+
+    /// How far past an element's name its action closure may open. A `Button(label)` opens one on
+    /// the same line and a `Button {` opens one immediately; nothing legitimate here is further.
+    private static let actionReach = 200
+
+    /// The `{ … }` that follows `index`, brace-matched, ignoring braces inside string literals.
+    private func bracedBody(after index: Int) -> Range<Int>? {
+        var cursor = index + 1
+        while cursor < characters.count, characters[cursor] != "{" { cursor += 1 }
+        guard cursor < characters.count else { return nil }
+        let start = cursor + 1
+        var depth = 0
+        var inString = false
+        var escaped = false
+        while cursor < characters.count {
+            let character = characters[cursor]
+            if inString {
+                if escaped { escaped = false } else if character == "\\" { escaped = true }
+                else if character == "\"" { inString = false }
+            } else if character == "\"" {
+                inString = true
+            } else if character == "{" {
+                depth += 1
+            } else if character == "}" {
+                depth -= 1
+                if depth == 0 { return start..<cursor }
+            }
+            cursor += 1
+        }
+        return nil
+    }
+
+    private static func isIdentifier(_ character: Character) -> Bool {
+        character.isLetter || character.isNumber || character == "_"
+    }
 }
 
 /// `git` for real and `gh` from a script, so this file's GitHub tests never touch the machine's
