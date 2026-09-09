@@ -47,6 +47,27 @@ public final class TerminalSessionRegistry {
         endPanes(of: released)
     }
 
+    /// How many panes still hold a live child, per channel — a value, taken now, with no lifecycle
+    /// in it at all.
+    ///
+    /// It exists because §7.4's *Quit* is built from the fleet, and a shell pane has no fleet entry:
+    /// a pane running a command is afleet's own child (§7.8 is about a session in the user's own
+    /// terminal, which no pane ever holds), and the exit closes its pty descriptor whether or not
+    /// anybody was told. So the quit clause asks here, beside the fleet's own "busy", and the two
+    /// facts stay separate — a pane is not folded into the fleet and does not become a channel's
+    /// business.
+    ///
+    /// Channels with nothing live are left out, so an empty answer means exactly "no pane holds a
+    /// child". Counts and keys only; no title and no command line (§11).
+    public func livePanes() -> [LivePaneCount] {
+        entries.compactMap { key, entry in
+            guard let session = entry.session else { return nil }
+            let live = session.panes.filter(\.hasLiveChild).count
+            guard live > 0 else { return nil }
+            return LivePaneCount(key: key, panes: live)
+        }
+    }
+
     /// Returns once a release's pane teardown has landed. Tests await it; nothing in the app does.
     public func settleRelease() async {
         await releasing?.value
@@ -110,5 +131,22 @@ public final class TerminalSessionRegistry {
     private func updateRetention(of session: TerminalPanelSession, for key: ChannelKey) {
         guard entries[key]?.session === session else { return }
         entries[key]?.retained = session.panes.isEmpty ? nil : session
+    }
+}
+
+/// One channel's still-running panes, as ``TerminalSessionRegistry/livePanes()`` reports them.
+///
+/// A value and not a session reference: the one caller outside this leaf is a quit dialog deciding
+/// whether to ask, and handing it a live object would let it reach a pane's lifecycle from a place
+/// that has no business ending one.
+public struct LivePaneCount: Sendable, Hashable {
+    public let key: ChannelKey
+    /// How many of that channel's panes still hold a child. Never zero — a channel with none is
+    /// simply absent from the answer.
+    public let panes: Int
+
+    public init(key: ChannelKey, panes: Int) {
+        self.key = key
+        self.panes = panes
     }
 }

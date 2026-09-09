@@ -25,6 +25,66 @@ final class TerminalSessionRegistryTests: XCTestCase {
         return PaneTestContext.fixture(session: SessionID(), cwd: directory)
     }
 
+    // MARK: - The live-pane census (tracker 354)
+
+    /// §7.4's *Quit* is built from the fleet, and a shell pane has no fleet entry: the census is
+    /// the second fact the quit dialog reads, so what it counts has to be the child and not the
+    /// pane.
+    func testTheCensusCountsAChannelsRunningPanes() async throws {
+        let registry = TerminalSessionRegistry()
+        let fixture = try fixture()
+        let session = registry.session(for: fixture.context)
+        session.openShellPane()
+        session.openShellPane()
+
+        let live = registry.livePanes()
+
+        XCTAssertEqual(live.count, 1, "\(live.count) channel(s) were reported; 1 had running panes")
+        XCTAssertEqual(live.first?.panes, 2, "\(live.first?.panes ?? 0) of 2 running panes were counted")
+
+        for pane in session.panes { await session.close(pane) }
+    }
+
+    /// **A pane whose child has already exited counts as nothing.** The pane is still in the stack —
+    /// it shows its exit code and offers a restart — and there is nothing left to warn a quitting
+    /// user about. A census that counted panes rather than children would put the dialog on screen
+    /// over a shell that ended half an hour ago.
+    ///
+    /// Deliberate break: count `session.panes.count`.
+    func testAPaneWhoseChildAlreadyExitedCountsAsNothing() async throws {
+        let registry = TerminalSessionRegistry()
+        let fixture = try fixture()
+        let session = registry.session(for: fixture.context)
+        let request = PaneRequest(
+            executable: URL(filePath: "/bin/sh"),
+            arguments: ["-c", "exit 0"],
+            cwd: fixture.cwd,
+            environment: ["PATH": "/usr/bin:/bin"],
+            purpose: .hatch(SessionID())
+        )
+        let pane = session.run(request)
+        try await PaneTestChild.waitUntil(seconds: 10, "child-ended") { !pane.hasLiveChild }
+
+        let live = registry.livePanes()
+
+        XCTAssertEqual(session.panes.count, 1, "the exited pane left the stack, so the census is not being discriminated")
+        XCTAssertEqual(live.count, 0, "\(live.count) channel(s) were reported live with no child left anywhere")
+
+        for pane in session.panes { await session.close(pane) }
+    }
+
+    /// A channel whose session holds no pane at all is simply absent, so an empty answer means
+    /// exactly "nothing is running".
+    func testAChannelWithNoPanesIsAbsentFromTheCensus() throws {
+        let registry = TerminalSessionRegistry()
+        let fixture = try fixture()
+        let session = registry.session(for: fixture.context)
+
+        XCTAssertEqual(registry.livePanes().count, 0,
+                       "\(registry.livePanes().count) channel(s) were reported with no pane open")
+        XCTAssertEqual(session.panes.count, 0, "the session opened a pane by itself")
+    }
+
     func testTheSameChannelGetsTheSameSessionWhileItIsHeld() throws {
         let registry = TerminalSessionRegistry()
         let fixture = try fixture()

@@ -3488,7 +3488,19 @@ four whole-branch review rounds.
     caller that cannot name a cwd still refuses. Recorded because the dependency is not obvious
     from the seam's shape and the next caller will meet it. Closer: `run(_:for:)` taking the cwd, or
     the host resolving a channel through the fleet's own row. Owner: C7.4 with C5.
-354. **Quit does not know a Terminal pane is running.** `QuitGuard.forApp` is built from the fleet
+354. **Closed 2026-09-09 by corrective `e90c626` on `main`.** The quit guard now reads a second
+    fact beside the fleet's: `TerminalSessionRegistry.livePanes()` answers, by value and per
+    channel, how many panes still hold a *live child* — a pane whose child exited counts as
+    nothing — and `QuitTerminalPanes` puts that answer wherever §7.4's census is taken, so either
+    fact alone raises the dialog. The sentence names the panes by count (§11) and its advice is
+    corrected: *Open in terminal* keeps a conversation only in a terminal outside afleet, because a
+    pane inside it goes when afleet does. On a confirmed quit the panes are torn down through the
+    registry's own `release()`, awaited, in the same barrier that drains the panels — after the
+    terminations and before the shutdown — so a child is hung up by the path that also reports its
+    exit rather than by the exit dropping a descriptor. The fleet's "busy" is unchanged and no pane
+    became a channel; `PanelHostAPI` was not touched. The original entry:
+
+    **Quit does not know a Terminal pane is running.** `QuitGuard.forApp` is built from the fleet
     and the composers; `FleetQuitTermination.quitChannels` filters to owned channels, and a shell
     pane has no fleet entry at all. So §7.4's Quit asks about turns and background tasks and says
     nothing about a pane with a live child, app termination closes the pty descriptors without
@@ -3617,6 +3629,20 @@ four whole-branch review rounds.
      panel itself reports, which is an X7 amendment and the architect's ruling to make.
      Filed by the `corrective/350-composer-keys-stand-down` corrective on `main`, 2026-09-09.
      Owner: C5, with C7.4 as the consumer that would notice first.
+
+409. **A hatch pane's exit at quit reaches a lifecycle that is already ending.** Tracker 354 put the
+    pane teardown after the termination passes and before the shutdown, which is where a pane in a
+    channel that has just ended should be closed. A `PaneRequest` pane still reports its one
+    `PaneExit` from there — `TerminalPanelSession.tearDown()` owes it whatever the reason for the
+    teardown — so a hatch pane's exit asks C4 to re-adopt a channel the pass has just quit, moments
+    before `shutdown()`. Harmless: the re-adoption changes an in-memory state nobody reads again, a
+    relaunch re-evaluates every channel from the registry, and no state on disk is touched. Filed
+    because the ordering looks wrong on first reading and the next person to move either half should
+    know it was chosen: the alternative — tearing panes down *before* the terminations — closes a
+    pane while its channel is still live, which is the case the ordering exists to avoid. Closer:
+    nothing, unless a future clause makes the exit observable after the shutdown begins, at which
+    point the teardown should suppress the re-adoption report for a quit. Owner: C6.2's `QuitGuard`
+    with C7.4.
 
 ## From C7.7 (Source Control and GitHub panel, `child/c7-scm-panel`)
 
