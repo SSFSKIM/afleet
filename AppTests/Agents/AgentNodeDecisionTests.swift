@@ -24,6 +24,9 @@ final class AgentNodeDecisionTests: XCTestCase {
     private static let runID: AgentRunID = "task_invented_agent_01"
     private static let siblingID: AgentRunID = "task_invented_agent_02"
     private static let requestID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaab7"
+    /// A second waiting request on the same run. Invented, and different from the first in one
+    /// nibble, so a card that keyed on anything but the whole id would still tell them apart.
+    private static let secondRequestID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaab8"
 
     // MARK: - The card is the shared component (Y2)
 
@@ -97,6 +100,39 @@ final class AgentNodeDecisionTests: XCTestCase {
                       "a settled request is still drawn as a card")
         XCTAssertEqual(rig.model.read.content(of: Self.runID)?.waitingCount, 0,
                        "the waiting badge still counts a request that has been answered")
+    }
+
+    /// **Two requests waiting on one run are two cards, each keyed by its own request.**
+    ///
+    /// The failure this is about is not a card going missing. An offset is a position and not a
+    /// subject: answer the first request from Activity and the array shortens, so the card that was
+    /// second takes over the first's identity — and with it the `@State` behind the deny field and
+    /// the destination its answer goes to. The user finishes typing a refusal for one request and
+    /// sends it as the answer to another.
+    func testTwoWaitingRequestsAreTwoCardsKeyedByTheirOwnRequest() throws {
+        let rig = try Rig()
+        rig.wait(on: Self.runID)
+        rig.wait(on: Self.runID, request: Self.secondRequestID)
+
+        let drawn = try XCTUnwrap(Self.decisions(of: Self.runID, in: rig), "the node drew no cards")
+        XCTAssertEqual(drawn.cards.count, 2, "the node drew \(drawn.cards.count) card(s) for 2 waiting requests")
+        let ids = Set(drawn.cards.map(\.card.requestID))
+        XCTAssertEqual(ids.count, 2, "the node's \(drawn.cards.count) card(s) are for \(ids.count) distinct request(s)")
+        XCTAssertTrue(ids == [RequestID(rawValue: Self.requestID), RequestID(rawValue: Self.secondRequestID)],
+                      "the node drew a card for a request the engine is not waiting on for this run")
+        XCTAssertEqual(rig.model.read.content(of: Self.runID)?.waitingCount, 2,
+                       "the node's waiting badge does not count both requests")
+
+        // The identity itself, checked against the source: `ForEach`'s key path is stored inside an
+        // id generator that reflection does not reach, so the claim "keyed by the request" is
+        // checked where it is written — the shape this suite already uses for the confirm dialog's
+        // wiring, and for the same reason.
+        let host = try XCTUnwrap(try AgentNodeActionTests.agentSources().first { $0.name == "AgentNodeDecisions.swift" },
+                                 "the node's card host no longer lives where the check looks")
+        XCTAssertTrue(host.code.contains(#"ForEach(cards, id: \.card.requestID)"#),
+                      "the node's cards are not keyed by the request the engine is waiting on")
+        XCTAssertFalse(host.code.contains("enumerated()"),
+                       "the node's cards are keyed by their position in an array")
     }
 
     // MARK: - The app's one reservation set (Y7)
@@ -249,9 +285,9 @@ final class AgentNodeDecisionTests: XCTestCase {
         /// with an invented payload renders as `.unmodelled` and answers nothing — which would make
         /// every assertion below vacuous. `agentID` is set here because a test tree has no reducer to
         /// set it from the payload.
-        func wait(on run: AgentRunID) {
+        func wait(on run: AgentRunID, request id: String = AgentNodeDecisionTests.requestID) {
             guard let request = try? FixtureRunner.request("permission-allow", subtype: "can_use_tool",
-                                                            id: AgentNodeDecisionTests.requestID),
+                                                            id: id),
                   var item = DecisionItem(surfacing: request, in: key) else { return }
             item.agentID = run
             published.timeline.overlay.decisions[item.requestID] = item

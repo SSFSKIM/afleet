@@ -54,7 +54,13 @@ struct AgentNodeDecisions: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            ForEach(Array(cards.enumerated()), id: \.offset) { _, card in
+            // **Keyed by the request id and never by the offset in the array.** Two requests can be
+            // waiting on one run, and an offset is a position rather than a subject: answering the
+            // first from another surface shortens the array, and the card that was second inherits
+            // the identity — and with it the `@State` behind the deny field and the destination the
+            // answer goes to — of the card that has just left. Every other host of this component
+            // keys by the request for the same reason.
+            ForEach(cards, id: \.card.requestID) { card in
                 VStack(alignment: .leading, spacing: 2) {
                     Text(label).font(.caption).foregroundStyle(.secondary)
                     card
