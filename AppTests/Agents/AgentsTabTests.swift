@@ -1,0 +1,147 @@
+import Foundation
+import SwiftUI
+import XCTest
+import AfleetCore
+import ClaudeWire
+import FleetKit
+import PanelHostAPI
+@testable import Afleet
+
+/// C6.4 Task 2: the Agents tab, its per-channel session and its `/agents` command target.
+///
+/// The tab is built here the way `performLaunch` builds it — the app's one registry reached through
+/// a closure, the app's one selection store handed in — which is the shape `ThreadTabTests` takes
+/// for the same reason: what is under test is the tab, and a full launch adds a binary probe, a
+/// version gate and a sign-in gate, none of which says anything about §8.8.
+///
+/// Every identifier is invented (§11) and nothing here writes anything (X9).
+@MainActor
+final class AgentsTabTests: XCTestCase {
+
+    // MARK: - Registration and availability (child spec D10)
+
+    /// `.agents` is a tab the host offers, and it offers it for a channel with a live fold **and**
+    /// for one with none.
+    ///
+    /// Both halves matter and neither implies the other: `isRegistered` says an id is taken, and
+    /// `available(for:)` is what the panel column draws, which additionally asks the tab whether it
+    /// can render this channel. A tab that hid itself for a channel with no tree would leave the
+    /// user with no way to ask — and no way to be told which of the two empty states is true.
+    func testTheTabIsRegisteredAndAvailableForEveryChannel() async throws {
+        let rig = try await PanelRig(channels: 1)
+        let store = AgentSelectionStore()
+        try rig.host.register(AgentsTab(timelines: { [rig] key in rig.timelines.model(for: key).timeline },
+                                        selection: store))
+
+        XCTAssertTrue(rig.host.isRegistered(.agents), "no tab holds .agents after the registration")
+        XCTAssertEqual(rig.host.title(for: .agents), PanelTabID.agents.defaultTitle,
+                       "the registered tab is not the Agents tab's own")
+
+        let owned = try XCTUnwrap(rig.host.context(for: rig.keys[0], cwd: PanelFixtures.cwd),
+                                  "the host built no context for the channel it owns")
+        XCTAssertTrue(rig.host.available(for: owned).contains(.agents),
+                      "the host does not offer .agents to a channel with a fold")
+
+        // A channel the host has no fold for at all — every archived and every foreign session,
+        // which is most of what this app lists.
+        let foreign = PanelFixtures.context(PanelFixtures.key(41))
+        XCTAssertTrue(rig.host.available(for: foreign).contains(.agents),
+                      "the host does not offer .agents to a channel with no fold")
+
+        // And the pane it makes for that channel states the *no-wire* fact rather than "no runs".
+        let session = rig.host.session(for: .agents, context: foreign)
+        let model = try XCTUnwrap(session as? AgentsModel, "the tab made something other than its own session")
+        XCTAssertEqual(model.read.state, .noWire,
+                       "a channel with no fold reads as a channel that simply has no runs")
+    }
+
+    // MARK: - The session the host retains (X7)
+
+    /// The host answers the same `AgentsModel` for one channel after another channel's session was
+    /// built, and two channels never share one.
+    ///
+    /// Discriminating: this is X7's whole reason for sessions. A tab keeping the open run and the
+    /// disclosure set in SwiftUI `@State` passes every other assertion in this file and loses both
+    /// on every channel switch, because SwiftUI discards `@State` when the subtree unmounts.
+    func testTheSessionIsRetainedAcrossAChannelSwitch() throws {
+        let host = PanelHostModel()
+        let store = AgentSelectionStore()
+        try host.register(AgentsTab(timelines: { _ in nil }, selection: store))
+        let a = PanelFixtures.context(PanelFixtures.key(0))
+        let b = PanelFixtures.context(PanelFixtures.key(1))
+
+        let first = host.session(for: .agents, context: a)
+        let other = host.session(for: .agents, context: b)
+        let again = host.session(for: .agents, context: a)
+
+        XCTAssertTrue(first === again, "the host rebuilt the channel's Agents session on the way back")
+        XCTAssertFalse(first === other, "two channels were handed one Agents session")
+        XCTAssertTrue(first is AgentsModel, "the tab's session is not an AgentsModel")
+    }
+
+    /// The disclosure set is the session's, so one channel's open tree does not collapse because
+    /// another channel's did.
+    func testTheDisclosureSetIsPerChannel() throws {
+        let host = PanelHostModel()
+        try host.register(AgentsTab(timelines: { _ in nil }, selection: AgentSelectionStore()))
+        let a = try XCTUnwrap(host.session(for: .agents, context: PanelFixtures.context(PanelFixtures.key(0)))
+                                as? AgentsModel, "the tab made something other than its own session")
+        let b = try XCTUnwrap(host.session(for: .agents, context: PanelFixtures.context(PanelFixtures.key(1)))
+                                as? AgentsModel, "the tab made something other than its own session")
+
+        a.expanded.insert("task_invented0001")
+
+        XCTAssertEqual(a.expanded.count, 1, "the channel's own disclosure set holds \(a.expanded.count) node(s), not 1")
+        XCTAssertEqual(b.expanded.count, 0,
+                       "another channel's disclosure set gained \(b.expanded.count) node(s) from this one")
+    }
+
+    // MARK: - What the tab is allowed to hold (X7)
+
+    /// The tab's stored properties contain no `PanelHostModel` and no `ChannelTimelineRegistry`.
+    ///
+    /// A panel holding its host is a retain path and X7 hands panels capabilities, not the host;
+    /// a panel holding the registry is a second route to a channel's fold, which is what the C6 cut
+    /// exists to prevent. Both are reached through closures instead, and `Mirror` does not descend
+    /// into a capture — which is why this assertion is possible at all, and why a stored reference
+    /// would be visible here.
+    func testTheTabHoldsNoRegistryAndNoHost() async throws {
+        let rig = try await PanelRig(channels: 1)
+        let tab = AgentsTab(timelines: { [rig] key in rig.timelines.model(for: key).timeline },
+                            selection: AgentSelectionStore())
+
+        XCTAssertEqual(ViewTree.values(of: PanelHostModel.self, in: tab).count, 0,
+                       "the tab stores \(ViewTree.values(of: PanelHostModel.self, in: tab).count) panel host(s)")
+        XCTAssertEqual(ViewTree.values(of: ChannelTimelineRegistry.self, in: tab).count, 0,
+                       "the tab stores \(ViewTree.values(of: ChannelTimelineRegistry.self, in: tab).count) registry(s)")
+        // And the store it *is* allowed to hold is there, so the walk above is not vacuous.
+        XCTAssertEqual(ViewTree.values(of: AgentSelectionStore.self, in: tab).count, 1,
+                       "the walk found no selection store either, so it proves nothing about the two above")
+    }
+
+    /// The un-erased view seam (C7.6's pattern): `makeView` answers an `AnyView`, which is not a
+    /// thing a test can ask which surface it was built for.
+    func testThePanelViewIsBuiltForTheSurfaceItWasAskedFor() throws {
+        let host = PanelHostModel()
+        let tab = AgentsTab(timelines: { _ in nil }, selection: AgentSelectionStore())
+        try host.register(tab)
+        let context = PanelFixtures.context(PanelFixtures.key(0))
+        let session = host.session(for: .agents, context: context)
+        let popped = PanelSurface.poppedOutWindow(tab: .agents, channel: PanelFixtures.key(0))
+
+        let panel = try XCTUnwrap(tab.panelView(session: session, surface: .panel),
+                                  "the tab built no view for the main panel")
+        let window = try XCTUnwrap(tab.panelView(session: session, surface: popped),
+                                   "the tab built no view for a popped-out window")
+
+        XCTAssertEqual(panel.surface, .panel, "the main panel's view was built for another surface")
+        XCTAssertEqual(window.surface, popped, "the popped-out window's view was built for another surface")
+        XCTAssertNil(tab.panelView(session: OtherSession(), surface: .panel),
+                     "the tab built a view over a session that is not its own")
+    }
+
+    // MARK: - Doubles
+
+    /// A session of another tab's kind, so the guard in `panelView` has something to refuse.
+    private final class OtherSession: PanelTabSession {}
+}
