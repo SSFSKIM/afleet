@@ -89,6 +89,8 @@ public struct FilesPanelReadout: Equatable {
         switch issue {
         case .none: return nil
         case .unreadableFile: return "This file could not be opened."
+        case .fileIsNotText:
+            return "This file is not text, so it is shown here rather than opened for editing."
         case .saveFailed: return "The file could not be written. Your changes are still here."
         case .saveRefusedWhileDiffShown: return "Close the diff before saving."
         case .saveRefusedIntoConfigHome:

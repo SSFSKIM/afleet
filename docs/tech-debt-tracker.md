@@ -2130,3 +2130,87 @@ is renumbered.
      rather than to `BufferState` would sit outside the fence without anything saying so. Closer:
      move the remaining per-file flags behind operations too, once one of them earns it. Owner:
      C7.5's follow-up, or C7.7 if it adds per-file state.
+
+366. **A file that grows past the cap keeps its old contents and is reported deleted.**
+     `FileWatch.evaluate` has one nil outcome: `FileSnapshot.readWithContents` answering nothing
+     becomes `.deleted`. But that read refuses a file *above the cap* exactly as it refuses one
+     that is gone, so a clean file the agent appends past `FileKind.maximumReadableBytes` reaches
+     the session as a deletion — the panel marks it missing and leaves the editor holding the
+     contents from before the growth, which are now neither the file nor a baseline anything can
+     be compared against. Closer: a distinct `.oversized` outcome that refreshes the file into the
+     unsupported preview, which is what opening it fresh would do. File: `FileWatch.swift`.
+     Owner: C7.5. Filed 2026-09-09 at C7.5's third review round (hard stop).
+
+367. **The MPEG signature mask rejects AAC's own ADTS header.** `FileKind.signature(of:)` tests
+     `bytes[1] & 0xE6 == 0xE2` for MPEG audio, and an ADTS frame begins `0xFF 0xF1` or `0xFF 0xF9`
+     — both of which mask to `0xE0`, not `0xE2`. So a `.aac` file passes the extension claim, is
+     put to the container veto, fails it and is drawn as opaque bytes rather than by the media
+     viewer. Nothing else in `mediaExtensions` is affected: the other AAC spellings carry an
+     `ftyp` box. Closer: a separate ADTS test beside the MPEG one, sync word plus layer bits, since
+     the two families do not share a mask. File: `FileKind.swift`. Owner: C7.5.
+     Filed 2026-09-09 at C7.5's third review round (hard stop).
+
+368. **A package cannot be a Quick Look file, because `FileKind.of` asks `stat(2)` first.** The
+     size guard is `regularFileSize(url)`, which answers `nil` for a directory, so the function
+     returns `.binary` before the extension is ever consulted — and `.rtfd`, the one entry in
+     `quickLookExtensions` that is a *bundle*, is unreachable from a tree row or a link even though
+     Quick Look draws it. The order is otherwise right: the cap has to come before the whole-file
+     read. Closer: package detection ahead of the regular-file guard, keyed on the extension and
+     the directory bit together, so only the bundle kinds take the branch. File: `FileKind.swift`.
+     Owner: C7.5. Filed 2026-09-09 at C7.5's third review round (hard stop).
+
+369. **The vnode source watches the file's inode, so a renamed ancestor is unobserved.** `open(2)`
+     resolves the whole path, and the source is armed on what it opened: renaming a regular parent
+     directory and putting a different directory at the old pathname leaves the watch reporting the
+     file the user is no longer looking at, and every change at the path on screen is invisible.
+     Entry 341 covers the symbolic-link half, which polls; this is the plain-directory half, which
+     does not, because the path resolves to itself and nothing arms the poll. Closer: watch the
+     path's ancestors, or keep a poll that compares the path's current inode with the watched one
+     and re-arms when they disagree. File: `FileWatch.swift`. Owner: C7.5.
+     Filed 2026-09-09 at C7.5's third review round (hard stop).
+
+370. **Two `.newWindow` preparations in flight can deliver one window's file into the other's
+     session.** `PanelHostModel.lastPopOut` is a single slot, so overlapping A and B pop-out
+     preparations leave B's window in it for both deliveries and A's file opens in B's channel —
+     where the next save writes it. This is entry 362 seen from the delivery side rather than the
+     channel side: same slot, same crossing, and the same closer, which is entry 240's X7
+     amendment carrying the originating `ChannelKey` on the delivery so the slot disappears.
+     File: `PanelHostModel` (C5) with `FilesTab.swift` as the consumer. Owner: C5/C7.2.
+     Filed 2026-09-09 at C7.5's third review round (hard stop).
+
+371. **A `.newWindow` delivery whose pop-out closed first opens the file in a hidden session.**
+     The delivery resolves its channel from the prepared pop-out, and when that window has gone by
+     the time the link lands the resolution falls back to the main window's selection — so the file
+     opens in a session no window is drawing, and the user sees nothing happen. A fallback is right
+     for a link that never named a window; it is wrong for one that named a window which is gone.
+     Closer: refuse the delivery outright when the prepared window is no longer there, which is the
+     same shape as fix wave D's "with a host, a lookup that answers nothing opens nothing".
+     File: `FilesTab.swift`. Owner: C7.5. Filed 2026-09-09 at C7.5's third review round (hard stop).
+
+372. **Cmd+S from a window that is not a Files scene saves the main window's buffer.**
+     `FilesSaveButton` reads the focused-scene value and treats its *absence* as "this is the main
+     window", because the main scene publishes nothing — so the shortcut fires from Settings, or
+     from any scene that sets no value, and writes whichever file the main window's Files tab has
+     selected. Entry 243 closed the pop-out half of this; the absent case is the other half.
+     Closer: the main scene publishes its own identity, and absence disables *Save* rather than
+     defaulting to a window. File: the app's Files commands. Owner: C7.5.
+     Filed 2026-09-09 at C7.5's third review round (hard stop).
+
+373. **`isDirty` hashes the whole buffer on every evaluation, on the main actor.** Dirtiness is
+     derived from the disk baseline (fix wave C), so a *clean* text buffer takes a SHA-256 over
+     `Data(text.utf8)` each time it is asked — and it is asked by the readout, by `save`, by the
+     watcher's policy and by every presentation, for a buffer of up to the 64 MiB cap, on the actor
+     that draws. Correct and unmeasured: nothing in the suite is large enough to show it. Closer:
+     cache the digest per revision on `BufferState`, since every mutation of the text already goes
+     through operations that could invalidate it. File: `FilesPanelSession.swift`. Owner: C7.5.
+     Filed 2026-09-09 at C7.5's third review round (hard stop).
+
+374. **A session that only ever showed a diff never disposes its two diff models.** `bufferPath`
+     is set by `open` alone, and `leaveDiffPane` refuses to send `gotoLine` without one — so a
+     channel whose Files tab was reached by a `.diff` link and dismissed with *Close diff* sends
+     nothing at all, and Monaco keeps both sides of the pair allocated until some later editor
+     activity replaces them. Harmless for a small pair and not for two large ones. Closer:
+     `leaveDiffPane` disposes regardless, which needs a command that is safe before the first
+     `open` — the guard exists because `gotoLine` is an `error` then. File:
+     `FilesPanelSession.swift`, with C7.2's vocabulary. Owner: C7.5.
+     Filed 2026-09-09 at C7.5's third review round (hard stop).

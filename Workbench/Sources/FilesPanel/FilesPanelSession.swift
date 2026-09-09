@@ -56,6 +56,14 @@ public struct BufferState: Sendable {
     /// The file this buffer holds. An event, a reply or a capture naming another one is not about
     /// this buffer and changes nothing in it.
     public let path: String
+    /// This open of the file, minted here and never carried across one.
+    ///
+    /// A buffer starts at revision zero every time, `close` keeps the requests it retired and a
+    /// stash reply is recorded even when its request is retired — so a reply from a path's
+    /// *previous* open matched the path and the revision of the buffer that had replaced it, and
+    /// put a closed lifetime's text into the new one. A reply carries the lifetime it was issued
+    /// under, and a previous lifetime's reply matches nothing.
+    let lifetime = UUID()
     public private(set) var text: String
     /// The bytes the text was read from, and `nil` for a file that was never read.
     private(set) var lastLoaded: FileSnapshot?
@@ -140,10 +148,16 @@ public struct BufferState: Sendable {
 
     /// The text the editor answered a stash with. The editor's flag is dropped with it: the
     /// capture *is* the buffer, so from here dirtiness is the disk baseline's answer alone.
+    /// A capture is a replacement, so the buffer **moves on from it**: the revision it was taken
+    /// against is over. Without that, two windows asked about one buffer both matched it, and an
+    /// older window's late answer replaced the capture the newer one had just given.
     @discardableResult
     mutating func capture(text: String, for path: String, from surface: SurfaceID,
-                          expecting revision: Int) -> Bool {
-        guard path == self.path, revision == self.revision else { return false }
+                          expecting revision: Int, lifetime: UUID) -> Bool {
+        guard path == self.path, revision == self.revision, lifetime == self.lifetime else {
+            return false
+        }
+        self.revision += 1
         self.text = text
         editorReportsDirty = false
         owner = differsFromDiskBaseline ? surface : nil
@@ -229,6 +243,10 @@ public final class FilesPanelSession: PanelTabSession {
         public var keepsMine: Bool
         /// The file was there when it was opened and is not there now.
         public var isMissing: Bool
+        /// The bytes did not round-trip through UTF-8, so this file is drawn and never edited
+        /// (see `read`). It is not derivable from the kind: an image and a file above the cap are
+        /// `.binary` too, and neither of them is a file the user asked to edit and cannot.
+        public var isNotText: Bool
         /// The text, the baseline it is dirty against, the surface that owns it and the cursor.
         public var buffer: BufferState
 
@@ -267,6 +285,10 @@ public final class FilesPanelSession: PanelTabSession {
     public enum Issue: Equatable, Sendable {
         /// The file could not be read at all — gone, unreadable, or above the panel's cap.
         case unreadableFile
+        /// The file's bytes are not text, so it is drawn rather than edited: a buffer filled from
+        /// bytes that do not round-trip is not the file, and saving it would replace what is
+        /// there with something the user never typed.
+        case fileIsNotText
         /// The write did not land. The buffer is still dirty and nothing was saved.
         case saveFailed
         /// The destination is inside a Claude Code config home. afleet never writes there
@@ -393,6 +415,9 @@ public final class FilesPanelSession: PanelTabSession {
         /// The buffer as it stood when the request went out. A capture is against that buffer and
         /// no later one.
         let revision: Int
+        /// The open of the file the request was issued under. A reply from a previous one is
+        /// about a buffer that no longer exists, whatever its path and revision say.
+        let lifetime: UUID?
         /// The surface the request went to, which is the only one that may answer it. An identity
         /// and not a reference: a weak surface reads `nil` once its window has gone, and `nil`
         /// compared equal to every other surface's reply — an expired request on a closed window
@@ -493,6 +518,37 @@ public final class FilesPanelSession: PanelTabSession {
         if let focused, leaving.contains(focused) { self.focused = nil }
         for id in leaving { retireRequests { $0.surface == id } }
         prune()
+        republishPresentedBuffer()
+    }
+
+    /// Brings the windows that are still here up to date with the buffer the session holds, when
+    /// the window that was holding the text is not attached any more.
+    ///
+    /// What that window held is whatever the session captured from it, and a capture draws
+    /// nothing: a surviving window that never held the buffer goes on showing the text it was
+    /// last given. Left there, the user's next keystroke in it takes ownership of the buffer with
+    /// the stale text underneath, and the reply to the next `save` writes that over the capture.
+    /// A window that *is* holding the text is not told anything — it is the copy.
+    private func republishPresentedBuffer() {
+        guard let path = presentedPath,
+              let file = openFiles.first(where: { $0.path == path }),
+              let holder = file.buffer.holder, !isAttached(holder) else { return }
+        let live = surfaces.compactMap(\.surface)
+        guard !live.isEmpty else { return }
+        // Not through `send`, which prunes: this is called *from* the paths that prune.
+        let command = EditorCommand.setText(text: file.text)
+        note(command)
+        for surface in live { surface.send(command) }
+        if file.line > 1 || file.column > 1 {
+            let cursor = EditorCommand.gotoLine(line: file.line, column: file.column)
+            note(cursor)
+            for surface in live { surface.send(cursor) }
+        }
+    }
+
+    /// Whether the window an identity names is still drawing for this session.
+    private func isAttached(_ id: SurfaceID) -> Bool {
+        surfaces.contains { $0.id == id && $0.surface != nil }
     }
 
     /// What a newly attached surface has to be told to show what the session is already showing:
@@ -623,13 +679,14 @@ public final class FilesPanelSession: PanelTabSession {
             if !openFiles[index].isDirty {
                 openFiles[index].kind = loaded.kind
                 openFiles[index].language = loaded.language
+                openFiles[index].isNotText = loaded.isNotText
                 openFiles[index].buffer.load(text: loaded.text, holdsText: loaded.holdsText,
                                              snapshot: loaded.snapshot)
             }
         } else {
             openFiles.append(OpenFile(url: url, kind: loaded.kind, language: loaded.language,
                                       rendersMarkdown: true, hasConflict: false, keepsMine: false,
-                                      isMissing: false,
+                                      isMissing: false, isNotText: loaded.isNotText,
                                       buffer: BufferState(path: path, text: loaded.text,
                                                           holdsText: loaded.holdsText,
                                                           lastLoaded: loaded.snapshot,
@@ -640,7 +697,7 @@ public final class FilesPanelSession: PanelTabSession {
         }
         guard presented == mark else { return }
         let generation = beginPresentation()
-        issue = nil
+        issue = note(for: path)
         selectedPath = path
         await present(url, revealing: line, under: generation)
         await persist()
@@ -651,9 +708,15 @@ public final class FilesPanelSession: PanelTabSession {
         guard openFiles.contains(where: { $0.url == url }) else { return }
         let generation = beginPresentation()
         selectedPath = url.path(percentEncoded: false)
-        issue = nil
+        issue = note(for: selectedPath)
         await present(url, revealing: nil, under: generation)
         await persist()
+    }
+
+    /// What the panel-local area says about a file being opened, which for a file whose bytes are
+    /// not text is why it is drawn rather than edited. Nothing else survives a presentation.
+    private func note(for path: String?) -> Issue? {
+        openFiles.first { $0.path == path }?.isNotText == true ? .fileIsNotText : nil
     }
 
     /// Closes a file: its watcher stops with it, its banner goes with it (§8), and so does anything
@@ -820,7 +883,7 @@ public final class FilesPanelSession: PanelTabSession {
     /// `.unreadableFile` is kept for the file that genuinely could not be read: a path that is not
     /// a regular file, and a text file whose bytes would not come back.
     private func read(_ url: URL) -> (kind: FileKind, language: String, text: String,
-                                      holdsText: Bool, snapshot: FileSnapshot?)? {
+                                      holdsText: Bool, snapshot: FileSnapshot?, isNotText: Bool)? {
         let kind = FileKind.of(url: url)
         let language = switch kind {
         case .code(let language): language
@@ -835,13 +898,24 @@ public final class FilesPanelSession: PanelTabSession {
             // files, and a file replaced between two reads leaves the panel drawing text no
             // baseline covers — invisible to §8's rule and overwritten by the next save.
             guard let read = FileSnapshot.readWithContents(url) else { return nil }
-            return (kind, language, String(decoding: read.contents, as: UTF8.self), true,
-                    read.snapshot)
+            // **Strictly, and confirmed by the round trip.** `String(decoding:as:)` replaces an
+            // invalid sequence with U+FFFD and a byte-order mark is dropped by the decoder, so
+            // the buffer held text the file does not contain: it measured dirty against the very
+            // digest it had been read from, the file opened with an unsaved marker nobody had
+            // earned, and *Save* passed the preflight against those original bytes and wrote the
+            // replacement over them. A file whose bytes do not come back is not text this panel
+            // may edit: it is drawn by `UnsupportedFileViewer` like any other opaque file, with
+            // no buffer to be dirty and nothing for a save to write (Design §4, §7).
+            guard let text = String(data: read.contents, encoding: .utf8),
+                  Data(text.utf8) == read.contents else {
+                return (.binary, language, "", false, read.snapshot, true)
+            }
+            return (kind, language, text, true, read.snapshot, false)
         default:
             // Not read into a buffer at all: its viewer draws it from the file, so the buffer
             // holds no text and has nothing to be dirty against.
             guard Self.isRegularFile(url) else { return nil }
-            return (kind, language, "", false, FileSnapshot.read(url))
+            return (kind, language, "", false, FileSnapshot.read(url), false)
         }
     }
 
@@ -1039,11 +1113,21 @@ public final class FilesPanelSession: PanelTabSession {
             requestBuffer(.refusalOnly, path: file.path)
             return
         }
-        // With no surface attached there is no buffer to ask for and nothing to be refused by:
-        // the record is the only copy of the text, and it is what is written.
-        if presentedPath == file.path, requestBuffer(.write, path: file.path) { return }
+        // With no surface attached — or none that is holding this buffer — there is nothing to
+        // ask: the record is the only copy of the text, and it is what is written. A surviving
+        // window that never held the buffer would answer out of the text it was last given, and
+        // that answer is not this file's contents.
+        if presentedPath == file.path, holderIsAttached(file),
+           requestBuffer(.write, path: file.path) { return }
         guard file.isDirty else { return }
         write(path: file.path, text: file.text)
+    }
+
+    /// Whether the window holding this buffer's text is still here, and `true` for a buffer no
+    /// window is holding — where every window's model is what the session last gave it.
+    private func holderIsAttached(_ file: OpenFile) -> Bool {
+        guard let holder = file.buffer.holder else { return true }
+        return isAttached(holder)
     }
 
     /// Asks the editor for the buffer and records it on the open file **without writing it**.
@@ -1114,8 +1198,10 @@ public final class FilesPanelSession: PanelTabSession {
         while bufferRequests.count > 32, let stale = bufferRequests.firstIndex(where: \.isRetired) {
             bufferRequests.remove(at: stale)
         }
-        let revision = openFiles.first { $0.path == path }?.buffer.revision ?? 0
-        bufferRequests.append(BufferRequest(id: id, kind: kind, path: path, revision: revision,
+        let buffer = openFiles.first { $0.path == path }?.buffer
+        bufferRequests.append(BufferRequest(id: id, kind: kind, path: path,
+                                            revision: buffer?.revision ?? 0,
+                                            lifetime: buffer?.lifetime,
                                             surface: target.id, generation: presentation))
         Task { [weak self, stashTimeout] in
             try? await Task.sleep(for: stashTimeout)
@@ -1144,9 +1230,16 @@ public final class FilesPanelSession: PanelTabSession {
 
     /// Records the buffer the editor answered a stash with, on the buffer that **names that path**
     /// and on no other.
-    private func stash(path: String, text: String, from surface: SurfaceID, revision: Int) {
-        guard let index = openFiles.firstIndex(where: { $0.path == path }) else { return }
-        openFiles[index].buffer.capture(text: text, for: path, from: surface, expecting: revision)
+    private func stash(path: String, text: String, from surface: SurfaceID, revision: Int,
+                       lifetime: UUID?) {
+        guard let lifetime, let index = openFiles.firstIndex(where: { $0.path == path }),
+              openFiles[index].buffer.capture(text: text, for: path, from: surface,
+                                              expecting: revision, lifetime: lifetime)
+        else { return }
+        // A capture from a window that is not here any more is the last thing that window held,
+        // and nothing has drawn it: the windows that are still here are showing what they were
+        // last given (see `republishPresentedBuffer`).
+        republishPresentedBuffer()
     }
 
     /// Resumes the presentation waiting for stash `request`, once.
@@ -1403,6 +1496,7 @@ public final class FilesPanelSession: PanelTabSession {
               let loaded = read(url) else { return false }
         openFiles[index].kind = loaded.kind
         openFiles[index].language = loaded.language
+        openFiles[index].isNotText = loaded.isNotText
         // The last write no longer describes what is on disk, so it stops answering for it.
         openFiles[index].buffer.load(text: loaded.text, holdsText: loaded.holdsText,
                                              snapshot: loaded.snapshot)
@@ -1549,13 +1643,19 @@ public final class FilesPanelSession: PanelTabSession {
             switch request.kind {
             case .write:
                 guard !request.isRetired else { return }
+                // And the window that holds the buffer is the only one that may answer for it.
+                // Ownership moves while a reply is on its way, and writing the older window's
+                // text puts it over the edits the newer one is holding.
+                let holder = openFiles.first { $0.path == path }?.buffer.holder
+                guard holder == nil || holder == surface else { return }
                 write(path: path, text: text)
             case .stash:
                 // A capture is the one thing a late answer may still do: it records on the buffer
                 // that names this path exactly what the editor holds for it, which nothing that
                 // happened elsewhere makes wrong. What it may not do is resume a waiter that is
                 // not the one it belongs to, and the id is what says so.
-                stash(path: path, text: text, from: surface, revision: request.revision)
+                stash(path: path, text: text, from: surface, revision: request.revision,
+                      lifetime: request.lifetime)
                 finishStash(request.id, captured: true)
             case .refusalOnly:
                 break
@@ -1600,10 +1700,19 @@ public final class FilesPanelSession: PanelTabSession {
             // delayed one of those moved the buffer's owner to the window that had just been given
             // something else to show.
             guard path == presentedPath,
-                  let index = openFiles.firstIndex(where: { $0.path == path }),
-                  openFiles[index].buffer.apply(event, from: surface) else { return }
+                  let index = openFiles.firstIndex(where: { $0.path == path }) else { return }
+            // Who was holding the text *before* this report, which the report itself may move.
+            let previous = openFiles[index].buffer.holder
+            guard openFiles[index].buffer.apply(event, from: surface) else { return }
             if isDirty {
                 replacedBufferPath = nil
+                // The user has moved to this window, so what the window that was holding the
+                // buffer was asked about it is over: its answer describes text this buffer no
+                // longer holds, and a write reply still on its way would land on top of the edits
+                // being made here — and be broadcast back over them.
+                if let previous, previous != surface {
+                    retireRequests { $0.surface == previous && $0.path == path }
+                }
                 focused = surface
             }
         case .cursor(let line, let column):
@@ -1728,6 +1837,7 @@ public final class FilesPanelSession: PanelTabSession {
             openFiles.append(OpenFile(url: url, kind: loaded.kind, language: loaded.language,
                                       rendersMarkdown: record.rendersMarkdown,
                                       hasConflict: false, keepsMine: false, isMissing: false,
+                                      isNotText: loaded.isNotText,
                                       buffer: BufferState(path: url.path(percentEncoded: false),
                                                           text: loaded.text,
                                                           holdsText: loaded.holdsText,
