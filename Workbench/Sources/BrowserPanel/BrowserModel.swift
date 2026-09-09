@@ -183,6 +183,7 @@ public final class BrowserModel {
     /// Moves the web views to `surface`. The "Bring them back here" control, and the one place the
     /// attachment is chosen deliberately rather than by a window appearing or going away.
     public func attach(to surface: PanelSurface) {
+        panelLeftHoldingPages = false
         attachedTo = surface
     }
 
@@ -190,6 +191,15 @@ public final class BrowserModel {
     /// is actually on screen" answerable at all: the pages have to go somewhere when the one
     /// holding them goes away, and `.panel` is a guess rather than an answer (D58).
     private var liveSurfaces: [PanelSurface] = []
+
+    /// Set when the main panel goes away *holding* the pages and they move to a surface that is
+    /// still drawing. It is what tells a panel that is coming back from a channel switch apart
+    /// from one that never had them (D61).
+    ///
+    /// Cleared by anything that claims the pages deliberately — a window appearing, or the "Bring
+    /// them back here" control — because the panel takes back what it was holding and never what
+    /// something else has asked for since.
+    private var panelLeftHoldingPages = false
 
     /// A surface began drawing this panel.
     ///
@@ -199,10 +209,22 @@ public final class BrowserModel {
     /// pop-out is for. The pop-out is the deliberate act, so it is the one that moves them. Two
     /// pop-outs are two windows and two claimants, and the newest one is the one the user just
     /// asked for.
+    /// **The one thing the panel does claim is what it was holding when it went away** (D61).
+    /// `PanelHostModel.view` keys the subtree by (tab, channel), so a channel switch destroys this
+    /// panel's surface and builds another one in its place — a disappearance and an appearance,
+    /// not a re-render. The departing panel hands the pages to a pop-out that is still drawing, so
+    /// without this a channel switch silently undid the user's own "Bring them back here" and left
+    /// the main panel on the "elsewhere" placeholder for the rest of the session.
     public func surfaceAppeared(_ surface: PanelSurface) {
         liveSurfaces.removeAll { $0 == surface }
         liveSurfaces.append(surface)
-        guard surface != .panel else { return }
+        guard surface != .panel else {
+            guard panelLeftHoldingPages else { return }
+            panelLeftHoldingPages = false
+            attachedTo = .panel
+            return
+        }
+        panelLeftHoldingPages = false
         attachedTo = surface
     }
 
@@ -216,7 +238,11 @@ public final class BrowserModel {
     public func surfaceDisappeared(_ surface: PanelSurface) {
         liveSurfaces.removeAll { $0 == surface }
         guard attachedTo == surface else { return }
-        attachedTo = liveSurfaces.last ?? .panel
+        let next = liveSurfaces.last ?? .panel
+        // Remembered only when the pages actually leave: a panel that goes away with nothing else
+        // on screen keeps them, and has nothing to take back.
+        if surface == .panel, next != .panel { panelLeftHoldingPages = true }
+        attachedTo = next
     }
 
     // MARK: Restore (Q7)

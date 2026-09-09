@@ -1021,6 +1021,57 @@ final class BrowserModelTests: XCTestCase {
                        "the pages were stranded on a surface that is no longer drawing")
     }
 
+    /// **The panel takes back what it was holding when it went away** (E3).
+    ///
+    /// `PanelHostModel.view` identifies the Browser subtree by (tab, channel), so a channel switch
+    /// is a disappearance and an appearance of the *same* surface. The departing panel hands the
+    /// pages to a pop-out that is still drawing, which is the rule above working as designed — and
+    /// nothing gave them back, so a channel switch silently undid the user's own "Bring them back
+    /// here" and left the main panel drawing the "elsewhere" placeholder for the rest of the
+    /// session.
+    func testThePanelTakesBackThePagesItWasHoldingWhenItWentAway() async {
+        let (model, _, _) = await makeModel()
+        let window = Self.window("one")
+        let all = [PanelSurface.panel, window]
+        model.surfaceAppeared(.panel)
+        model.surfaceAppeared(window)
+        model.attach(to: .panel)
+
+        // The channel switch: the Browser subtree is replaced, so the panel surface goes away
+        // holding the pages and a new one appears in its place.
+        model.surfaceDisappeared(.panel)
+        XCTAssertEqual(Self.surfacesRendering(model, among: all), [window],
+                       "the precondition did not hold: the pages did not move to the window")
+
+        model.surfaceAppeared(.panel)
+
+        XCTAssertEqual(Self.surfacesRendering(model, among: all), [.panel],
+                       "the panel did not take back the pages it was holding when it went away")
+    }
+
+    /// ...and takes back **only** what nothing else has claimed since (E3, keeping D54).
+    ///
+    /// A window that appears while the panel is away is a deliberate claim, and the panel coming
+    /// back is not: reclaiming there would take the pages out of a window the user asked for in
+    /// between, which is the whole of what D54 forbids.
+    func testThePanelDoesNotTakeBackPagesAWindowClaimedWhileItWasAway() async {
+        let (model, _, _) = await makeModel()
+        let first = Self.window("first")
+        let second = Self.window("second")
+        let all = [PanelSurface.panel, first, second]
+        model.surfaceAppeared(.panel)
+        model.surfaceAppeared(first)
+        model.attach(to: .panel)
+        model.surfaceDisappeared(.panel)
+
+        // A second window is popped out while the panel is showing another tab.
+        model.surfaceAppeared(second)
+        model.surfaceAppeared(.panel)
+
+        XCTAssertEqual(Self.surfacesRendering(model, among: all), [second],
+                       "the panel took back pages a window claimed while it was away")
+    }
+
     /// With nothing left on screen the pages rest on the main panel, which is where the next
     /// surface to draw this panel finds them.
     func testPagesRestOnTheMainPanelWhenNoSurfaceIsLeft() async {
