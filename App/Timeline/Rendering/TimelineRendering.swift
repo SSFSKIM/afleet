@@ -4,7 +4,9 @@ import HighlightKit
 import Markdown
 import OSLog
 import SwiftUI
+import AfleetCore
 import FleetKit
+import PanelHostAPI
 
 // MARK: - The seam
 
@@ -120,6 +122,22 @@ struct RenderedRow: Identifiable {
         pending = ""
     }
 
+    /// Parses everything this row holds, its tail included. For text that has **stopped arriving**.
+    ///
+    /// `settle` is the streaming reading: it parses to the last closed block boundary and leaves the
+    /// rest as plain text, because a fragment still growing is not a document yet. A durable item is
+    /// not growing — nothing further will arrive to close its last block — so the boundary rule
+    /// would leave a message ending in `**Done**` drawing its own asterisks for ever, with no later
+    /// pass to finalise it. The rule is the live tail's alone (§4), and this is its other side.
+    mutating func finalise(markdown: MarkdownText, highlighter: CodeHighlighter) {
+        var phases = RenderPhases()
+        let remaining = tail + pending
+        tail = ""
+        consumedCharacters += pending.count
+        pending = ""
+        settle(remaining, markdown: markdown, highlighter: highlighter, phases: &phases)
+    }
+
     /// The streaming append. Only a **closed** block is parsed; the rest stays in the tail.
     mutating func append(_ fragment: String, markdown: MarkdownText, highlighter: CodeHighlighter,
                          phases: inout RenderPhases) {
@@ -216,6 +234,11 @@ struct TimelineMarkdownRow: View {
 
     let row: RenderedRow
 
+    /// The channel this row is drawn in, for the one thing a settled block cannot decide for
+    /// itself: where a link goes. Nil outside the timeline's subtree, and a link is then drawn and
+    /// does nothing, which is contract Y7's rule for every other affordance here.
+    @Environment(\.timelineContext) private var context
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             ForEach(Array(row.settled.enumerated()), id: \.offset) { _, block in
@@ -224,7 +247,7 @@ struct TimelineMarkdownRow: View {
                     // `AttributedString`'s fonts and colours and drops its paragraph styles. So the
                     // one block kind whose structure would be lost is drawn by the one thing that
                     // lays a text table out (§5).
-                    TimelineTextKitBlock(block: block)
+                    TimelineTextKitBlock(block: block, context: context)
                 } else {
                     Text(AttributedString(block))
                         .textSelection(.enabled)
@@ -241,6 +264,13 @@ struct TimelineMarkdownRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 12)
         .padding(.vertical, 4)
+        // SwiftUI activates an `AttributedString`'s link through this, and the default hands it
+        // straight to the system. A destination the walk carried is not a system URL yet — it may be
+        // a path, and it may be relative — so the routing decision is made here, against this row's
+        // own channel, and only what the router declines to own falls through to the system.
+        .environment(\.openURL, OpenURLAction { [context] url in
+            TimelineLinkDestination.open(url, in: context) ? .handled : .systemAction
+        })
     }
 }
 
@@ -252,6 +282,13 @@ struct TimelineMarkdownRow: View {
 struct TimelineTextKitBlock: NSViewRepresentable {
 
     let block: NSAttributedString
+    /// The channel, for a link inside a table cell. `NSTextView`'s own default for a `.link`
+    /// attribute is to hand it to `NSWorkspace`, which for a path — relative or not — is either
+    /// nothing or the wrong file, and in neither case is it the router every other link goes
+    /// through. The coordinator below intercepts it for that reason.
+    var context: TimelineRenderContext?
+
+    func makeCoordinator() -> Coordinator { Coordinator(context: context) }
 
     func makeNSView(context: Context) -> NSTextView {
         let view = NSTextView()
@@ -261,12 +298,29 @@ struct TimelineTextKitBlock: NSViewRepresentable {
         view.textContainerInset = .zero
         view.textContainer?.lineFragmentPadding = 0
         view.textContainer?.widthTracksTextView = true
+        view.delegate = context.coordinator
         view.textStorage?.setAttributedString(block)
         return view
     }
 
     func updateNSView(_ view: NSTextView, context: Context) {
+        context.coordinator.context = self.context
         view.textStorage?.setAttributedString(block)
+    }
+
+    /// The text view's delegate, for link activation and nothing else.
+    @MainActor
+    final class Coordinator: NSObject, NSTextViewDelegate {
+
+        var context: TimelineRenderContext?
+
+        init(context: TimelineRenderContext?) { self.context = context }
+
+        func textView(_ view: NSTextView, clickedOnLink link: Any, at index: Int) -> Bool {
+            guard let url = link as? URL ?? (link as? String).flatMap(TimelineLinkDestination.url(for:))
+            else { return false }
+            return TimelineLinkDestination.open(url, in: context)
+        }
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSTextView, context: Context) -> CGSize? {
@@ -298,6 +352,64 @@ enum TimelineTextMeasure {
         storage.addLayoutManager(manager)
         manager.ensureLayout(for: container)
         return ceil(manager.usedRect(for: container).height)
+    }
+}
+
+// MARK: - Where a markdown link goes
+
+/// A markdown link's destination: carried through the parse as written, resolved at activation.
+///
+/// **The split is the whole point.** The parsed block is cached by its own text and that cache is
+/// shared by every channel (§5), so nothing channel-shaped may enter it — a relative destination
+/// resolved against one channel's working directory would be served to another. So the walk stores
+/// the destination exactly as the author wrote it and the row resolves it when a reader presses it,
+/// against the context that row was drawn in.
+///
+/// Activation goes through contract Y7's link capability, which is the same route
+/// `FileLink.open` takes for the paths a tool row shows: one router decides whether a `.file` opens
+/// a panel and a `.url` reaches a Browser tab or the system, and a second route here would be a
+/// second answer to that question.
+enum TimelineLinkDestination {
+
+    /// The URL a destination is carried as, or nil for one there is nothing to carry.
+    ///
+    /// A destination with no scheme stays scheme-less and relative: `URL(filePath:)` would resolve
+    /// it against the *process's* directory, which names a file the channel never meant.
+    static func url(for destination: String) -> URL? {
+        let destination = destination.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !destination.isEmpty else { return nil }
+        if destination.hasPrefix("~") {
+            return URL(filePath: (destination as NSString).expandingTildeInPath)
+        }
+        return URL(string: destination)
+    }
+
+    /// Which `WorkspaceLink` a carried destination is, given the channel it was drawn in.
+    ///
+    /// Nil where there is nothing to open: a relative path in a channel whose working directory the
+    /// index cannot name, which is the same answer `TimelineRenderContext.cwd` documents — resolving
+    /// it against anything else would open a different file and call it the reader's.
+    static func link(for url: URL, cwd: URL?) -> WorkspaceLink? {
+        guard url.scheme != "file" else { return .file(url, line: nil) }
+        if let scheme = url.scheme, !scheme.isEmpty { return .url(url) }
+        let path = url.relativePath
+        guard !path.isEmpty else { return nil }
+        if path.hasPrefix("/") { return .file(URL(filePath: path), line: nil) }
+        guard let cwd else { return nil }
+        return .file(cwd.appending(path: path), line: nil)
+    }
+
+    /// Opens one carried destination, and answers whether there was anything to open.
+    ///
+    /// Fire-and-forget for `FileLink.open`'s reason: the capability is `async`, a press is not, and
+    /// awaiting it would hold the main actor open for a panel that may be constructing a session.
+    @MainActor
+    @discardableResult
+    static func open(_ url: URL, in context: TimelineRenderContext?) -> Bool {
+        guard let context, let link = link(for: url, cwd: context.cwd) else { return false }
+        let links = context.links
+        Task { await links.open(link, from: .currentPanel) }
+        return true
     }
 }
 
@@ -358,6 +470,27 @@ final class MarkdownText: @unchecked Sendable {
     private let capacity = 512
     private var parses = 0
 
+    /// Which cold highlights each cached block was built over, for the entries that were built over
+    /// any. A settled block holds its styled code *inside* it (§6), so a block parsed while its
+    /// fence's highlight was still in flight holds the plain fallback for ever unless something
+    /// notices the fill landed. This is what notices.
+    ///
+    /// Read at the cache rather than written by the highlighter: the fill is a detached task and a
+    /// callback into this cache would be a second lock ordering. An entry with no pending highlights
+    /// — every block that is not a fence, which is nearly all of them — costs the read nothing.
+    private var pendingHighlights: [String: Set<CodeHighlighter.Key>] = [:]
+
+    /// Which styling the cache holds. Bumped by every `clear`, so a build that started under the old
+    /// preference cannot write its result into the cache the new one is filling (§6).
+    private var stylingGeneration = 0
+
+    /// The styling a build should be written back under. Read before the build, checked at the
+    /// write; between the two is the window a preference flip lands in.
+    var styling: Int {
+        lock.lock(); defer { lock.unlock() }
+        return stylingGeneration
+    }
+
     /// How many blocks this cache has actually parsed, cumulatively.
     ///
     /// Instrumentation and not decoration: §4's claim is that nothing expensive runs per delta, and
@@ -376,22 +509,31 @@ final class MarkdownText: @unchecked Sendable {
     /// unsanitised text sitting in a key for the next reader to pick up.
     func attributed(_ source: String, highlighter: CodeHighlighter, phases: inout RenderPhases) -> NSAttributedString {
         let source = TextSanitiser.sanitise(source)
-        if let hit = read(source) { return hit }
+        if let hit = read(source, highlighter: highlighter) { return hit }
         let start = RenderClock.start()
-        let built = Self.build(source, highlighter: highlighter, phases: &phases)
+        var pending: Set<CodeHighlighter.Key> = []
+        let built = Self.build(source, highlighter: highlighter, phases: &phases, pending: &pending)
         phases.markdown += RenderClock.since(start)
-        write(source, built)
+        write(source, built, pending: pending)
         return built
     }
 
     /// Parses off the main thread and fills the cache, so the measured path is the cached one.
     /// This is §6's "never on the main thread" for the warm case; a miss on the streaming path is
     /// a single just-closed block and is bounded by that.
+    ///
+    /// **The styling is read before the build and checked at the write.** A preference flip clears
+    /// this cache, and a build that began before the flip carries the old styling inside it; a write
+    /// that did not check would repopulate the freshly cleared cache with exactly what the flip
+    /// existed to remove.
     func warm(_ sources: [String], highlighter: CodeHighlighter) async {
         await Task.detached(priority: .utility) { [self] in
-            for source in sources.map(TextSanitiser.sanitise) where read(source) == nil {
+            for source in sources.map(TextSanitiser.sanitise) where read(source, highlighter: highlighter) == nil {
                 var phases = RenderPhases()
-                write(source, Self.build(source, highlighter: highlighter, phases: &phases))
+                var pending: Set<CodeHighlighter.Key> = []
+                let styling = self.styling
+                let built = Self.build(source, highlighter: highlighter, phases: &phases, pending: &pending)
+                write(source, built, pending: pending, ifStyling: styling)
             }
         }.value
     }
@@ -405,21 +547,62 @@ final class MarkdownText: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         cache = [:]
         order = []
+        pendingHighlights = [:]
+        stylingGeneration += 1
     }
 
-    private func read(_ key: String) -> NSAttributedString? {
+    /// A cached block, unless the highlight it settled without has since landed.
+    ///
+    /// The staleness check is here rather than at the fill because it costs nothing to the blocks
+    /// that are not fences: an entry with no pending highlights is returned on the dictionary read
+    /// alone. A block whose highlight *has* landed is dropped and reported as a miss, so the caller
+    /// rebuilds it over the styled code — and a visible row picks that up on the controller's next
+    /// reload of it.
+    private func read(_ key: String, highlighter: CodeHighlighter) -> NSAttributedString? {
+        lock.lock()
+        guard let hit = cache[key] else { lock.unlock(); return nil }
+        let pending = pendingHighlights[key] ?? []
+        lock.unlock()
+        // Outside our lock: `isCached` takes the highlighter's, and one lock is never held while
+        // the other is taken.
+        guard !pending.isEmpty, pending.contains(where: highlighter.isCached) else { return hit }
         lock.lock(); defer { lock.unlock() }
-        return cache[key]
+        cache.removeValue(forKey: key)
+        pendingHighlights.removeValue(forKey: key)
+        order.removeAll { $0 == key }
+        return nil
     }
 
-    private func write(_ key: String, _ value: NSAttributedString) {
+    private func write(_ key: String, _ value: NSAttributedString, pending: Set<CodeHighlighter.Key>) {
         lock.lock(); defer { lock.unlock() }
+        store(key, value, pending: pending)
+    }
+
+    /// The off-main write, refused when the styling it was built under is gone.
+    ///
+    /// Answers whether it wrote, so a caller — and a test — can tell a refusal from a write.
+    @discardableResult
+    func write(_ key: String, _ value: NSAttributedString, pending: Set<CodeHighlighter.Key>,
+               ifStyling styling: Int) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard styling == stylingGeneration else { return false }
+        store(key, value, pending: pending)
+        return true
+    }
+
+    /// The write itself. Called with the lock held.
+    private func store(_ key: String, _ value: NSAttributedString, pending: Set<CodeHighlighter.Key>) {
         parses += 1
         if cache[key] == nil {
             order.append(key)
-            if order.count > capacity { cache.removeValue(forKey: order.removeFirst()) }
+            if order.count > capacity {
+                let evicted = order.removeFirst()
+                cache.removeValue(forKey: evicted)
+                pendingHighlights.removeValue(forKey: evicted)
+            }
         }
         cache[key] = value
+        if pending.isEmpty { pendingHighlights.removeValue(forKey: key) } else { pendingHighlights[key] = pending }
     }
 
     // MARK: The walk
@@ -430,6 +613,15 @@ final class MarkdownText: @unchecked Sendable {
     /// unsanitised and parity §41.17 names that as the one row a GUI must not copy, because it is
     /// a rendering-injection hazard.
     static func build(_ source: String, highlighter: CodeHighlighter, phases: inout RenderPhases) -> NSAttributedString {
+        var pending: Set<CodeHighlighter.Key> = []
+        return build(source, highlighter: highlighter, phases: &phases, pending: &pending)
+    }
+
+    /// The same build, reporting which highlights it settled *without* — the fences whose styled
+    /// form was still being made when the block was built. The cache keeps them so it can tell,
+    /// later, that this block is no longer what the source would render as.
+    static func build(_ source: String, highlighter: CodeHighlighter, phases: inout RenderPhases,
+                      pending: inout Set<CodeHighlighter.Key>) -> NSAttributedString {
         let document = Document(parsing: source, options: .parseBlockDirectives)
         // The source's own lines, carried down the walk. One override needs them: cmark truncates a
         // table row wider than its header before the tree exists, so how wide a row *was written* is
@@ -437,7 +629,8 @@ final class MarkdownText: @unchecked Sendable {
         let lines = source.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         let out = NSMutableAttributedString()
         for child in document.children {
-            append(child, to: out, highlighter: highlighter, indent: 0, lines: lines, phases: &phases)
+            append(child, to: out, highlighter: highlighter, indent: 0, lines: lines, phases: &phases,
+                   pending: &pending)
             if out.length > 0 { out.append(NSAttributedString(string: "\n")) }
         }
         return out
@@ -445,7 +638,7 @@ final class MarkdownText: @unchecked Sendable {
 
     private static func append(_ markup: Markup, to out: NSMutableAttributedString,
                                highlighter: CodeHighlighter, indent: Int, lines: [String],
-                               phases: inout RenderPhases) {
+                               phases: inout RenderPhases, pending: inout Set<CodeHighlighter.Key>) {
         switch markup {
         case let heading as Heading:
             let size: CGFloat = [24, 20, 17, 15, 14, 13][max(0, min(5, heading.level - 1))]
@@ -455,14 +648,15 @@ final class MarkdownText: @unchecked Sendable {
         case let code as CodeBlock:
             let language = code.language?.lowercased()
             let start = RenderClock.start()
-            let styled = highlighter.styled(code: code.code, language: language)
+            let styled = highlighter.styling(code: code.code, language: language)
             phases.highlight += RenderClock.since(start)
-            out.append(styled)
+            if let cold = styled.cold { pending.insert(cold) }
+            out.append(styled.text)
 
         case let quote as BlockQuote:
             for child in quote.children {
                 append(child, to: out, highlighter: highlighter, indent: indent + 1, lines: lines,
-                       phases: &phases)
+                       phases: &phases, pending: &pending)
             }
 
         case let list as UnorderedList:
@@ -472,7 +666,7 @@ final class MarkdownText: @unchecked Sendable {
                                               attributes: [.font: NSFont.systemFont(ofSize: 13)]))
                 for child in item.children {
                     append(child, to: out, highlighter: highlighter, indent: indent + 1, lines: lines,
-                           phases: &phases)
+                           phases: &phases, pending: &pending)
                 }
             }
 
@@ -482,7 +676,7 @@ final class MarkdownText: @unchecked Sendable {
                                               attributes: [.font: NSFont.systemFont(ofSize: 13)]))
                 for child in item.children {
                     append(child, to: out, highlighter: highlighter, indent: indent + 1, lines: lines,
-                           phases: &phases)
+                           phases: &phases, pending: &pending)
                 }
             }
 
@@ -627,9 +821,27 @@ final class MarkdownText: @unchecked Sendable {
             case let strike as Strikethrough:
                 out.append(struckThrough(strike))
             case let link as Markdown.Link:
-                out.append(NSAttributedString(string: plain(link),
-                                              attributes: [.font: NSFont.systemFont(ofSize: 13),
-                                                           .foregroundColor: NSColor.linkColor]))
+                // The destination travels with the label. Without it the run is blue text that
+                // does nothing: §5 says links are real and clickable, and a renderer that drew only
+                // the label made every labelled link in model output unusable. Carried **as
+                // written**, because resolving a relative one needs the channel's working
+                // directory, and this string is the key of a cache shared by every channel.
+                var attributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 13),
+                                                                 .foregroundColor: NSColor.linkColor]
+                if let destination = link.destination,
+                   let url = TimelineLinkDestination.url(for: destination) {
+                    attributes[.link] = url
+                }
+                out.append(NSAttributedString(string: plain(link), attributes: attributes))
+            case is SoftBreak:
+                // A break node has no children, so the default arm's plain-text projection of it is
+                // the empty string and the two words either side would be concatenated. The engine
+                // renders with `breaks` **off** (§5), which makes a soft break a space.
+                out.append(NSAttributedString(string: " ",
+                                              attributes: [.font: NSFont.systemFont(ofSize: 13)]))
+            case is LineBreak:
+                out.append(NSAttributedString(string: "\n",
+                                              attributes: [.font: NSFont.systemFont(ofSize: 13)]))
             case let html as InlineHTML:
                 // Escaped, never passed through (§5).
                 out.append(NSAttributedString(string: html.rawHTML,
@@ -670,9 +882,16 @@ final class MarkdownText: @unchecked Sendable {
         return inner.lowerBound.column - outer.lowerBound.column
     }
 
+    /// A node's text, with the whitespace its break nodes stand for.
+    ///
+    /// Headings, emphasis and link labels are projected through here rather than walked, so a break
+    /// inside any of them reaches a reader only if this reproduces it — a childless node otherwise
+    /// projects to the empty string and joins the words either side of it into one.
     private static func plain(_ markup: Markup) -> String {
         if let text = markup as? Markdown.Text { return text.string }
         if let code = markup as? InlineCode { return code.code }
+        if markup is SoftBreak { return " " }
+        if markup is LineBreak { return "\n" }
         return markup.children.map(plain).joined()
     }
 }
@@ -694,6 +913,16 @@ final class CodeHighlighter: @unchecked Sendable {
 
     private let lock = NSLock()
     private var cache: [Key: NSAttributedString] = [:]
+    /// The keys in least-recently-used order, oldest first — the bound below, and what makes it a
+    /// bound by *use*: a block still being scrolled past survives, and one drawn once an hour ago
+    /// does not.
+    private var order: [Key] = []
+    /// **Bounded, for `MarkdownText`'s reason and one more.** This cache is process-wide and holds
+    /// the source and its styled form for every fenced block the app has ever drawn, so a session
+    /// left open all day accumulated a transcript's worth of attributed strings that nothing ever
+    /// released. Entries rather than bytes: a code block is bounded by the message that carried it,
+    /// so counting them is the same question with less arithmetic.
+    private let capacity = 256
     private var inFlight: Set<Key> = []
     private let highlighter = Highlighter()
     private var enabled = true
@@ -722,6 +951,7 @@ final class CodeHighlighter: @unchecked Sendable {
         guard enabled != value else { return false }
         enabled = value
         cache = [:]
+        order = []
         return true
     }
 
@@ -745,21 +975,32 @@ final class CodeHighlighter: @unchecked Sendable {
         return offMainRuns
     }
 
-    func styled(code: String, language: String?) -> NSAttributedString {
+    /// The styled code, and whether what came back was the **cold fallback**.
+    ///
+    /// One call path, for the reason there is one highlighter: a caller that keeps its result — the
+    /// markdown cache does, inside a settled block — needs to know that what it holds will be
+    /// superseded, and no assertion over the returned string can tell a fallback from a language
+    /// with one colour. The key comes back so the holder can ask later whether the fill has landed;
+    /// nil means what came back is final.
+    func styling(code: String, language: String?) -> (text: NSAttributedString, cold: Key?) {
         let plain = NSAttributedString(string: code,
                                        attributes: [.font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)])
-        guard isEnabled, let language, highlighter.hasLanguage(named: language) else { return plain }
+        guard isEnabled, let language, highlighter.hasLanguage(named: language) else { return (plain, nil) }
         count(request: 1)
         let key = Key(code: code, language: language)
-        if let hit = cached(key) { return hit }
-        guard claim(key) else { return plain }
+        if let hit = cached(key) { return (hit, nil) }
+        guard claim(key) else { return (plain, key) }
         Task.detached(priority: .userInitiated) { [self] in
             let styled = highlighter.attributedString(for: code, language: language)
             countThread()
             store(key, styled, releasing: true)
         }
-        return plain
+        return (plain, key)
     }
+
+    /// Whether this key's styled form is in the cache now. The markdown cache's staleness check,
+    /// and the only thing it asks of the highlighter.
+    func isCached(_ key: Key) -> Bool { cached(key) != nil }
 
     /// Fills the cache off-main before a measurement, so the measured path is the cached one.
     func warm(_ blocks: [(code: String, language: String?)]) async {
@@ -781,7 +1022,9 @@ final class CodeHighlighter: @unchecked Sendable {
     // paths above call these rather than taking it themselves.
     private func cached(_ key: Key) -> NSAttributedString? {
         lock.lock(); defer { lock.unlock() }
-        return cache[key]
+        guard let hit = cache[key] else { return nil }
+        touch(key)
+        return hit
     }
 
     /// True when this caller is the one that should do the work; false when another already is.
@@ -806,6 +1049,17 @@ final class CodeHighlighter: @unchecked Sendable {
     private func store(_ key: Key, _ value: NSAttributedString, releasing: Bool) {
         lock.lock(); defer { lock.unlock() }
         cache[key] = value
+        touch(key)
+        if order.count > capacity, let evicted = order.first {
+            order.removeFirst()
+            cache.removeValue(forKey: evicted)
+        }
         if releasing { inFlight.remove(key) }
+    }
+
+    /// Moves a key to the most-recently-used end. Called with the lock held.
+    private func touch(_ key: Key) {
+        if let index = order.firstIndex(of: key) { order.remove(at: index) }
+        order.append(key)
     }
 }

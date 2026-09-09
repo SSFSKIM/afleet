@@ -53,6 +53,12 @@ struct RowFrame<Body: View>: View {
 /// table through TextKit and leave everything else to SwiftUI; a row builder that re-implemented any
 /// of that would be a second renderer with its own bugs. The parse is cached by content, so building
 /// this value on every body evaluation costs a dictionary lookup.
+///
+/// **Finalised, not settled.** Every source that reaches here has stopped arriving — the item is
+/// durable, and a message still streaming is drawn by the table's own preview row and never by
+/// this. So the whole of it is parsed, tail included: §4's block-boundary split is what keeps a
+/// growing fragment from being re-parsed thirty times a second, and applying it to text that will
+/// never grow again just leaves the last block drawing its own delimiters.
 struct MarkdownBody: View {
 
     let key: String
@@ -62,9 +68,12 @@ struct MarkdownBody: View {
         TimelineMarkdownRow(row: settled)
     }
 
-    private var settled: RenderedRow {
+    /// The parsed row this body draws. Internal rather than private: it is what a test about the
+    /// finalisation of a completed message asserts on, and rebuilding it in the test would assert
+    /// against a second pipeline rather than this one.
+    var settled: RenderedRow {
         var row = RenderedRow(key: key, source: source)
-        row.settle(markdown: .shared, highlighter: .shared)
+        row.finalise(markdown: .shared, highlighter: .shared)
         return row
     }
 }

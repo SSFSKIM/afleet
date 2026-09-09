@@ -212,7 +212,7 @@ enum Highlighting {
         func hasNoGrammar(for language: String) -> Bool {
             // A block whose language has no grammar comes back as one undifferentiated run in the
             // monospaced fallback font, which is exactly what §6 says the ordinary path is.
-            let styled = highlighter.styled(code: "invented", language: language)
+            let styled = highlighter.styling(code: "invented", language: language).text
             var effective: NSRange = NSRange(location: 0, length: 0)
             _ = styled.attributes(at: 0, effectiveRange: &effective)
             return effective.length == styled.length
