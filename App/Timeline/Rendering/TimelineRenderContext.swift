@@ -158,6 +158,33 @@ struct TimelineRenderContext {
     /// renderer honours rather than a debug switch. Task 5 lands the readout that sets it; until
     /// then fenced blocks are highlighted, which is what the engine's own renderer does.
     var syntaxHighlightingEnabled: Bool = true
+
+    /// Who the assistant's messages on this surface are by, when the surface is not the channel's
+    /// own thread.
+    ///
+    /// **Nil is the default and is the channel's own reading**, so nothing about the channel column
+    /// moves: a row drawn without one is authored exactly as it was before this field existed. An
+    /// agent run's transcript supplies one, because acceptance item 38 wants a subagent's messages
+    /// authored by the *agent type* with the *run's* badge and never by "Claude" — and that is a
+    /// property of the surface rather than of any row. Every row of one run shares it, and a row
+    /// that derived it for itself would have to reach the channel's run tree from inside a message.
+    var authorship: TimelineAuthorship?
+}
+
+/// Who a surface's assistant messages are by, and on which model (root §8.8, item 38).
+///
+/// Two strings and nothing else: the fields a row's frame already draws. It carries no run id, no
+/// node and no tree — a value that carried the run would put a task id inside every row's context
+/// for the first diagnostic that prints one (§11), and the row has no use for it.
+struct TimelineAuthorship: Equatable, Sendable {
+
+    /// The name above the message. Sanitised by whoever built it, at the boundary where the wire
+    /// string became content — this value re-strips nothing and inherits the strip.
+    let author: String
+
+    /// The badge beside the name, or nil where the surface knows of none and the row should fall
+    /// back to the message's own model.
+    let badge: String?
 }
 
 // MARK: - What a row builds through the context

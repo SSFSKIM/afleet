@@ -89,6 +89,21 @@ final class AgentTranscriptTests: XCTestCase {
                        + "time(s), not once")
         XCTAssertEqual(drawn.filter { $0.localizedCaseInsensitiveContains("claude") }.count, 0,
                        "the subagent's transcript is authored by the assistant rather than by the run")
+
+        // **The message row itself**, which is what item 38 is about. A pane that set a header and
+        // left the rows alone draws the run's name once at the top and "Claude" over every message,
+        // and passes every clause above.
+        let row = ViewTree.values(of: String.self, in: rig.assistantRow(model: TranscriptRig.runModel))
+        XCTAssertEqual(row.filter { $0 == TranscriptRig.agentType }.count, 1,
+                       "the drawn message states the agent type \(row.filter { $0 == TranscriptRig.agentType }.count) "
+                       + "time(s), not once")
+        XCTAssertEqual(row.filter { $0.localizedCaseInsensitiveContains("claude") }.count, 0,
+                       "a message inside the subagent's transcript is authored by the assistant")
+        // And the channel column is untouched: the same row with no authorship in its context is the
+        // row it has always been.
+        let column = ViewTree.values(of: String.self, in: TranscriptRig.assistantRow(context: nil))
+        XCTAssertEqual(column.filter { $0 == "Claude" }.count, 1,
+                       "the channel's own thread stopped authoring its messages the way it did")
     }
 
     /// The badge is the **run's own** model, and not the channel's.
@@ -112,6 +127,16 @@ final class AgentTranscriptTests: XCTestCase {
                        + "time(s), not once")
         XCTAssertEqual(drawn.filter { $0 == TranscriptRig.channelModel }.count, 0,
                        "the framing draws the channel's model on a subagent's transcript")
+
+        // The badge on the message, for the reason above: the header is not where item 38's badge
+        // is. The item this row is built from carries the **channel's** model, so a row that kept
+        // drawing its own would draw the wrong one and only this clause would see it.
+        let row = ViewTree.values(of: String.self, in: rig.assistantRow(model: TranscriptRig.channelModel))
+        XCTAssertEqual(row.filter { $0 == TranscriptRig.runModel }.count, 1,
+                       "the drawn message badges \(row.filter { $0 == TranscriptRig.runModel }.count) run model(s), "
+                       + "not 1")
+        XCTAssertEqual(row.filter { $0 == TranscriptRig.channelModel }.count, 0,
+                       "a message inside the run's transcript is badged with a model that is not the run's")
     }
 
     /// A run no assistant frame has arrived for **says so** rather than borrowing the channel's.
@@ -224,6 +249,7 @@ private struct TranscriptRig {
 
     let timeline: ChannelTimeline
     let model: AgentsModel
+    let key = PanelFixtures.key(52)
 
     /// `streaming` opens a preview on the channel — the state in which "the tail is not passed
     /// through" is a clause that can fail.
@@ -246,8 +272,28 @@ private struct TranscriptRig {
                                                                          blocks: []) : nil,
                                    agents: tree)
         let store = AgentSelectionStore()
-        let key = PanelFixtures.key(52)
         store.select(run, in: key)
         model = AgentsModel(channel: key, timelines: { [timeline] _ in timeline }, store: store)
+    }
+
+    /// One assistant message of the open run, drawn through **the pane's own context expression**.
+    ///
+    /// The row is C6.1's, unmodified; what this walks is the frame it draws around the message,
+    /// which is where the author and the badge are. Reflection does not enter the frame's content
+    /// closure, so the strings found here are exactly the frame's own.
+    func assistantRow(model itemModel: String?) -> Any {
+        let app = AppModel(registry: RowRegistry())
+        guard let content = model.read.content(of: model.selectedRun ?? "") else { return [] }
+        let context = AgentTranscriptPane.context(for: content, in: app,
+                                                  channel: app.timelines.model(for: key), model: model)
+        return Self.assistantRow(context: context, model: itemModel)
+    }
+
+    /// The same row, for a caller that supplies the context — nil being the channel column's, which
+    /// is the half that says this leaf changed nothing there.
+    static func assistantRow(context: TimelineRenderContext?, model: String? = channelModel) -> Any {
+        AssistantMessageBody(item: InventedItems.assistant([InventedItems.text("an invented sentence")],
+                                                           model: model),
+                             context: context).body
     }
 }

@@ -164,7 +164,26 @@ struct AssistantMessageBody: View {
     let context: TimelineRenderContext?
 
     var body: some View {
-        RowFrame(author: "Claude", badge: item.model, timestamp: item.timestamp) { content }
+        RowFrame(author: Self.author(in: context), badge: Self.badge(of: item, in: context),
+                 timestamp: item.timestamp) { content }
+    }
+
+    /// Who this message is by (item 38).
+    ///
+    /// The channel's own thread has no authorship in its context and reads "Claude", which is what
+    /// every row of it has always read. A surface that names one — an agent run's transcript, whose
+    /// messages are the subagent's — is authored by what it named, because a subagent's words
+    /// attributed to the assistant are the misattribution item 38 is about.
+    static func author(in context: TimelineRenderContext?) -> String {
+        context?.authorship?.author ?? "Claude"
+    }
+
+    /// The badge beside the author: the surface's own where it states one, else the model this
+    /// message's own frame carried. A run that has not spoken states none and the message's own is
+    /// the honest fallback — it is the frame's, never the channel header's.
+    static func badge(of item: AssistantMessageItem, in context: TimelineRenderContext?) -> String? {
+        guard let authorship = context?.authorship else { return item.model }
+        return authorship.badge ?? item.model
     }
 
     @ViewBuilder @MainActor var content: some View {

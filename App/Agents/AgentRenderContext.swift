@@ -27,8 +27,14 @@ enum AgentRenderContext {
     /// reason: a capability wired to nothing satisfies any assertion that only reads the value back,
     /// so the construction is a function and the test exercises what came out of it.
     @MainActor
+    /// `authorship` is the run's, and is what makes a message in this pane the *subagent's* rather
+    /// than the assistant's (item 38, gate G2). It travels on the context because it is a property
+    /// of the surface: every row of one run shares it, and a row that derived it would have to reach
+    /// the channel's run tree from inside a message. Nil is the channel column's reading and is what
+    /// a caller with no run open passes.
     static func context(in app: AppModel, channel: ChannelTimelineModel,
-                        collapse: TimelineCollapseState, editing: TimelineEditState) -> TimelineRenderContext {
+                        collapse: TimelineCollapseState, editing: TimelineEditState,
+                        authorship: TimelineAuthorship? = nil) -> TimelineRenderContext {
         let row = app.browser?.row(channel.key.session)
         return TimelineRenderContext(key: channel.key,
                                      links: app.panels.links,
@@ -55,6 +61,7 @@ enum AgentRenderContext {
                                      neighbourhood: channel.neighbourhood,
                                      isOverlayStale: channel.timeline.overlay.stale,
                                      autoScrollEnabled: channel.readout.autoScrollEnabled,
-                                     syntaxHighlightingEnabled: channel.readout.syntaxHighlightingEnabled)
+                                     syntaxHighlightingEnabled: channel.readout.syntaxHighlightingEnabled,
+                                     authorship: authorship)
     }
 }

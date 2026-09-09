@@ -33,7 +33,10 @@ struct AgentTranscriptPane: View {
             VStack(alignment: .leading, spacing: 0) {
                 AgentTranscriptHeader(content: content)
                 model.transcript.view(for: input)
-                    .environment(\.timelineContext, app.map(context))
+                    .environment(\.timelineContext, app.map { app in
+                        Self.context(for: content, in: app,
+                                     channel: app.timelines.model(for: model.channel), model: model)
+                    })
             }
         }
     }
@@ -55,11 +58,27 @@ struct AgentTranscriptPane: View {
         }
     }
 
-    /// The context this pane's rows are drawn through — the app's objects, the channel's model, and
-    /// the collapse and edit state the session owns so a fold survives a body evaluation.
-    private func context(in app: AppModel) -> TimelineRenderContext {
-        AgentRenderContext.context(in: app, channel: app.timelines.model(for: model.channel),
-                                   collapse: model.transcriptCollapse, editing: model.transcriptEditing)
+    /// The context this pane's rows are drawn through — the app's objects, the channel's model, the
+    /// collapse and edit state the session owns so a fold survives a body evaluation, and **the
+    /// run's authorship**.
+    ///
+    /// Static and given the channel model rather than reaching for it, for `AgentRenderContext`'s
+    /// reason: the value a test asserts about has to be the value the body draws through, and a
+    /// second expression that assembled the same fields would prove nothing about this one.
+    static func context(for content: AgentNodeContent, in app: AppModel, channel: ChannelTimelineModel,
+                        model: AgentsModel) -> TimelineRenderContext {
+        AgentRenderContext.context(in: app, channel: channel,
+                                   collapse: model.transcriptCollapse, editing: model.transcriptEditing,
+                                   authorship: authorship(of: content))
+    }
+
+    /// The run's authorship, as every row of its transcript draws it (item 38, gate G2).
+    ///
+    /// The same two answers the header states, and deliberately the same expressions: the framing at
+    /// the top of the pane and the name over each message are one claim about whose words these are,
+    /// and two derivations of it could disagree.
+    static func authorship(of content: AgentNodeContent) -> TimelineAuthorship {
+        TimelineAuthorship(author: AgentTranscriptHeader.author(of: content), badge: content.model)
     }
 }
 
