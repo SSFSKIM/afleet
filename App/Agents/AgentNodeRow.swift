@@ -24,6 +24,9 @@ struct AgentNodeRow: View {
     /// What §8.8 lets the user do to this run, drawn under the **open** node (gate G3). Nil for a
     /// pane with no lifecycle behind it, and then no row offers anything.
     var actions: AgentNodeActions?
+    /// Where this run's transcript is (child spec D12). Read from the tree by the outline, because
+    /// the path is composed from the tree's current slug and a row that held one could go stale.
+    var transcriptURL: URL?
 
     /// Whether this row's branch can be opened, and whether it is.
     enum Disclosure: Hashable, Sendable { case leaf, expanded, collapsed }
@@ -53,7 +56,7 @@ struct AgentNodeRow: View {
                     Text(activity).foregroundStyle(.secondary).lineLimit(1)
                 }
                 if isSelected, let actions {
-                    AgentNodeActionBar(content: content, actions: actions)
+                    AgentNodeActionBar(content: content, actions: actions, transcriptURL: transcriptURL)
                 }
             }
             Spacer(minLength: 0)

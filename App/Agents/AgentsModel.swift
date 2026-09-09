@@ -90,6 +90,16 @@ final class AgentsModel: PanelTabSession {
         actions?.refresh = { [reads] in reads.invalidate() }
     }
 
+    /// Where this run's transcript file is, as C3 composes it from the config home, the session id
+    /// and the tree's **current** slug (child spec D12, parity §18.25). Nil for a run this channel's
+    /// tree does not hold.
+    ///
+    /// Read from the tree on every call rather than held: nothing stale can be stored because
+    /// nothing is stored, and a project directory that is renamed moves every run's path at once.
+    /// **Nothing opens it** — the url goes to the channel's link router as a `WorkspaceLink.file`
+    /// and the target is the Files panel's.
+    func transcriptURL(of run: AgentRunID) -> URL? { timelines(channel)?.agents?.transcriptURL(of: run) }
+
     /// The tree, as this pane reads it. A channel with no model has no fold and therefore no tree,
     /// which is `.notOpened` — the same answer the read gives for a channel whose `open` has not
     /// built the reducer yet.

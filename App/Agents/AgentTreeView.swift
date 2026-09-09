@@ -136,7 +136,8 @@ struct AgentOutline: View {
                      disclosure: row.disclosure,
                      toggle: { model.toggle(row.id) },
                      select: { model.select(row.id) },
-                     actions: model.actions)
+                     actions: model.actions,
+                     transcriptURL: model.transcriptURL(of: row.id))
     }
 
     private func bring(_ run: AgentRunID?, into scroll: ScrollViewProxy) {

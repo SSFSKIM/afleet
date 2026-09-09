@@ -37,6 +37,13 @@ final class AgentNodeActions {
 
     private let lifecycle: any LifecycleAPI
     private let channel: ChannelKey
+    /// The **channel's** link router — X7's `ChannelContext.links`, which is where a panel raises a
+    /// link (child spec D12). Nothing here opens the file it names: C5's TCC fact binds and a `.file`
+    /// link's target is the Files panel's, so this side raises the link and stops.
+    private let links: (any LinkRouterCapability)?
+    /// Where *Copy agent id* writes. The general board in the app; a named board under test, so a
+    /// suite never touches the user's clipboard.
+    private let pasteboard: NSPasteboard
 
     /// How the panel drops the derived read after the engine has contradicted it. The read is
     /// recomputed from the published timeline, so there is nothing to re-fetch — what has to happen
@@ -65,9 +72,12 @@ final class AgentNodeActions {
 
     private(set) var lastBackgrounding: BackgroundOutcome?
 
-    init(lifecycle: any LifecycleAPI, channel: ChannelKey) {
+    init(lifecycle: any LifecycleAPI, channel: ChannelKey,
+         links: (any LinkRouterCapability)? = nil, pasteboard: NSPasteboard = .general) {
         self.lifecycle = lifecycle
         self.channel = channel
+        self.links = links
+        self.pasteboard = pasteboard
     }
 
     // MARK: - What a node offers
@@ -138,6 +148,35 @@ final class AgentNodeActions {
             if case WireError.controlError = error { backgroundingDisabled = true }
         }
     }
+
+    // MARK: - The two that send nothing
+
+    /// *Open transcript file*: one `WorkspaceLink.file` on the channel's router (child spec D12).
+    ///
+    /// The url is `AgentRunTree.transcriptURL(of:)`, composed from the config home, the session id
+    /// and the tree's *current* slug on every call — so it answers during the run and not only at
+    /// completion (parity §18.25), and a project that is renamed moves every run's path at once.
+    ///
+    /// **No descriptor is opened on it here.** C5's TCC fact binds — a read of a file under the
+    /// config home is the user's grant to spend — and the `.file` link's target is the Files panel's,
+    /// which is the one reader this app has for a transcript. Raising the link is the whole action.
+    ///
+    /// Fire-and-forget for `FileLink`'s reason: `LinkRouterCapability.open` is `async` and a button's
+    /// action is not.
+    func openTranscript(at url: URL) {
+        guard let links else { return }
+        Task { await links.open(.file(url, line: nil), from: .currentPanel) }
+    }
+
+    /// *Copy agent id*: the node's id on the pasteboard, and nothing logged (child spec D12).
+    ///
+    /// It is the one place a task id legitimately leaves the app, at the user's explicit request.
+    /// §11's rule is about reports, not about the user's own clipboard — so this writes the id and
+    /// records, prints and traces nothing about it.
+    func copyAgentID(_ content: AgentNodeContent) {
+        pasteboard.clearContents()
+        pasteboard.setString(content.id, forType: .string)
+    }
 }
 
 /// The actions on the open node, drawn (gate G3).
@@ -153,6 +192,9 @@ struct AgentNodeActionBar: View {
 
     let content: AgentNodeContent
     let actions: AgentNodeActions
+    /// Where this run's transcript is, as C3 composes it. Nil for a run whose tree does not hold one,
+    /// and the affordance is then absent rather than pointing at a path nobody answered for.
+    var transcriptURL: URL?
 
     var body: some View {
         HStack(spacing: 8) {
@@ -162,6 +204,16 @@ struct AgentNodeActionBar: View {
             if actions.offersMoveToBackground(content) {
                 Button("Move to Background") { Task { await actions.moveToBackground(content) } }
             }
+            if let transcriptURL {
+                Button("Open Transcript File") { actions.openTranscript(at: transcriptURL) }
+            }
+            Button("Copy Agent ID") { actions.copyAgentID(content) }
+            // *Send message* is Task 7's: the relay carries a delivery state concluded from the
+            // agent's own frames, and an affordance that sent a prompt with no state behind it would
+            // report success the moment the call returned — which is the conclusion item 51 exists to
+            // refuse. The affordance is drawn and inert until that machine lands.
+            Button("Send Message…") {}
+                .disabled(true)
         }
         .font(.caption)
     }

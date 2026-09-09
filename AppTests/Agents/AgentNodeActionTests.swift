@@ -137,6 +137,95 @@ final class AgentNodeActionTests: XCTestCase {
                        "\(actions.staleBackgrounding.count) run(s) were marked stale by a reply that moved one")
     }
 
+    // MARK: - The two that send nothing
+
+    /// **G3: *Open transcript file* is one `WorkspaceLink.file`, and no descriptor is opened.**
+    ///
+    /// Three clauses. The link goes to the **channel's** router — X7's `ChannelContext.links`, which
+    /// is the one route a panel has. It carries the url `AgentRunTree.transcriptURL(of:)` composes,
+    /// so a panel that guessed a path would name a different file. And nothing under `App/Agents/`
+    /// opens a descriptor on it: C5's TCC fact binds and the `.file` target is the Files panel's, so
+    /// a panel that read the transcript itself would be a second reader spending a grant that is not
+    /// its own.
+    func testOpenTranscriptFileEmitsOneFileLinkAndOpensNoDescriptor() async throws {
+        let rig = try Rig(mirror: Rig.runningAgent())
+        rig.model.select(Rig.runID)
+        let expected = try XCTUnwrap(rig.model.transcriptURL(of: Rig.runID), "the tree composed no transcript path")
+
+        try press("Open Transcript File", on: Rig.runID, in: rig)
+        while await rig.links.opened.isEmpty { await Task.yield() }
+
+        let opened = await rig.links.opened
+        XCTAssertEqual(opened.count, 1, "one press raised \(opened.count) link(s)")
+        XCTAssertTrue(opened.first == .file(expected, line: nil),
+                      "the link raised is not a .file at the path the tree composes")
+        let sent = await rig.lifecycle.sent.count
+        XCTAssertEqual(sent, 0, "opening a transcript sent \(sent) control request(s)")
+
+        // The static half: no source under `App/Agents/` reaches a file at all.
+        for (name, code) in try Self.agentSources() {
+            for opener in ["FileHandle", "contentsOf:", "contentsOfFile", "FileManager.default",
+                           "InputStream", "String(contentsOf"] {
+                XCTAssertFalse(code.contains(opener),
+                               "\(name) reaches a file directly instead of raising a link")
+            }
+        }
+    }
+
+    /// A run whose tree composes no path is offered nothing, rather than a button pointing at a path
+    /// nobody answered for.
+    func testARunWithNoTranscriptPathIsOfferedNoOpen() throws {
+        let rig = try Rig(mirror: Rig.runningAgent())
+        rig.model.select(Rig.runID)
+        // The tree that composes the path is gone; the read is not, because the node still stands in
+        // the timeline the row was built from.
+        rig.published.timeline.agents = nil
+
+        XCTAssertNil(rig.model.transcriptURL(of: Rig.runID), "a channel with no tree composed a path anyway")
+    }
+
+    /// **G3: *Copy agent id* puts the node id on the pasteboard, and logs nothing.**
+    ///
+    /// It writes to a **named** board, never the general one: a suite that took the user's clipboard
+    /// while it ran would be a side effect nobody asked for. The second clause is the §11 one — the
+    /// id leaves the app here and nowhere else, and no diagnostic in this leaf states one.
+    func testCopyAgentIDWritesTheIDAndLogsNothing() throws {
+        let board = NSPasteboard(name: NSPasteboard.Name("afleet.invented.agents-copy-id"))
+        board.clearContents()
+        let rig = try Rig(mirror: Rig.runningAgent(), pasteboard: board)
+        rig.model.select(Rig.runID)
+
+        try press("Copy Agent ID", on: Rig.runID, in: rig)
+
+        XCTAssertTrue(board.string(forType: .string) == Rig.runID,
+                      "the pasteboard holds something other than the node's own id")
+        // Nothing under `App/Agents/` prints, logs or traces at all, which is what makes "logs
+        // nothing" a property of the source rather than of this one press.
+        for (name, code) in try Self.agentSources() {
+            for spelling in ["print(", "NSLog", "Logger(", "os_log", "debugPrint"] {
+                XCTAssertFalse(code.contains(spelling), "\(name) writes a diagnostic of its own")
+            }
+        }
+    }
+
+    /// Every Swift source under `App/Agents/`, comments dropped so a sentence about a file is not
+    /// read as a call to one. C6.3's G3 shape, for its reason: a rule about the source is checked
+    /// against the source.
+    static func agentSources() throws -> [(name: String, code: String)] {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().appending(path: "App").appending(path: "Agents")
+        let names = try FileManager.default.contentsOfDirectory(atPath: root.path)
+            .filter { $0.hasSuffix(".swift") }.sorted()
+        XCTAssertGreaterThan(names.count, 0, "no source was found under the Agents panel")
+        return try names.map { name in
+            let text = try String(contentsOf: root.appending(path: name), encoding: .utf8)
+            let code = text.split(separator: "\n", omittingEmptySubsequences: false)
+                .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+                .joined(separator: "\n")
+            return (name, code)
+        }
+    }
+
     // MARK: - The rig
 
     /// One channel, one published timeline holding C3's tree and C3's registry mirror, and the tab
@@ -153,20 +242,25 @@ final class AgentNodeActionTests: XCTestCase {
         static let toolUseID = "toolu_invented0001"
 
         let lifecycle: ActionDouble
+        let links: RecordingLinkRouter
         let host: PanelHostModel
         let published: Published
         let model: AgentsModel
         let key: ChannelKey
 
-        init(mirror: RegistryMirror, tree: AgentRunTree? = nil) throws {
+        init(mirror: RegistryMirror, tree: AgentRunTree? = nil,
+             pasteboard: NSPasteboard = NSPasteboard(name: NSPasteboard.Name("afleet.invented.agents-actions"))) throws {
             lifecycle = ActionDouble()
+            links = RecordingLinkRouter()
             key = PanelFixtures.key(21)
             published = Published(ChannelTimeline(agents: tree ?? Self.runningTree(), registry: mirror))
             host = PanelHostModel()
             try host.register(AgentsTab(timelines: { [published] _ in published.timeline },
                                         selection: AgentSelectionStore(),
-                                        lifecycle: lifecycle))
-            let context = PanelFixtures.context(key)
+                                        lifecycle: lifecycle,
+                                        pasteboard: pasteboard))
+            // The channel's own capabilities, which is where a panel's link goes (X7).
+            let context = ComposerContextFixtures.context(key, links: links)
             model = try XCTUnwrap(host.session(for: .agents, context: context) as? AgentsModel,
                                   "the tab made something other than its own session")
         }

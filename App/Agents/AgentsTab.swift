@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SwiftUI
 import AfleetCore
@@ -31,12 +32,17 @@ final class AgentsTab: PanelTab {
     /// pane that reads runs and offers no action on them is the honest state for a tab with no fleet
     /// behind it, and it is the state each action's own guard already answers for.
     private let lifecycle: (any LifecycleAPI)?
+    /// Where *Copy agent id* writes (child spec D12). The general board in the app; a suite hands in
+    /// a named one, because a test that took the user's clipboard while it ran would be a side effect
+    /// nobody asked for.
+    private let pasteboard: NSPasteboard
 
     init(timelines: @escaping AgentsModel.TimelineReach, selection: AgentSelectionStore,
-         lifecycle: (any LifecycleAPI)? = nil) {
+         lifecycle: (any LifecycleAPI)? = nil, pasteboard: NSPasteboard = .general) {
         self.timelines = timelines
         self.selection = selection
         self.lifecycle = lifecycle
+        self.pasteboard = pasteboard
     }
 
     /// Available for every channel (child spec D10). A channel with no runs and a channel whose
@@ -45,8 +51,13 @@ final class AgentsTab: PanelTab {
     func isAvailable(in context: ChannelContext) -> Bool { true }
 
     func makeSession(for context: ChannelContext) -> any PanelTabSession {
+        // The link router is the **channel's own** — X7 hands a tab its capabilities through the
+        // context, and *Open transcript file* raises a `.file` link on it (child spec D12).
         AgentsModel(channel: context.key, timelines: timelines, store: selection,
-                    actions: lifecycle.map { AgentNodeActions(lifecycle: $0, channel: context.key) })
+                    actions: lifecycle.map {
+                        AgentNodeActions(lifecycle: $0, channel: context.key, links: context.links,
+                                         pasteboard: pasteboard)
+                    })
     }
 
     func makeView(session: any PanelTabSession, context: ChannelContext,
