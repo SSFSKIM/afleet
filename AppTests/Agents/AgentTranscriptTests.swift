@@ -21,6 +21,84 @@ import PanelHostAPI
 @MainActor
 final class AgentTranscriptTests: XCTestCase {
 
+    // MARK: - G2's gate arm, on `nested-depth-2`
+
+    /// **G2, from the run's own frames**: replaying the recording through the app's ingestion, the
+    /// nested run's transcript is that run's items, authored by the type the wire named for it and
+    /// badged with the model its own assistant frames carried.
+    ///
+    /// The corpus is the fixture and not invented items, which is what item 38's "(fixture)" asks
+    /// for and what makes this an arm of the gate rather than a test of a corpus this file wrote.
+    /// Attribution and model propagation both run the whole way here — `WireReducer` stamping
+    /// `Provenance.agentID` from the forwarding block, `observe(assistantModel:agentID:)` setting
+    /// the run's badge, the read sanitising the type, the pane framing it — so a break anywhere on
+    /// that path fails this rather than passing on values a test assigned.
+    ///
+    /// §11 throughout: nothing here writes an agent type, an id or a model down. Every expected
+    /// value is read back out of the tree or the items and compared as a boolean with a written
+    /// message, so a failure states counts and never the recording's bytes.
+    func testTheRunsTranscriptAndAuthorshipComeFromTheRunsOwnFrames() async throws {
+        let rig = try await AgentGateRig(fixture: "nested-depth-2")
+        defer { Task { await rig.finish() } }
+        _ = try await rig.replay()
+        let reached = await rig.settleOnBarrier()
+        XCTAssertTrue(reached, "the replay never reached the model")
+        let armed = await rig.settleOnRuns(2)
+        XCTAssertTrue(armed, "the replay armed a tree with 2 runs in it")
+
+        let read = rig.read()
+        let root = try XCTUnwrap(read.roots.first, "the tree offered no root")
+        let run = try XCTUnwrap(read.children(of: root).first, "the root has no child to open")
+        let pane = rig.pane()
+        pane.select(run)
+        let content = try XCTUnwrap(pane.read.content(of: run), "the read holds no content for the nested run")
+
+        // The filter, on the recording: the run's items and only the run's, with the parent's — the
+        // sibling of this pane's subject — absent.
+        let input = pane.input(of: run, retainedBy: nil)
+        XCTAssertGreaterThan(input.rows.count, 0, "the nested run drew no rows at all on a recording it spoke in")
+        let mine = AgentRunRead.items(of: run, in: rig.model.timeline)
+        XCTAssertTrue(input.rows.map(\.id) == mine.map(\.id),
+                      "the pane's \(input.rows.count) row(s) are not the run's \(mine.count) item(s), in order")
+        let parents = AgentRunRead.items(of: root, in: rig.model.timeline)
+        XCTAssertGreaterThan(parents.count, 0, "the parent run produced nothing, so its absence proves nothing")
+        let drawnIDs = Set(input.rows.map(\.id.key))
+        XCTAssertEqual(parents.filter { drawnIDs.contains($0.id.key) }.count, 0,
+                       "the parent run's items are drawn inside the nested run's transcript")
+
+        // The authorship the wire named, not one this file wrote.
+        let type = try XCTUnwrap(content.agentType, "the recording named no type for the nested run")
+        XCTAssertFalse(type.isEmpty, "the run's type is empty, so the clauses below compare nothing")
+        XCTAssertFalse(type.localizedCaseInsensitiveContains("claude"),
+                       "the recording's own type for this run is the assistant's name, so this proves nothing")
+        let badge = try XCTUnwrap(content.model, "no assistant frame set the nested run's model")
+        let spoken = Set(mine.compactMap { item -> String? in
+            if case .assistantMessage(let message) = item { return message.model }
+            return nil
+        })
+        XCTAssertEqual(spoken.count, 1, "the run's items carry \(spoken.count) model(s), not the 1 it spoke on")
+        XCTAssertTrue(spoken.first == badge, "the run's badge is not the model its own assistant frames carried")
+
+        // And the **drawn message**, through the pane's own context expression (item 38).
+        let app = AppModel(registry: RowRegistry())
+        let context = AgentTranscriptPane.context(for: content, in: app, channel: rig.model, model: pane)
+        let message = try XCTUnwrap(mine.compactMap { item -> AssistantMessageItem? in
+            if case .assistantMessage(let message) = item { return message }
+            return nil
+        }.first, "the nested run produced no assistant message to draw")
+        let drawn = ViewTree.values(of: String.self, in: AssistantMessageBody(item: message, context: context).body)
+        XCTAssertEqual(drawn.filter { $0 == type }.count, 1,
+                       "the drawn message states the run's type \(drawn.filter { $0 == type }.count) time(s), not once")
+        // The author is checked as the author and not as "no string here says claude": this
+        // recording's model name does, and a sweep over every drawn string would fail on the badge.
+        XCTAssertTrue(AssistantMessageBody.author(in: context) == type,
+                      "the drawn message is authored by something other than the run's own type")
+        XCTAssertFalse(AssistantMessageBody.author(in: context).localizedCaseInsensitiveContains("claude"),
+                       "a message in the run's transcript is authored by the assistant rather than by the run")
+        XCTAssertEqual(drawn.filter { $0 == badge }.count, 1,
+                       "the drawn message badges the run's model \(drawn.filter { $0 == badge }.count) time(s), not once")
+    }
+
     // MARK: - The filter (G2)
 
     /// The pane draws the run's items and only the run's: a main-thread item and a **sibling** run's
