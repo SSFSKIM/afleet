@@ -82,8 +82,8 @@ final class AgentNavigatorTests: XCTestCase {
         XCTAssertEqual(drawn.filter { $0 == AgentUnknownRunNotice.sentence }.count, 1,
                        "the pane drew the unknown-run sentence \(drawn.filter { $0 == AgentUnknownRunNotice.sentence }.count) time(s), not once")
         // And the tree the channel does hold is still drawn beneath it: the other runs stay openable.
-        let beneath = ViewTree.values(of: [AgentTreeView.Row].self, in: AgentTreeView(model: model).body).first
-        XCTAssertEqual(beneath?.count, 1,
+        let beneath = ViewTree.values(of: AgentOutline.self, in: AgentTreeView(model: model).body).first
+        XCTAssertEqual(beneath?.rows.count, 1,
                        "the notice replaced the channel's own runs instead of sitting above them")
         XCTAssertEqual(drawn.filter { $0 == AgentTreeEmptyState.noRuns || $0 == AgentTreeEmptyState.noWire }.count, 0,
                        "a channel with a run in it drew one of the empty-state sentences")
@@ -127,9 +127,14 @@ final class AgentNavigatorTests: XCTestCase {
 
         // The rows the *view* is about to draw, read off the outline it built — not a second call to
         // the helper, which would prove only that the helper can reveal.
-        let drawn = try XCTUnwrap(ViewTree.values(of: [AgentTreeView.Row].self,
-                                                 in: AgentTreeView(model: model).body).first,
-                                  "the panel drew no outline at all")
+        // The outline the body built, and not an `[AgentTreeView.Row]` found by type: an **empty**
+        // array of any element type casts to an empty array of any other, so a walk for the row
+        // array matches the first empty array in the view — which, since the read is cached on the
+        // session, can be one belonging to the tree the cache holds.
+        let outline = try XCTUnwrap(ViewTree.values(of: AgentOutline.self,
+                                                    in: AgentTreeView(model: model).body).first,
+                                    "the panel drew no outline at all")
+        let drawn = outline.rows
         XCTAssertEqual(drawn.count, 2,
                        "the panel drew \(drawn.count) row(s), so the run the chip named is not on it")
         XCTAssertTrue(drawn.last?.id == nested, "the row the chip's run needs is not the one drawn")
