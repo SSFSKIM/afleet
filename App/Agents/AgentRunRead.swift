@@ -9,10 +9,13 @@ import FleetKit
 /// beside it, because a copy this leaf held could drift from the items its nodes point at. It is
 /// the same discipline C6.1's `TimelineNeighbourhood` follows and for the same reason.
 ///
-/// **Three states, not two** (child spec D10). A channel with no runs and a channel whose tree is
-/// nil are different facts: the tree is wire-fed, so every archived and every foreign channel has
-/// none at all, and a user told "no agent runs" when the truth is "we cannot see the runs" has been
-/// misinformed. A two-case enum would force one of them to lie.
+/// **Three states, not two** (child spec D10). A channel with no runs and a channel whose fold has
+/// not been built are different facts, and a two-case enum would force one of them to lie. Since the
+/// C3 corrective the second is no longer "this channel has no wire": `ChannelTimeline.agents` is nil
+/// only *before* `open` builds the reducer, and non-nil afterwards for every channel kind — an
+/// archived or foreign channel is fed from the `.meta.json` sidecars beside its transcript and has
+/// the same tree the same corpus produces live. So the third state is the pre-open one, and a user
+/// told "no agent runs" while the channel is still opening has been told something not yet known.
 struct AgentRunRead: Hashable, Sendable {
 
     enum State: Hashable, Sendable {
@@ -21,8 +24,10 @@ struct AgentRunRead: Hashable, Sendable {
         case tree(roots: [AgentRunID])
         /// The channel has a tree and it is empty.
         case noRuns
-        /// `ChannelTimeline.agents` is nil: the tree is wire-fed and this channel has no wire.
-        case noWire
+        /// `ChannelTimeline.agents` is nil: this channel's fold has not been built yet, so nothing
+        /// has read its runs — neither the wire's task frames nor the sidecars on disk. It is the
+        /// state of a channel the host has no model for and of one whose `open` has not returned.
+        case notOpened
     }
 
     let state: State
@@ -34,7 +39,7 @@ struct AgentRunRead: Hashable, Sendable {
     /// One pass over the tree and the overlay's decisions. Nothing else on the timeline is read.
     init(timeline: ChannelTimeline) {
         guard let tree = timeline.agents else {
-            state = .noWire
+            state = .notOpened
             contents = [:]
             childIDs = [:]
             parentIDs = [:]

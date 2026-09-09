@@ -23,19 +23,20 @@ final class AgentRunReadTests: XCTestCase {
     /// (child spec D10).
     ///
     /// Discriminating: a read that mapped both to an empty roots array passes every assertion about
-    /// the roots and misinforms every archived and every foreign channel — which is most of what
-    /// this app lists — by telling them "no agent runs" when the truth is that the tree is wire-fed
-    /// and this channel has no wire.
+    /// the roots and answers "no agent runs" for a channel whose fold has not been built yet, which
+    /// is a statement about runs nothing has looked for.
     func testANilTreeIsNotAnEmptyTree() {
-        let noWire = AgentRunRead(timeline: ChannelTimeline())
-        XCTAssertTrue(noWire.state == .noWire, "a channel with no tree did not read as the no-wire state")
+        let notOpened = AgentRunRead(timeline: ChannelTimeline())
+        XCTAssertTrue(notOpened.state == .notOpened,
+                      "a channel whose fold has not been built did not read as the not-opened state")
 
         let empty = AgentRunRead(timeline: ChannelTimeline(agents: InventedAgents.tree()))
         XCTAssertTrue(empty.state == .noRuns, "a channel with an empty tree did not read as the no-runs state")
 
-        XCTAssertTrue(noWire.state != empty.state,
+        XCTAssertTrue(notOpened.state != empty.state,
                       "the two empty states are one value, so nothing downstream can word them apart")
-        XCTAssertEqual(noWire.roots.count, 0, "the no-wire state offered \(noWire.roots.count) root(s)")
+        XCTAssertEqual(notOpened.roots.count, 0,
+                       "the not-opened state offered \(notOpened.roots.count) root(s)")
         XCTAssertEqual(empty.roots.count, 0, "the no-runs state offered \(empty.roots.count) root(s)")
     }
 

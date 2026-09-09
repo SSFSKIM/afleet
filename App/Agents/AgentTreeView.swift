@@ -12,7 +12,8 @@ import FleetKit
 ///
 /// **The nesting is the tree's, not the depth's.** `spawn_depth` says how deep a run is and cannot
 /// say *under which* run, so two unrelated depth-2 runs are indistinguishable by it. The parent link
-/// comes from C3's two-step join (and, once a metadata source exists, from that); this view reads
+/// comes from whichever of C3's three sources answered first — the mirrored `agent_metadata` entry,
+/// the `.meta.json` sidecar or the two-step join; this view reads
 /// `children(of:)` and the depth only indents.
 struct AgentTreeView: View {
 
@@ -38,8 +39,8 @@ struct AgentTreeView: View {
                                                 revealing: model.selectedRun))
         case .noRuns:
             AgentTreeEmptyState(sentence: AgentTreeEmptyState.noRuns)
-        case .noWire:
-            AgentTreeEmptyState(sentence: AgentTreeEmptyState.noWire)
+        case .notOpened:
+            AgentTreeEmptyState(sentence: AgentTreeEmptyState.notOpened)
         }
     }
 
@@ -162,18 +163,19 @@ struct AgentUnknownRunNotice: View {
 
 /// The two states a tree with nothing to draw is in, worded apart (child spec D10).
 ///
-/// "No runs" and "we cannot see the runs" are different facts. The tree is wire-fed — every archived
-/// and every foreign channel has none at all — and a user told the first when the second is true has
-/// been misinformed about their own history. The sentences are values so both this view and a test
-/// name the same one.
+/// "No runs" and "the runs have not been read yet" are different facts, and a user told the first
+/// when the second is true has been told an answer where there is none yet. Since the C3 corrective
+/// the tree is fed from the sidecars as well as from the wire, so an archived channel has runs like
+/// any other and the second state is the pre-open one. The sentences are values so both this view
+/// and a test name the same one.
 struct AgentTreeEmptyState: View {
 
     let sentence: String
 
     static let noRuns = "No agent runs in this channel."
 
-    static let noWire = "This channel's agent runs cannot be shown: the run tree is built from a "
-        + "live session's frames, and this channel is being read from its transcript alone."
+    static let notOpened = "This channel's agent runs have not been read yet. They appear as soon as "
+        + "the channel finishes opening."
 
     var body: some View {
         VStack {

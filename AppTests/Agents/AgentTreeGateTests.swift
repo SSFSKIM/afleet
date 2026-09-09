@@ -278,15 +278,11 @@ final class AgentTreeGateTests: XCTestCase {
     /// The first arm is a real channel: `background-shell`'s task frames are a background shell —
     /// a registry row and **not** an agent run — so the fold arms a tree with nothing in it.
     ///
-    /// The second arm is asserted over the value the read is defined on, and **not** over an opened
-    /// channel, because on this baseline no opened channel produces it. `StreamIngestion.open`
-    /// builds the wire fold unconditionally — a file-only channel is handed an already-finished
-    /// event stream rather than none — so `agents` is a non-nil empty tree for every archived and
-    /// every foreign channel. That contradicts `StreamIngestion.swift:155`'s own comment ("nil for
-    /// good on a file-only channel") and the child spec's grounding, and it means an archived
-    /// channel is told *No agent runs in this channel* today, which is exactly the misinformation
-    /// D10 exists to prevent. Reported to the architect rather than papered over: the read keeps
-    /// the honest three-state shape, and the state becomes reachable the moment the producer does.
+    /// The second arm is a channel the host holds **no model** for, which is what the third state
+    /// means since the C3 corrective: `ChannelTimeline.agents` is nil only before `open` builds the
+    /// reducer, and non-nil afterwards for every channel kind, so the fact the state reports is
+    /// "this channel's fold has not been built yet" and never "this channel has no wire". An
+    /// archived channel is not in it — it has a tree fed from its sidecars, which is the arm below.
     func testTheTwoEmptyStatesAreDistinct() async throws {
         let wired = try await AgentGateRig(fixture: "background-shell")
         defer { Task { await wired.finish() } }
@@ -298,19 +294,52 @@ final class AgentTreeGateTests: XCTestCase {
         XCTAssertTrue(wired.read().state == .noRuns,
                       "a wire channel whose task frames are not agent runs did not read as having no runs")
 
-        let noWire = AgentRunRead(timeline: ChannelTimeline())
-        XCTAssertTrue(noWire.state == .noWire, "a timeline with no tree did not read as having no wire")
+        let notOpened = AgentRunRead(timeline: ChannelTimeline())
+        XCTAssertTrue(notOpened.state == .notOpened,
+                      "a timeline whose fold has not been built did not read as the not-opened state")
 
-        XCTAssertNotEqual(AgentTreeEmptyState.noRuns, AgentTreeEmptyState.noWire,
+        XCTAssertNotEqual(AgentTreeEmptyState.noRuns, AgentTreeEmptyState.notOpened,
                           "the two empty states are one sentence, so a user told the first when the "
                           + "second is true has been misinformed")
         XCTAssertEqual(ViewTree.values(of: String.self, in: AgentTreeView(model: wired.pane()).body)
                             .filter { $0 == AgentTreeEmptyState.noRuns }.count, 1,
                        "the no-runs channel does not draw its own sentence")
-        let paneWithNoWire = AgentsModel(channel: wired.key, timelines: { _ in nil }, store: AgentSelectionStore())
-        XCTAssertEqual(ViewTree.values(of: String.self, in: AgentTreeView(model: paneWithNoWire).body)
-                            .filter { $0 == AgentTreeEmptyState.noWire }.count, 1,
-                       "the no-wire state does not draw its own sentence")
+        let unopened = AgentsModel(channel: wired.key, timelines: { _ in nil }, store: AgentSelectionStore())
+        XCTAssertEqual(ViewTree.values(of: String.self, in: AgentTreeView(model: unopened).body)
+                            .filter { $0 == AgentTreeEmptyState.notOpened }.count, 1,
+                       "the not-opened state does not draw its own sentence")
+    }
+
+    /// **An archived channel has runs.** Opened from its transcript files alone — no event stream at
+    /// all, which is every archived and every foreign session — the channel's tree is fed from the
+    /// `.meta.json` sidecars beside the transcript, so the same recording draws the same nesting it
+    /// draws live.
+    ///
+    /// This is the arm the third empty state used to swallow: before the C3 corrective a channel with
+    /// no wire was said to have no visible runs, and a session with a dozen recorded subagent runs
+    /// drew an empty state. The discriminating clause is the last one — neither empty sentence is on
+    /// screen, so a tree that had quietly stayed empty could not pass by drawing "no agent runs".
+    func testAnArchivedChannelsRunsAreRead() async throws {
+        let rig = try await AgentGateRig(fixture: "nested-depth-2", owned: false)
+        defer { Task { await rig.finish() } }
+        let opened = await rig.settleOnOpen()
+        XCTAssertTrue(opened, "the file-only channel never finished opening, so nothing below is a read of it")
+
+        let read = rig.read()
+        XCTAssertTrue(read.state != .notOpened && read.state != .noRuns,
+                      "a channel opened from its transcripts alone has no runs to show")
+        XCTAssertEqual(read.roots.count, 1, "the archived tree read as \(read.roots.count) root(s), not the 1 it holds")
+        let root = try XCTUnwrap(read.roots.first, "the archived tree offered no root")
+        XCTAssertEqual(read.children(of: root).count, 1,
+                       "the archived tree drew \(read.children(of: root).count) child(ren) under its root, not 1")
+        let child = try XCTUnwrap(read.children(of: root).first, "the archived root has no child")
+        XCTAssertEqual(read.content(of: child)?.depth, 2, "the archived nested run does not draw depth 2")
+        XCTAssertEqual(AgentTreeView.visibleRows(read: read, collapsed: [root]).count, 1,
+                       "the archived nested run is not drawn under its root")
+
+        let drawn = ViewTree.values(of: String.self, in: AgentTreeView(model: rig.pane()).body)
+        XCTAssertEqual(drawn.filter { $0 == AgentTreeEmptyState.noRuns || $0 == AgentTreeEmptyState.notOpened }.count, 0,
+                       "the archived channel drew an empty-state sentence over a tree that holds runs")
     }
 
     // MARK: - The tick (child spec D7)

@@ -48,10 +48,11 @@ final class AgentsTabTests: XCTestCase {
         XCTAssertTrue(rig.host.available(for: foreign).contains(.agents),
                       "the host does not offer .agents to a channel with no fold")
 
-        // And the pane it makes for that channel states the *no-wire* fact rather than "no runs".
+        // And the pane it makes for that channel states that its runs have not been read yet, rather
+        // than "no runs" — the host holds no model for it, so nothing has folded it.
         let session = rig.host.session(for: .agents, context: foreign)
         let model = try XCTUnwrap(session as? AgentsModel, "the tab made something other than its own session")
-        XCTAssertTrue(model.read.state == .noWire,
+        XCTAssertTrue(model.read.state == .notOpened,
                       "a channel with no fold reads as a channel that simply has no runs")
     }
 

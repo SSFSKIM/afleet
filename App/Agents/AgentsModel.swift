@@ -59,7 +59,8 @@ final class AgentsModel: PanelTabSession {
     }
 
     /// The tree, as this pane reads it. A channel with no model has no fold and therefore no tree,
-    /// which is `.noWire` — the same answer the read gives for a channel whose fold has none.
+    /// which is `.notOpened` — the same answer the read gives for a channel whose `open` has not
+    /// built the reducer yet.
     var read: AgentRunRead {
         reads.read(of: timelines(channel) ?? ChannelTimeline())
     }

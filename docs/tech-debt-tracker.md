@@ -3615,11 +3615,22 @@ needs more. Nothing above is renumbered.
      Found at C6.4 Task 1 by measuring the value rather than reading the comment;
      `AppTests/AgentChipTests` did not catch it because it constructs `agents: nil` by hand.
      C6.4 kept the honest three-state read and asserted the no-wire arm over the value the read
-     is defined on, rather than asserting the defect. Closer: the C3 corrective already
-     dispatched for tracker 187 should make the value truthful either way — a file-only channel
-     gets a tree fed from its `.meta.json` sidecars, or `agents` is nil when nothing feeds it —
-     and whichever it chooses, the doc comment and X4's amendment are corrected to match. Owner:
-     C3, in the same corrective. Raised by C6.4 Task 1.
+     is defined on, rather than asserting the defect.
+     **Closed by the C3 corrective (`main`, merged into this child at Wave B).** It took the
+     first of the two branches the closer named: `StreamIngestion` now feeds the `agent_metadata`
+     record and every `.meta.json` sidecar beside the transcript into the tree through
+     `apply(agentMetadata:for:)` and `apply(metaFile:)`, for live *and* file-only channels, so an
+     archived or foreign session has the tree its own corpus produces rather than an empty one.
+     The doc comment at `StreamIngestion.swift:154–158` was corrected with it: `agents` is nil
+     **only before `open` builds the reducer** and non-nil afterwards for every channel kind.
+     C6.4's read kept its three states and re-worded the third, which no longer means "this
+     channel has no wire, so the runs are not visible" but "this channel's fold has not been
+     built yet" — `AgentRunRead.State.notOpened`, drawn by `AgentTreeEmptyState.notOpened`, and
+     reached by a channel the host holds no model for. `AgentTreeGateTests` asserts the archived
+     channel's runs are read rather than swallowed by an empty state. X4's own 2026-09-08
+     parenthesis is retracted in the same amendment (root spec §17 X4, corrective `b412f2e`), so
+     nothing is left carrying the refuted sentence. Owner: closed. Raised by C6.4 Task 1; closed
+     at C6.4 Wave B.
 
 173. **C3's `isParked` and §8.8's parking sentence are two different readings, and only one is
      computable.** `AgentRunTree.isParked(_:)`
@@ -3666,3 +3677,21 @@ needs more. Nothing above is renumbered.
      it on appearance, ahead of the open-run scroll. Owner: C6.4's successor, with the transcript
      pane's own scroll retention, which has the same shape. Raised by Wave A review.
 
+
+176. **`ViewTree.values(of:in:)` matches an empty array of any element type against an empty
+     array of any other, so a walk for one row type silently finds an unrelated empty one.**
+     `AppTests/Support/ViewTree.swift:7` is `if let match = value as? T { return [match] }`, and
+     an empty Swift array dynamic-casts to any other array type — `[] as [String] as? [SomeRow]`
+     succeeds and yields an empty `[SomeRow]`. So `values(of: [SomeRow].self, in: body)` returns
+     a first element that came from a different property entirely whenever the body stores an
+     empty array of anything, and every assertion over `.first?.count` then reads 0 from a value
+     that is not the one under test. The consequence is a test that passes for the wrong reason
+     and, worse, one that *fails* for the wrong reason: it cost one wrong assertion in this child
+     already, where a walk for a row array found an unrelated empty array first and the fix was to
+     walk for the view that holds the rows instead of for the array. Wave A found it, verified it
+     and correctly declined to fix it, because `AppTests/Support/` is another leaf's ground and a
+     change there moves every suite in the bundle. Closer: make the match refuse an empty
+     collection whose dynamic type is not `T` — compare `type(of: value)` before the cast, or take
+     the element type as a second parameter — and run the whole app bundle behind it, since the
+     helper is used by every panel's tests. Owner: whoever owns `AppTests/Support/`, ahead of the
+     next child that walks for an array. Raised by C6.4 Wave A, filed by Wave B.

@@ -85,7 +85,7 @@ final class AgentNavigatorTests: XCTestCase {
         let beneath = ViewTree.values(of: AgentOutline.self, in: AgentTreeView(model: model).body).first
         XCTAssertEqual(beneath?.rows.count, 1,
                        "the notice replaced the channel's own runs instead of sitting above them")
-        XCTAssertEqual(drawn.filter { $0 == AgentTreeEmptyState.noRuns || $0 == AgentTreeEmptyState.noWire }.count, 0,
+        XCTAssertEqual(drawn.filter { $0 == AgentTreeEmptyState.noRuns || $0 == AgentTreeEmptyState.notOpened }.count, 0,
                        "a channel with a run in it drew one of the empty-state sentences")
     }
 
