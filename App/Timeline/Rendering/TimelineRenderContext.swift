@@ -190,12 +190,18 @@ extension TimelineRenderContext {
 
     /// Contract Y2's second host: the model behind `TaskCardView` on the `taskRun` row.
     ///
-    /// **The registry mirror is empty, and that is a known gap rather than a placeholder.** §8.4
-    /// offers *Move to background* only for a task C3's `RegistryMirror` knows, and no mirror is
-    /// reachable from the timeline's read model — `ChannelTimeline` carries the overlay, the durable
-    /// half and the preview, and the fold's mirror is inside the ingestion. So the card offers
-    /// *Stop*, which reads the item's own status, and never offers the backgrounding action.
-    /// Tracker 321.
+    /// **The registry mirror is the channel's own, read from the same snapshot the rows came from.**
+    /// §8.4 offers *Move to background* only for a running Bash call or agent run C3's
+    /// `RegistryMirror` knows, with a `tool_use_id` to name in the `background_tasks` request, so a
+    /// card built over an empty mirror can only ever offer *Stop* — which is what this did until the
+    /// mirror reached `ChannelTimeline` (tracker 321). It comes through the neighbourhood, with the
+    /// other reads of the timeline a row makes, and **not** from `ChannelEventPump.mirror`, which is
+    /// Activity's: reaching that from a row would be the second capability path C6's cut exists to
+    /// prevent. A channel with no fold carries an empty mirror and the action is absent, which is
+    /// the same reading it had before — absent rather than wrong.
+    ///
+    /// This is contract Y2's rule, held by both hosts at once: the Thread tab's card and this one
+    /// are the same component over the same mirror, so they offer the same action on the same run.
     ///
     /// **Gated on the channel as well as on the process.** `TaskCardModel.offersStop` reads the
     /// item's status alone, and a `taskRun` item is read out of the transcript — so a colleague's
@@ -204,7 +210,7 @@ extension TimelineRenderContext {
     @MainActor
     func makeTaskCard(_ item: TaskRunItem) -> TaskCardModel? {
         guard offersTaskCard, let lifecycle else { return nil }
-        return TaskCardModel(item: item, registry: RegistryMirror(), lifecycle: lifecycle, channel: key)
+        return TaskCardModel(item: item, registry: neighbourhood.registry, lifecycle: lifecycle, channel: key)
     }
 
     /// Whether a task on this channel gets a card at all — the gate above, named so that the row
@@ -234,15 +240,25 @@ struct TimelineNeighbourhood {
     /// The channel's agent-run tree, consulted by the chip for one thing only: the run id
     /// `AgentNavigating.show(run:in:)` takes.
     ///
-    /// **Nil is the ordinary case, not the edge.** A channel opened from its files — every archived
-    /// channel and every foreign session — has no tree at all (tracker 187 on `main`), so the chip
-    /// is designed for nil: it renders from what the call carries and simply does not navigate,
-    /// because navigating to a fabricated run id would land C6.4 on a node that does not exist.
+    /// **Nil means the channel has not opened yet, and the chip is designed for it**: it renders
+    /// from what the call carries and simply does not navigate, because navigating to a fabricated
+    /// run id would land C6.4 on a node that does not exist. It is no longer the ordinary reading
+    /// for a channel opened from its files — those are fed from their `.meta.json` sidecars and
+    /// carry a tree like any other (tracker 187, closed).
     var agents: AgentRunTree?
 
+    /// The channel's background-task registry mirror, for the one thing §8.4 gates on it: whether a
+    /// task card offers *Move to background*, and the `tool_use_id` the request names.
+    ///
+    /// Here rather than a field of its own on the context, because it is a read of the published
+    /// timeline taken once per publish, which is exactly what this value is for. Empty for a channel
+    /// with no fold, which offers the action on nothing.
+    var registry = RegistryMirror()
+
     /// The neighbourhood of one channel's items.
-    init(items: [TimelineItem] = [], agents: AgentRunTree? = nil) {
+    init(items: [TimelineItem] = [], agents: AgentRunTree? = nil, registry: RegistryMirror = RegistryMirror()) {
         self.agents = agents
+        self.registry = registry
         var previous: Date?
         for item in items {
             if case .toolCall(let call) = item { toolCalls[call.toolUseID] = call }
@@ -285,7 +301,7 @@ final class TimelineNeighbourhoodCache {
         var key = timeline
         key.preview = nil
         if let held = self.key, held == key { return cached }
-        cached = TimelineNeighbourhood(items: timeline.items, agents: timeline.agents)
+        cached = TimelineNeighbourhood(items: timeline.items, agents: timeline.agents, registry: timeline.registry)
         self.key = key
         builds += 1
         return cached
