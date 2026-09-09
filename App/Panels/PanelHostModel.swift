@@ -55,6 +55,14 @@ final class PanelHostModel: PanelHost {
     /// from LRU eviction: a window on screen must not lose the state it is drawing.
     private(set) var poppedOut: [PoppedOutPanel] = []
 
+    /// The pop-out most recently asked for, which is how a `.newWindow` link delivery finds the
+    /// channel *its own* window was opened for. `HostLinkRouter` captures that channel when the
+    /// action is taken and pops out with it immediately before the delivery; the main window is
+    /// free to move to another channel in between, so the delivery cannot ask what is selected
+    /// now. Read against `poppedOut`, which is what makes a closed window's channel stop counting.
+    /// `ObservationIgnored` because nothing draws it — the array above is the observable state.
+    @ObservationIgnored private(set) var lastPopOut: PoppedOutPanel?
+
     /// The channel the main window is looking at, which is exempt from eviction however long ago
     /// it was last rendered. The panel column sets it; a headless host has none.
     private(set) var selectedChannel: ChannelKey?
@@ -306,6 +314,7 @@ final class PanelHostModel: PanelHost {
     func popOut(_ id: PanelTabID, channel: ChannelKey) {
         let entry = PoppedOutPanel(tab: id, channel: channel)
         if !poppedOut.contains(entry) { poppedOut.append(entry) }
+        lastPopOut = entry
         presentWindow?(entry)
     }
 

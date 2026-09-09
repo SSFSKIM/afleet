@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import SwiftUI
 import FleetKit
 import Workbench
 
@@ -10,7 +11,7 @@ import Workbench
 /// call as the first launch, and what lets the whole sequence be tested without a window.
 @MainActor
 @Observable
-final class AppModel {
+final class AppModel: FilesTabHost {
     private(set) var route: AppRoute = .launching
 
     /// The sequence, with its seams. Production values by default; a test replaces the ones it
@@ -72,6 +73,16 @@ final class AppModel {
     /// It outlives a launch: `attach(to:)` rebinds it to the workspace the launch reached and
     /// releases every model built over the previous one.
     let timelines = ChannelTimelineRegistry()
+
+    /// The one set of in-flight decision reservations, and the one place a settled answer is
+    /// announced (contract Y2).
+    ///
+    /// **One instance, app-scoped**, for a reason the registry above shares: a request the engine is
+    /// waiting on is answerable exactly once, and the surfaces that can answer it — Activity's row,
+    /// the Thread tab, the timeline's card — each hold their own `DecisionAnswering`. A set per host
+    /// disables only the host that clicked, so two of them reach the wire and the second is refused;
+    /// and the host holding the request's payload never hears about an answer another surface sent.
+    let decisions = DecisionReservations()
 
     /// Contract X7's host (spec §7), the app's only conformance to `PanelHost`.
     ///
@@ -160,12 +171,38 @@ final class AppModel {
         // could is a future initialiser registering something first — in which case the placeholder
         // would vanish with no signal, and the tab C6 hands itself is the last thing that should
         // disappear quietly.
+        //
+        // C7.5's Files tab under `.files`, which nothing holds, so it is a plain registration and
+        // not a handover (C7.5 Design §10). Asserted for the same reason: a shipped tab that
+        // vanished from the tab bar with no signal is the thing this must not do quietly.
+        //
+        // Its two link targets are registered **with the tab**, not with its first session: the
+        // host builds a session lazily, for rendering, so a `.file` or `.diff` link raised before
+        // anyone has looked at Files would otherwise resolve to nothing (C7.5 Design §9).
+        // Spawned, because registration is a hop onto the link registry's actor and this is not.
+        let files = FilesTab(host: self)
         do {
             try panels.register(PlaceholderTab())
             panels.select(.thread)
+            try panels.register(files)
         } catch {
-            assertionFailure("the placeholder is the first registration on a freshly built host")
+            assertionFailure("the shipped tabs are the first registrations on a freshly built host")
         }
+        // Contract Y1: this child's two kinds, claimed on the app's one registry. Here rather than
+        // in `performLaunch` because registration is synchronous and needs nothing a launch
+        // produces — unlike the `.thread` handover above, whose `unregister` is `async` and whose
+        // tab cannot answer a card without a lifecycle.
+        //
+        // **Once per process.** `RowRegistry.register(kind:)` traps on a second claim, which is the
+        // contract working: two leaves owning one kind is a breach of the C6 cut. A second
+        // `AppModel` is not that — every test that launches builds one — so the claim is guarded by
+        // this flag and the trap is left to say the one thing it exists to say.
+        if !AppModel.hasClaimedRowKinds {
+            AppModel.hasClaimedRowKinds = true
+            RowRegistry.shared.register(kind: .decision) { AnyView(DecisionRowView(row: $0)) }
+            RowRegistry.shared.register(kind: .sentFile) { AnyView(SentFileRowView(row: $0)) }
+        }
+        Task { await files.registerLinkTargets(through: panels.links) }
         // C7.6's Browser tab, under `.browser`, registered once (Q4). Not `try?` for the reason
         // above it: nothing else can hold `.browser` on a host built two lines ago, and a Browser
         // that vanished silently would leave every `.url` link falling through to W5's fallback and
@@ -196,6 +233,101 @@ final class AppModel {
             await panels.links.register(target)
         }
     }
+
+    // MARK: - The Files panel's link deliveries (C7.5 spec Design §9)
+
+    /// What a delivered `.file` or `.diff` opens in: the Files session for the channel the
+    /// delivery belongs to, built if this is that channel's first visit.
+    ///
+    /// **It creates where `filesSaveTarget` refuses to**, and the difference is what asked. A menu
+    /// item computing its own enabled state must not bring a panel into being; a link the user
+    /// clicked is an instruction to open something now, and the channel it belongs to may never
+    /// have shown Files.
+    ///
+    /// **The channel is the host's, not the render path's.** `PanelColumnView` draws only the
+    /// selected tab, so moving channels with Thread up renders no Files view, and a pop-out draws
+    /// one for a channel of its own; resolving through the last render would send the delivery to
+    /// whichever channel was drawn last. This is the Y-side of tracker 240's mitigation, and it is
+    /// still only a mitigation — a link on behalf of a channel that is not on screen cannot say so
+    /// until X7 carries the originating channel.
+    func filesSession(for destination: LinkDestination) -> FilesPanelSession? {
+        guard let key = channel(for: destination),
+              let context = panels.context(for: key) else { return nil }
+        return panels.session(for: .files, context: context) as? FilesPanelSession
+    }
+
+    /// Which channel a delivery belongs to.
+    ///
+    /// `.currentPanel` is the channel the main window is showing. `.newWindow` is the channel the
+    /// host popped a window out for immediately before this delivery — `HostLinkRouter` captured
+    /// it when the action was taken, precisely because the window may have moved on since, and
+    /// reading the selection here would undo that capture: the file would open in the channel the
+    /// window is on now while the window that was just opened renders the one the link came from.
+    /// A pop-out that has been closed since names nothing, and the current channel answers instead.
+    private func channel(for destination: LinkDestination) -> ChannelKey? {
+        guard destination == .newWindow,
+              let window = panels.lastPopOut, window.tab == .files,
+              panels.poppedOut.contains(window) else { return panels.selectedChannel }
+        return window.channel
+    }
+
+    /// Brings Files forward, so a routed file does not open in a panel nobody can see.
+    func selectFilesTab() { panels.select(.files) }
+
+    // MARK: - The Files panel's save (C7.5 spec Design §7)
+
+    /// The session Cmd+S reaches: the Files panel's, for the channel the **key window** is
+    /// showing — a popped-out Files window's own channel, or the main window's while Files is the
+    /// tab it has selected.
+    ///
+    /// **It resolves a session rather than creating one.** `session(for:context:)` builds one for
+    /// any context handed to it, and a menu item computing its own enabled state must not bring a
+    /// panel into being as a side effect. The guards below are what prevent it: `selected == .files`
+    /// means the panel column is already rendering Files for `selectedChannel` and membership of
+    /// `poppedOut` means a window is rendering it for its own channel, so in both cases the host
+    /// already holds that session — and a channel the host has never rendered has no context to
+    /// ask with.
+    func filesSaveTarget(inFocused window: PoppedOutPanel?) -> FilesPanelSession? {
+        guard let key = saveChannel(inFocused: window),
+              let context = panels.context(for: key) else { return nil }
+        return panels.session(for: .files, context: context) as? FilesPanelSession
+    }
+
+    /// Whose Files panel Cmd+S is aimed at.
+    ///
+    /// A popped-out window keeps a channel of its own and never touches the main window's
+    /// selection, so a menu item resolved from that selection alone saves whichever channel the
+    /// main window happens to show while the user is typing into a window in front of them — or
+    /// offers nothing at all. The key window decides: a popped-out Files panel names its own
+    /// channel, any other pop-out names none, and the main window's rule below is what answers
+    /// when it is the key window.
+    ///
+    /// A window closed since is not a target: `poppedOut` is the membership its own scene reads,
+    /// and one that has left it draws the missing-channel placeholder.
+    private func saveChannel(inFocused window: PoppedOutPanel?) -> ChannelKey? {
+        guard let window else {
+            guard panels.selected == .files else { return nil }
+            return panels.selectedChannel
+        }
+        guard window.tab == .files, panels.poppedOut.contains(window) else { return nil }
+        return window.channel
+    }
+
+    /// Whether the *Save* item has anything to do. The panel's own header button is disabled on
+    /// the same fact, so the key and the button agree.
+    func canSaveFiles(inFocused window: PoppedOutPanel?) -> Bool {
+        filesSaveTarget(inFocused: window)?.selected?.isDirty ?? false
+    }
+
+    /// Cmd+S. W4's editor vocabulary is closed, so Monaco cannot report the key press: the host
+    /// sends `save` and writes the `saveRequested` that comes back (C7.5 Design §7).
+    func saveFilesPanel(inFocused window: PoppedOutPanel?) {
+        filesSaveTarget(inFocused: window)?.save()
+    }
+
+    /// Whether this process has already claimed Y1's two kinds. `@MainActor` on the type isolates
+    /// it, so the check and the claim cannot interleave.
+    private static var hasClaimedRowKinds = false
 
     /// Binds the two app-scoped, workspace-dependent owners to the workspace a launch reached.
     ///
@@ -269,7 +401,32 @@ final class AppModel {
         settingsReadout = reached.workspace.map(SettingsReadout.init(workspace:))
         // Before Activity, so a channel opened by the first paint already has a registry bound to
         // the workspace this launch reached rather than to the one it replaced.
-        if let workspace = reached.workspace { bindWorkspace(workspace) }
+        if let workspace = reached.workspace {
+            bindWorkspace(workspace)
+            // Contract Y3: `.thread` passes from C5's placeholder to C6.3's Thread tab. Here rather
+            // than on `init`'s registration line for two reasons with one answer: `unregister` is
+            // `async` — it awaits the link-target withdrawal, so a withdrawal cannot land after the
+            // replacement's registration and delete the *new* tab's target — and an initialiser
+            // cannot await; and this is the first moment a lifecycle exists, without which the tab
+            // can neither answer a card nor post a reply. `unregister` drops the selection when it
+            // held it, so the selection is re-taken.
+            let wasShowingThread = panels.selected == .thread
+            await panels.unregister(.thread)
+            do {
+                // The tab is handed the app's one timeline registry, through two closures and not
+                // as a reference: a decision answered from the Thread tab has to raise
+                // `HostSignal.decisionAnswered` on the channel's fold — the engine sends no frame
+                // back for an answer, so nothing else moves the item out of `.pending` — and the
+                // open thread has to read the item's state from that same fold. This is the one
+                // construction site where the app-scoped registry and a lifecycle both exist.
+                try panels.register(ThreadTab(lifecycle: workspace.fleet,
+                                              fold: ChannelFold(timelines: timelines),
+                                              reservations: decisions))
+            } catch {
+                assertionFailure("the handover unregistered .thread before registering over it")
+            }
+            if wasShowingThread { panels.select(.thread) }
+        }
         await startActivity(over: reached)
         // **Last.** Publishing the route is what puts the actionable surfaces on screen — the
         // sidebar's Background section and its *Adopt*, every row's action menu — and supervisor
@@ -309,8 +466,14 @@ final class AppModel {
                                   configHome: workspace.configHome.root,
                                   shell: shell,
                                   router: router,
-                                  store: workspace.store)
+                                  store: workspace.store,
+                                  reservations: decisions)
         sink.model = model
+        // Contract X4 and spec D2: a card answered from Activity raises `decisionAnswered` on the
+        // channel's own fold. Activity holds no timeline model — it answers for channels the user
+        // has never opened — so it is given the app's one registry as a provider, the shape the
+        // composer registry receives its seams in.
+        model.timeline = { [timelines] key in timelines.model(for: key) }
         activity = model
         model.attach(to: browser)
         // Activity first, authorisation after and not awaited here — see `ActivityLaunch`.

@@ -1278,7 +1278,7 @@ material set; the sidebar uses native vibrancy; type is the system font.
 
 | Card | Trigger | Rendering | Answer |
 |---|---|---|---|
-| Permission | `can_use_tool` without `requires_user_interaction` | display name, consent line, input formatted per tool (shell in monospace, `Edit` and `Write` as Monaco diffs, paths as links); `decision_reason` stripped of ANSI, rebuilt from `decision_reason_type` and `matched_ask_rule` when empty (*A-24*); a card raised inside a subagent is labelled with that agent's type and description by joining `agent_id` to `task_started.task_id`, and also shows on the run's node in the Agents tab | *Allow once* → `allow`, `user_temporary`; *Always allow* only when `permission_suggestions` exist and `suppress_always_allow_rule` is unset → `allow` with `updatedPermissions` at the chosen `destination` (user, project or local settings), `user_permanent`; *Deny…* → `deny`, `user_reject` |
+| Permission | `can_use_tool` without `requires_user_interaction` | display name, consent line, input formatted per tool (shell in monospace, `Edit` and `Write` as Monaco diffs, paths as links); `decision_reason` stripped of ANSI, rebuilt from `decision_reason_type` and `matched_ask_rule` when empty (*A-24*); a card raised inside a subagent is labelled with that agent's type and description by joining `agent_id` to `task_started.task_id`, and also shows on the run's node in the Agents tab | *Allow once* → `allow`, `user_temporary`; *Always allow* only when `permission_suggestions` exist and `suppress_always_allow_rule` is unset → `allow` with `updatedPermissions`, `user_permanent` — a rule suggestion carries the chosen `destination` (user, project or local settings), while a `setMode` suggestion's destination is `session` and the two permission fixtures show `setMode` is the common case (sentence split 2026-09-09 at C6.3's merge); *Deny…* → `deny`, `user_reject` |
 | Question | `can_use_tool` for `AskUserQuestion` | options, side-by-side previews, multi-select, *Other* | `allow` with `updatedInput.answers` and `annotations` |
 | Plan approval | `can_use_tool` for `ExitPlanMode` | plan markdown; *Approve*, *Approve and auto-accept edits*, *Reject with feedback* | `allow` with `updatedPermissions: [setMode]`, or `deny` with feedback |
 | Task | task frames, and running foreground Bash calls and agent runs the registry mirror knows | name, active form, elapsed, per-task *Stop*; *Move to background* only on a running Bash call or agent run present in the registry mirror, never on Read, Edit, WebSearch or other plain calls; a `{backgrounded: false}` answer means the entry is stale or ineligible, so the card refreshes and the action disappears without a banner | `stop_task`; `background_tasks {tool_use_id}` → `{backgrounded: <bool>}` |
@@ -1290,12 +1290,14 @@ means the tool's own card is the surface with no one-tap approve or deny. Cards 
 or cancelled by the binary become inert with the outcome shown.
 
 The two declared dialog kinds, with shapes from the bundle's dialog definitions
-(`modules/chunk-1kg58a1a.js`, `modules/chunk-sct99ax9.js`; *Parity F-19*):
+(2.1.257's `modules/chunk-1kg58a1a.js` and `modules/chunk-sct99ax9.js`; on 2.1.263 the same
+definitions sit at `cli.pretty.js:702406` and `:725659`, a stabler citation than a chunk name —
+corrected 2026-09-09 at C6.3's merge; *Parity F-19*):
 
 | Kind | Payload | Card | Result |
 |---|---|---|---|
 | `refusal_fallback_prompt` | `{originalModel, fallbackModel, apiRefusalCategory?, guidanceText?, retractedMessageUuids?}` | the guidance text and refusal category; *Retry on <fallbackModel>*, *Edit prompt*, *Keep the refusal*; closing the card cancels | `retry_fallback`; `edit_prompt` (the engine aborts the turn; the composer is prefilled with the last user text); `cancelled` for *Keep the refusal*; close → `{behavior: "cancelled"}`. The binary's default is `cancelled` |
-| `fable_overage_consent_prompt` | `{overagesEnabled, modelName?, balanceCents?, currency?}` | the model name, balance and currency. With `overagesEnabled: true`: *Use usage credits*, *Switch to the default model*, *Not now*. With `overagesEnabled: false`: *Set up usage credits…*, which opens the Anthropic billing page in the Browser tab and leaves the card pending, then *Switch to the default model* and *Not now*, with a note that the session switches models until credits exist; closing cancels | `consent`, offered only when `overagesEnabled` is true, because a bare wire reply never enables billing; `switch_default`; `cancelled` for *Not now*; close → `{behavior: "cancelled"}`. Default `cancelled` |
+| `fable_overage_consent_prompt` | `{overagesEnabled, modelName?, balanceCents?, currency?}` | the model name and whichever of `balanceCents` and `currency` arrives — the engine's only construction site (2.1.263 `cli.pretty.js:770104`) feeds neither, so the card renders what it is given (corrected 2026-09-09). With `overagesEnabled: true`: *Use usage credits*, *Switch to the default model*, *Not now*. With `overagesEnabled: false`: *Set up usage credits…*, which opens the billing page in the Browser tab only when the bundle names a URL — at 2.1.263 the payload carries none (`:725659`), so the card shows a plain note instead — and leaves the card pending, then *Switch to the default model* and *Not now*, with a note that the session switches models until credits exist; closing cancels | `consent`, offered only when `overagesEnabled` is true, because a bare wire reply never enables billing; `switch_default`; `cancelled` for *Not now*; close → `{behavior: "cancelled"}`. Default `cancelled` |
 
 The refusal card's `retractedMessageUuids` name already-streamed messages the refusal
 concerns. They are evicted from the timeline on resolution, whatever the choice, or when
@@ -1305,8 +1307,10 @@ follow are handled by the `supersedes` rule of §7.3. After the overage card a
 fallback_model, persisted_as_default, content}` frame may arrive even after `consent`,
 because the engine never enables billing from a bare wire reply; the card renders that
 frame's `content` as its outcome and the header model badge follows `fallback_model`. An
-unanswered dialog is cancelled by the binary at its dialog deadline, and the card goes
-inert.
+unanswered dialog is cancelled by the binary at its dialog deadline — five minutes, configurable
+(2.1.263) — and the card goes inert. `AskUserQuestion` has an extended variant behind a flag that
+adds `kind`, `placeholder` and numeric bounds per question; the card is built to accept it
+(both recorded 2026-09-09 at C6.3's merge).
 
 ### 8.5 Composer
 
@@ -1356,7 +1360,8 @@ the permission-ask notification about six seconds after an ask is left waiting, 
 threshold that is the binary's, and its input (`message`, `notification_type`,
 `session_id`, `cwd`, `transcript_path`) is display-ready, so the notification posts from
 the input alone (fixture `notification-hook`). Shortcuts: Cmd+K
-switcher, Esc interrupt, Cmd+Shift+Esc stop everything (confirm), Cmd+Enter send, Cmd+1…7
+switcher, Esc interrupt, Cmd+Shift+Esc stop everything (confirm), Cmd+Enter send, Cmd+S save the Files tab's editor (added 2026-09-09 at C7.5's merge;
+W4's vocabulary is closed, so the key is the host's), Cmd+1…7
 panel tabs, Cmd+Shift+T new terminal tab, Shift+Tab cycle permission mode, Cmd+Shift+A
 Activity.
 
@@ -1433,7 +1438,9 @@ the tree-shaken output committed per §11, never built inside `swift build`) fro
 for all Monaco languages; language services only for the web languages it ships. Markdown,
 images, PDF, audio and video open in native viewers (attributed text, `NSImage`, PDFKit,
 AVKit, Quick Look fallback). A file watcher refreshes open files when the agent edits
-them, with a conflict banner if the buffer is dirty. Paths in items open here at the line.
+them, with a conflict banner if the buffer is dirty (the watcher covers open files; the tree
+refreshes on expansion and on demand — narrowed 2026-09-09 at C7.5's merge from its Parent
+revisions). Paths in items open here at the line.
 
 ### 9.2 Source Control and GitHub
 
@@ -1746,8 +1753,9 @@ Behavior a person can observe. Commands assume the app is built with
     `can_use_tool` and then `control_cancel_request` for it, the card becomes inert with
     "answered elsewhere" and the following frames render normally.
 43. **Malformed host answer.** With the Developer action *Send malformed answer to next
-    permission* armed, approve a card: the timeline shows the binary's own text "The
-    canUseTool callback returned an invalid permission result" as the tool's denial, and
+    permission* armed, approve a card: the timeline shows the binary's own text, beginning "The
+    canUseTool callback returned an invalid permission result" (the engine appends the expected
+    answer shape; corrected to a prefix 2026-09-09), as the tool's denial, and
     the channel continues.
 44. **Exit while pending.** `kill -9` an owned process while a permission card is pending:
     the card becomes inert with "session ended", the channel respawns, and no card is
@@ -2478,6 +2486,10 @@ settled (bounded by the fork-identity deadline), because `fork` answers the prov
 the sibling is still connecting and `Fleet.publish` re-keys it on resolution; and a C4 correction
 rather than an addition: `ChannelSupervisor.publish()` recomputes `presence`, which `deliver` and
 the user/result frame arms had left stale, so `ChannelState.presence` now shows a running turn.
+Amended 2026-09-09 at C6.3's merge (`0fe2797`): `SpawnPrecondition.consentNeeded` carries the
+project directory the fleet evaluated, so the consent sheet, its accept and its decline — the one
+write under a project's `.claude/` (§6.12) — bind to that project and never to a row's cwd that may
+have moved since.
 - **X6 Store namespaces.** A namespaced key-value API with atomic writes and a schema
   version; FleetKit, Workbench and Afleet each own a namespace and their own `Codable`
   types; FleetKit never models upper-layer state — and state its own listing and unread
@@ -2498,7 +2510,14 @@ the user/result frame arms had left stale, so `ChannelState.presence` now shows 
   timeline, so the Browser's quick-open never parses timeline items; and the protocol lives
   in the `PanelHostAPI` target of the Workbench package, which C5 fills, because Workbench
   registers tabs and the app hosts them and Workbench cannot import the app. Amended
-  2026-09-07 at C5's merge, from the child's *Parent revisions*, applied as filed: The protocol lives in the `PanelHostAPI` target of the Workbench package and may import Foundation, SwiftUI, AfleetCore and FleetKit only. **The channel context a tab's view builder receives carries capabilities, never the lifecycle object**: the channel key, session id and cwd; the `ResolvedEnvironment` of X11; a store handle scoped to one namespace, so a panel cannot reach another package's document; a link-routing capability (`LinkRouterCapability`, named to avoid colliding with C7.2's module of the name `LinkRouting`, which a panel importing both would see, and whose target handler receives **both the link and the `LinkDestination`** as C7's binding W5 requires; C5's `HostLinkRouter` is the app's single registry and C7.2's module is delegated to rather than duplicated); a recent-URL feed backed by X4's `ChannelTimeline.recentURLs(limit:)`; and a pane-exit reporter. `any LifecycleAPI` is deliberately absent because its signature names `WireEvent`, a ClaudeWire type, and X1 forbids Workbench from importing ClaudeWire; the same absence is what makes W8's rule that a panel never spawns `claude` on its own initiative structural rather than a convention. The tab id set is **closed at the seven X7 already names** (Thread, Agents, Files, Source Control, Terminal, Browser, GitHub); the host orders by it and Cmd+1 through Cmd+7 select the Nth registered-and-available tab in that order; an eighth tab is a Revision Note. The host owns link routing itself: `open(link, from: .currentPanel | .newWindow)` finds the registered target, pops its tab out first when the destination is `.newWindow` (which is what Cmd-click maps to), and then delivers. The host **retains one `PanelTabSession` per (tab, channel)** — a reference type the tab defines and puts its runtime state in — and hands it back on every render, because caching a SwiftUI view *value* preserves nothing: SwiftUI owns `@State`, `@StateObject` and representable coordinators through the render tree and discards them when a subtree unmounts. That is how panes and open editors survive switching away and back, which is what C7's acceptance requires. The session cache is bounded by an LRU exempting the selected and every popped-out channel, so browsing three thousand channels does not accumulate three thousand sessions, and it is **not** keyed on the `.archived` origin, which is the ordinary origin of a registered channel with no live process. `PanelTab.id` is an instance property, and `PanelHost` carries `unregister(_:)`, which is **`async`**: it releases the tab's sessions and *awaits* `LinkRouterCapability.unregister(tab:)`, so a target never outlives the tab that registered it. The `async` is load-bearing rather than incidental — a synchronous member could only spawn the withdrawal and return, and on the handover path the method exists for, a withdrawal landing after the replacement registers removes the replacement's target, because withdrawal is keyed by a tab id both tabs share. So a later child can take an id C5's placeholder holds — without it `register`'s duplicate check would make the seven ids permanently first-come and C6 could never register Thread. A `PaneRequest` from X5 passes through the host to the registered pane runner unchanged, `id` included, and the runner's `PaneExit` returns to `LifecycleAPI.paneExited` unchanged, because C4 accepts an exit only when its `request.id` is the one it is waiting on.
+  2026-09-07 at C5's merge, from the child's *Parent revisions*, applied as filed: The protocol lives in the `PanelHostAPI` target of the Workbench package and may import Foundation, SwiftUI, AfleetCore and FleetKit only. **The channel context a tab's view builder receives carries capabilities, never the lifecycle object**: the channel key, session id and cwd; the `ResolvedEnvironment` of X11; a store handle scoped to one namespace, so a panel cannot reach another package's document; a link-routing capability (`LinkRouterCapability`, named to avoid colliding with C7.2's module of the name `LinkRouting`, which a panel importing both would see, and whose target handler receives **both the link and the `LinkDestination`** as C7's binding W5 requires; C5's `HostLinkRouter` is the app's single registry and C7.2's module is delegated to rather than duplicated); a recent-URL feed backed by X4's `ChannelTimeline.recentURLs(limit:)`; and a pane-exit reporter. `any LifecycleAPI` is deliberately absent because its signature names `WireEvent`, a ClaudeWire type, and X1 forbids Workbench from importing ClaudeWire; the same absence is what makes W8's rule that a panel never spawns `claude` on its own initiative structural rather than a convention. The tab id set is **closed at the seven X7 already names** (Thread, Agents, Files, Source Control, Terminal, Browser, GitHub); the host orders by it and Cmd+1 through Cmd+7 select the Nth registered-and-available tab in that order; an eighth tab is a Revision Note. The host owns link routing itself: `open(link, from: .currentPanel | .newWindow)` finds the registered target, pops its tab out first when the destination is `.newWindow` (which is what Cmd-click maps to), and then delivers. The host **retains one `PanelTabSession` per (tab, channel)** — a reference type the tab defines and puts its runtime state in — and hands it back on every render, because caching a SwiftUI view *value* preserves nothing: SwiftUI owns `@State`, `@StateObject` and representable coordinators through the render tree and discards them when a subtree unmounts. That is how panes and open editors survive switching away and back, which is what C7's acceptance requires. The session cache is bounded by an LRU exempting the selected and every popped-out channel, so browsing three thousand channels does not accumulate three thousand sessions, and it is **not** keyed on the `.archived` origin, which is the ordinary origin of a registered channel with no live process. `PanelTab.id` is an instance property, and `PanelHost` carries `unregister(_:)`, which is **`async`**: it releases the tab's sessions and *awaits* `LinkRouterCapability.unregister(tab:)`, so a target never outlives the tab that registered it. The `async` is load-bearing rather than incidental — a synchronous member could only spawn the withdrawal and return, and on the handover path the method exists for, a withdrawal landing after the replacement registers removes the replacement's target, because withdrawal is keyed by a tab id both tabs share. So a later child can take an id C5's placeholder holds — without it `register`'s duplicate check would make the seven ids permanently first-come and C6 could never register Thread. A `PaneRequest` from X5 passes through the host to the registered pane runner unchanged, `id` included, and the runner's `PaneExit` returns to `LifecycleAPI.paneExited` unchanged, because C4 accepts an exit only when its `request.id` is the one it is waiting on. Amended
+2026-09-09 at C7.5's merge (its Parent revision 4, the same gap C5 recorded from the host's side):
+`LinkRouterCapability.open` should carry the originating channel — every channel's session
+registers the same tab at the same specificity and the router picks by specificity and tab order
+alone, so a link could open, and a save then write, a file in a channel the user was not looking
+at. C7.5 mitigates inside its fence (one registration per tab, delivered to the channel on
+screen); the amendment itself — the link carries its channel and the router matches on it — is a
+corrective on C5's `HostLinkRouter` and C7.2's `LinkRouter`, tracker 240.
 - **X8 Fixture and fake-claude format.** NDJSON frames with relative timestamps, paired
   with a transcript snapshot directory and a census JSON; a redaction manifest naming
   the fields removed; `fake-claude` accepts a fixture path, a speed factor, an
@@ -2517,7 +2536,11 @@ the user/result frame arms had left stale, so `ChannelState.presence` now shows 
   prefix scrub, then `CLAUDE_CONFIG_DIR` set to the resolved ConfigHome root when the home
   came from the environment or an override was chosen and withheld for a default home
   (2026-09-07; §6.1 has the engine facts), then the table's entries and the pass-through
-  set. Owner: C2. Binds C2, C5, C7.
+  set. Owner: C2. Binds C2, C5, C7. Amended 2026-09-08 at C7.1's merge: the Terminal panel's
+  PTY layer adds a TERM overlay to that composed environment — `TERM` and `TERMINFO_DIRS`,
+  set by name for the pane's child only, because a pane's child renders into libghostty and
+  needs its terminfo, while the claude child's environment (§6.1) is unchanged; the overlay is
+  asserted by variable names in C7.1's tests, never by dumping environments (§6.3).
 
 ### 17.6 Ordering and dependency map
 
@@ -2632,7 +2655,7 @@ notarized distribution, and any write under `<configHome>` (X9).
 | C3 FleetKit timeline | `2026-09-05-c3-fleetkit-timeline.md` (v1 `916ce02`, parent-pin `ee94449`; v2.7 at merge `a758308`); plan `plans/2026-09-05-c3-fleetkit-timeline.md` (v5 `f9f0f2c`, 13 tasks); retrospective in the child spec's Outcomes & Retrospective | **merged** 2026-09-06 at `f4a8723` from `child/c3-timeline` `a758308` (57 commits of its own; only `FleetKit/Sources/FleetTimeline`, its tests and `docs/` touched, `FleetKit/Package.swift` byte-identical); G1–G4 green at the tip: `FleetTimelineTests` 165 tests, 4 skipped without `AFLEET_LOCAL_INDEX`, 0 failures, run twice in separate scratch paths; G1 check one over 20 mirrored streams and 518 entries, check two over 132 compared items across all twenty fixtures with no exclusion (two pinned differences on `compact-boundary`, named by shape); G2 measured opt-in on the author's config home: 365/366 ms cold build over 3,032 transcripts (limit 500), 1 ms incremental (limit 50), 667/679 ms largest history (limit 1,000); G3/G4 by the twelve named tests; X1 import graph green; X9 scratch-home fingerprint unchanged across the suite; one Codex whole-branch review (3 P1, 7 P2) and one adversarial review (6) closed by one fix wave (two dismissals logged as tracker 22 and 23); the twenty-fixture corpus surfaced three findings at merge, fixed red-first before any repin (boundary chain, `isSynthetic` union, recorded rewind); independent leak-risk review at merge (4 findings: three fixed, one logged as tracker 24); deferred debt entries 11–25 in `docs/tech-debt-tracker.md`; spend: no model turns (C3 spawns no process) |
 | C4 FleetKit sessions and fleet | `2026-09-05-c4-fleetkit-sessions-fleet.md`; plan `plans/2026-09-05-c4-fleetkit-sessions-fleet.md` (v4, 12 tasks); retrospective in the child spec's Outcomes | **merged** 2026-09-06 at `f1e35d9` from `child/c4-sessions-fleet` `26aa962` (owns `FleetKit/Package.swift`; `FleetSessions` and its tests, `docs/`, plus a C2 corrective to `ClaudeWire`'s process runner carried by the branch); suite at the tip: FleetKit 415 tests, 10 skipped without the live flags, ClaudeWire 243; G1 coverage gate 58/58 lifecycle scenarios; G2 over C3's real registry mirror, five boundary cases; G3, G4; G5 eight live scenarios green together twice on the installed 2.1.263 (runs 4 and 5: 136.6 s and 132.3 s, five turns each, $0.17 and $0.19; cumulative child live spend $1.58); two whole-branch Codex reviews (48 confirmed → 10) closed by one fix wave and two follow-up rounds under five architect rulings; four live-gate product defects found at Task 10 and three more at the merge gate; independent leak-risk review at merge: no findings; deferred debt 26–48 in `docs/tech-debt-tracker.md` |
 | C5 App shell, panel host, packaging | `2026-09-06-c5-app-shell.md`; plan `plans/2026-09-06-c5-app-shell.md` (v6, 10 tasks); retrospective in the child spec's Outcomes | **merged** 2026-09-07 at `78303c7` from `child/c5-app-shell` `4c4ede4` (212 commits; owns `App/`, `AppTests/`, `project.yml`, `Workbench/Sources/PanelHostAPI`, plus `main` correctives taken at its boundaries); G1–G4 green at the tip: test scheme 835 executed, 20 designed skips, 0 failures, zero compiler warnings at `5f3779f`, re-run green at `4c4ede4`; `make check-imports` and `make check-wiring` clean; first paint 2,505 ms median with no persisted snapshot and 2,121 ms with one, warm page cache, over 4,261 transcripts against the 5,000 ms budget; the cold case is unmeasured; three `[parent-impact]` filings reconciled (§11 per-domain logs, the per-write sink corrective `c31bebd`, the `.claude.json` sibling rule `6b3fc23`/`1c19d52`) and X7 amended as filed |
-| C6 Conversation surface and Agents panel | composite spec `2026-09-07-c6-conversation-surface.md` (four leaves, its own tracking map) | cut landed 2026-09-07 after C5's merge (`78303c7`), approved by the human 2026-09-08; Y1 skeleton on `main` at `5e24f1a`; C6.1 Timeline renderer and C6.3 Decision cards and threads **dispatched** 2026-09-08; C6.2 Composer and header **merged** 2026-09-08 at `c2dae0f` (Y6 named); C6.4 Agents panel blocked-by C6.1 and C6.3 |
+| C6 Conversation surface and Agents panel | composite spec `2026-09-07-c6-conversation-surface.md` (four leaves, its own tracking map) | cut landed 2026-09-07 after C5's merge (`78303c7`), approved by the human 2026-09-08; Y1 skeleton on `main` at `5e24f1a`; C6.1 Timeline renderer **dispatched** 2026-09-08; C6.2 Composer and header **merged** 2026-09-08 at `c2dae0f` (Y6 named); C6.3 Decision cards and threads **merged** 2026-09-09 at `0fe2797` (Y3 corrected, §8.4 corrected); C6.4 Agents panel blocked-by C6.1 and C6.3 |
 | C7 Workbench panels | composite spec `2026-09-05-c7-workbench-panels.md` (seven leaves, its own tracking map) | cut landed 2026-09-05 at `1fe6fc1`; W1 Workbench skeleton on `main` (libghostty-spm `1.5.20260903` resolves and the empty package builds); C7.1 Terminal core, C7.2 Editor core and C7.3 Source Control core **dispatchable** — the cut approved by the human 2026-09-07, dispatch follows C6's; C7.4–C7.7 unblocked by C5's merge (`78303c7`) except where noted (C7.4 also by C4's X5, C7.6 by C4's store); C7.3 Source Control core **merged** 2026-09-08 at `aa5df80` (41 commits, 128 package tests, two whole-diff review rounds and three fix waves at merge; W7's command lines amended in the composite); C7.2 Editor core **merged** 2026-09-08 at `a47788a` (37 commits, 110 package tests; Monaco 0.56 on the custom scheme with workers proven by attribution; three whole-diff review rounds and three fix waves at merge; human still to witness "no visible jank"); C7.1 at Task 7 |
 
 Each child's spec path is filled in when it is dispatched; a composite's row points at
@@ -4666,3 +4689,12 @@ Pending — written at finish.
   (readbacks C6.1, menus C6.2) as the C6 cut split it. §8.6 corrected to the engine's string
   compare. Y6 named on the composite. The prompted live leg of C6.2's G6 is blocked by the scratch
   account's organisation policy and carried as a manual witness.
+- 2026-09-09 C6.3 merged (`0fe2797`; composite Revision Note of the same date). §8.4 corrected from
+  C6.3's `[parent-impact]`: the dialog definitions re-cited on the current pin; *Always allow*'s
+  destination split between rule suggestions and `setMode`; the overage card renders what arrives;
+  the billing action has no URL to open at 2.1.263; item 43's quote is a prefix; the five-minute
+  dialog deadline and the extended `AskUserQuestion` variant recorded. Y3's handover point corrected
+  on the composite (a `Workspace` must exist; binds C6.4).
+- 2026-09-09 C7.5 merged (`517899d`; composite Revision Note of the same date). §8.7 gains Cmd+S;
+  §9.1's watcher narrowed to open files; X7 records the link-channel gap (tracker 240) with C7.5's
+  mitigation.

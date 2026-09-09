@@ -54,7 +54,7 @@ struct AfleetApp: App {
         }
     }
 
-    /// §8.7's shortcuts, the four C5 owns.
+    /// §8.7's shortcuts: the four C5 owns, and C7.5's Cmd+S.
     ///
     /// **Cmd+, is absent on purpose and is not missing.** SwiftUI gives a `Settings` scene the
     /// standard *Settings…* item under the application menu with Cmd+, already bound; declaring a
@@ -81,11 +81,61 @@ struct AfleetApp: App {
                     .keyboardShortcut(Self.digit(index + 1), modifiers: .command)
             }
         }
+        // Cmd+S for the Files panel (C7.5 Design §7; §8.7's list gains it by Parent revision 1,
+        // which the architect accepted). W4's editor vocabulary is closed, so Monaco cannot report
+        // the key press and the host owns it: this is the same action the panel's own *Save*
+        // button performs. Offered only while the window is showing Files over a dirty buffer, and
+        // the disabled state resolves a session the host already holds rather than creating one.
+        //
+        // It sits at `.saveItem` and not beside the panel shortcuts above, because that placement
+        // is what puts *Save* in the **File** menu, where every macOS user reaches for it. The
+        // group above is the View region; a Save item there carries the right key and stands under
+        // the wrong heading.
+        //
+        // **It is aimed at the key window**, which is what the focused scene value below carries:
+        // a popped-out Files panel holds a channel of its own and never touches the main window's
+        // selection, so a resolution from that selection alone saved another window's channel, or
+        // was disabled over a dirty buffer the user was looking at (tracker 243).
+        CommandGroup(after: .saveItem) {
+            FilesSaveButton(model: model)
+        }
     }
 
     /// `KeyEquivalent` for 1…7. The tab set is closed at seven cases by contract X7, so the
     /// character always exists; a wider set would need a second modifier rather than a second digit.
     private static func digit(_ number: Int) -> KeyEquivalent {
         KeyEquivalent(Character("\(number)"))
+    }
+}
+
+/// The *Save* item, as a view of its own so it can read the focused scene value.
+///
+/// `@FocusedValue` resolves against the key window's scene, so this is nil while the main window is
+/// key and carries the pop-out's identity while one of its windows is. Everything the item decides
+/// — the target and whether it is offered at all — follows from that one value, and both questions
+/// are answered by `AppModel` so they can be asserted without a window.
+private struct FilesSaveButton: View {
+
+    let model: AppModel
+    @FocusedValue(\.poppedOutPanel) private var focused: PoppedOutPanel?
+
+    var body: some View {
+        Button("Save") { model.saveFilesPanel(inFocused: focused) }
+            .keyboardShortcut("s", modifiers: .command)
+            .disabled(!model.canSaveFiles(inFocused: focused))
+    }
+}
+
+/// Which popped-out panel window is key, for the commands that have to resolve against it rather
+/// than against the main window's selection. `PoppedOutPanelScene` publishes it; the main window
+/// publishes nothing, so the value is absent exactly when the main window is the key one.
+private struct PoppedOutPanelFocusKey: FocusedValueKey {
+    typealias Value = PoppedOutPanel
+}
+
+extension FocusedValues {
+    var poppedOutPanel: PoppedOutPanel? {
+        get { self[PoppedOutPanelFocusKey.self] }
+        set { self[PoppedOutPanelFocusKey.self] = newValue }
     }
 }

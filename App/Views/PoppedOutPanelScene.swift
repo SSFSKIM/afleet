@@ -35,6 +35,13 @@ struct PoppedOutPanelScene: View {
                                   detail: "The channel this window was opened for is no longer in the index.")
             }
         }
+        // What the **File** menu's *Save* resolves against while this window is key. A pop-out
+        // keeps a channel of its own and never moves the main window's selection, so a command
+        // that read that selection would save another window's channel from in front of this one
+        // (C7.5 Design §7, tracker 243). Published from both branches: a window drawing the
+        // placeholder has no channel left, and the item must be offered for *nothing* rather than
+        // for whatever the main window happens to be showing.
+        .focusedSceneValue(\.poppedOutPanel, panel)
         .frame(minWidth: 420, minHeight: 320)
         .onDisappear {
             guard let panel else { return }

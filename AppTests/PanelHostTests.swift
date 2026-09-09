@@ -25,7 +25,7 @@ final class PanelHostTests: XCTestCase {
     /// Reading host.selected alone would miss the original shell/host split entirely.
     func testProtocolSelectionUpdatesTheRenderedSelection() async throws {
         let app = AppModel()
-        try app.panels.register(StubPanelTab(.files))
+        try app.panels.register(StubPanelTab(.terminal))
         let changed = expectation(description: "rendered selection invalidated")
         withObservationTracking {
             _ = app.shell.panelTab
@@ -33,10 +33,10 @@ final class PanelHostTests: XCTestCase {
             changed.fulfill()
         }
         let host: any PanelHost = app.panels
-        host.select(.files)
+        host.select(.terminal)
         let result = await XCTWaiter.fulfillment(of: [changed], timeout: 1)
         XCTAssertEqual(result, .completed, "protocol selection did not invalidate the rendered tab")
-        XCTAssertEqual(app.shell.panelTab, .files, "window still renders the old selection")
+        XCTAssertEqual(app.shell.panelTab, .terminal, "window still renders the old selection")
 
         // Tab-bar writes use the same owner, and a refused id cannot split the two views.
         app.shell.panelTab = .thread
@@ -475,11 +475,11 @@ final class PanelHostTests: XCTestCase {
         let app = AppModel()
         app.bindWorkspace(rig.workspace, lifecycle: rig.lifecycle)
         let counter = SessionCounter()
-        try app.panels.register(StubPanelTab(.files, counter: counter))
+        try app.panels.register(StubPanelTab(.terminal, counter: counter))
         let key = rig.keys[0]
         _ = app.panels.context(for: key, cwd: PanelFixtures.cwd)
-        app.panels.popOut(.files, channel: key)
-        let panel = PoppedOutPanel(tab: .files, channel: key)
+        app.panels.popOut(.terminal, channel: key)
+        let panel = PoppedOutPanel(tab: .terminal, channel: key)
         let scene = PoppedOutPanelScene(app: app, panel: panel)
         let coordinator = try XCTUnwrap(app.coordinatorFactory(rig.workspace) as? FleetCoordinator)
         defer { coordinator.stop() }
@@ -1051,9 +1051,11 @@ final class PanelHostTests: XCTestCase {
         let app = AppModel()
         app.bindWorkspace(rig.workspace, lifecycle: rig.lifecycle)
         let counter = SessionCounter()
-        try app.panels.register(StubPanelTab(.files, counter: counter))
+        // `.terminal` rather than `.files`: the app registers its own Files tab in `init`, and
+        // this test is about which host the coordinator holds, not about which tab it is.
+        try app.panels.register(StubPanelTab(.terminal, counter: counter))
         let key = rig.keys[0]
-        _ = app.panels.session(for: .files, context: PanelFixtures.context(key))
+        _ = app.panels.session(for: .terminal, context: PanelFixtures.context(key))
         XCTAssertEqual(app.panels.liveChannelCount, 1,
                        "the host holds \(app.panels.liveChannelCount) channels, not 1")
 
@@ -1221,7 +1223,7 @@ private final class URLBox: @unchecked Sendable {
 
 /// Every identifier these tests use. Invented throughout: a session is a hex-formatted index, a
 /// config home is a fixed invented path, a URL is under `invented.example` (§11).
-private enum PanelFixtures {
+enum PanelFixtures {
 
     static let configHome = URL(fileURLWithPath: "/invented/config-home")
     static let cwd = URL(fileURLWithPath: "/invented/project")
@@ -1261,8 +1263,8 @@ private enum PanelFixtures {
     /// that existed at the moment of delivery — which is the ordering the `.newWindow` rule is
     /// about, and a constant here would make that assertion unable to fail.
     @MainActor
-    static func fileTarget(_ tab: PanelTabID, specificity: Int, host: PanelHostModel? = nil,
-                           into recorder: LinkRecorder, note: String? = nil) -> LinkTarget {
+    fileprivate static func fileTarget(_ tab: PanelTabID, specificity: Int, host: PanelHostModel? = nil,
+                                       into recorder: LinkRecorder, note: String? = nil) -> LinkTarget {
         LinkTarget(tab: tab, specificity: specificity,
                    handles: { link in if case .file = link { true } else { false } },
                    open: { link, destination in
@@ -1274,7 +1276,7 @@ private enum PanelFixtures {
     /// A target for `.url` links that declines the pop-out, the shape C7.6's Browser registers:
     /// its `.newWindow` is the *system* browser, so there is no afleet window for it to render in.
     @MainActor
-    static func decliningURLTarget(_ tab: PanelTabID, specificity: Int,
+    fileprivate static func decliningURLTarget(_ tab: PanelTabID, specificity: Int,
                                    into recorder: LinkRecorder, note: String? = nil) -> LinkTarget {
         LinkTarget(tab: tab, specificity: specificity, popsOutForNewWindow: false,
                    handles: { link in if case .url = link { true } else { false } },
@@ -1345,7 +1347,7 @@ private struct CoordinatorRig {
 /// and a launch would add a binary probe, a version gate and a sign-in gate, each of which can fail
 /// for reasons that say nothing about §7.
 @MainActor
-private struct PanelRig {
+struct PanelRig {
 
     let temp: TempTree
     let home: ScratchConfigHome

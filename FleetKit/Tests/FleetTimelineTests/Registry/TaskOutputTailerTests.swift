@@ -6,8 +6,32 @@ import ClaudeWire
 
 /// The output tailer, exercised on a copy of `background-shell`'s recorded task-output artifact and on invented files
 /// under the temporary directory. Every wait here is bounded by a watchdog that stops the tailer, so a tailer that
-/// never yields fails the count assertion instead of hanging the suite.
+/// never yields fails the count assertion instead of hanging the suite. The bound is `TestTiming.hangGuard` and it is
+/// not a budget: these tailers poll at ten milliseconds and no passing run comes near it. The ten seconds it replaces
+/// were inside the range a loaded host reaches, and a watchdog that fired there ended the stream mid-delivery and
+/// left the count assertion below it reporting a tailer that had lost the verdict (tracker 161).
 final class TaskOutputTailerTests: XCTestCase {
+
+    /// Chunks delivered so far, readable from the watchdog task while the consuming loop appends to its own array.
+    private final class ChunkCount: @unchecked Sendable {        // `lock` serialises `value`
+        private let lock = NSLock()
+        private var value = 0
+        func increment() { lock.withLock { value += 1 } }
+        var count: Int { lock.withLock { value } }
+    }
+
+    /// The hang guard for a delivery-driven `for await`: it fails with what had arrived and then stops the tailer,
+    /// which ends the stream, so a guard that fires says so in its own words instead of being read as a product
+    /// failure by whatever count assertion follows the loop.
+    private func hangGuard(delivering counted: ChunkCount, stopping tailer: TaskOutputTailer,
+                           file: StaticString = #filePath, line: UInt = #line) -> Task<Void, Never> {
+        Task {
+            try? await Task.sleep(for: TestTiming.hangGuard)
+            guard !Task.isCancelled else { return }
+            XCTFail("the hang guard ended a stream that had delivered \(counted.count) chunks", file: file, line: line)
+            await tailer.stop()
+        }
+    }
 
     /// `background-shell`'s single recorded task-output artifact, copied into a fresh temporary tree. The recording is
     /// never opened for writing; the copy is what the tailer reads.
@@ -54,7 +78,7 @@ final class TaskOutputTailerTests: XCTestCase {
 
         let tailer = TaskOutputTailer(path: url, pollInterval: .milliseconds(10))
         let stream = await tailer.chunks()
-        let watchdog = Task { try? await Task.sleep(for: .seconds(10)); await tailer.stop() }
+        let watchdog = Task { try? await Task.sleep(for: TestTiming.hangGuard); await tailer.stop() }
         defer { watchdog.cancel() }
 
         var received: [OutputChunk] = []
@@ -86,7 +110,7 @@ final class TaskOutputTailerTests: XCTestCase {
         // Long enough that the confirming poll cannot fire while the test opens the window by hand.
         let tailer = TaskOutputTailer(path: url, pollInterval: .milliseconds(300))
         let stream = await tailer.chunks()
-        let watchdog = Task { try? await Task.sleep(for: .seconds(10)); await tailer.stop() }
+        let watchdog = Task { try? await Task.sleep(for: TestTiming.hangGuard); await tailer.stop() }
         defer { watchdog.cancel() }
 
         var waited = 0
@@ -124,7 +148,7 @@ final class TaskOutputTailerTests: XCTestCase {
 
         let tailer = TaskOutputTailer(path: url, pollInterval: .milliseconds(10), maxBytesPerRead: bound)
         let stream = await tailer.chunks()
-        let watchdog = Task { try? await Task.sleep(for: .seconds(10)); await tailer.stop() }
+        let watchdog = Task { try? await Task.sleep(for: TestTiming.hangGuard); await tailer.stop() }
         defer { watchdog.cancel() }
 
         var received: [OutputChunk] = []
@@ -155,10 +179,16 @@ final class TaskOutputTailerTests: XCTestCase {
     func testASecondChunksCallSurvivesTheFirstStreamsTermination() async throws {
         let tree = try TempTree()
         let url = tree.root.appendingPathComponent("restarted.output")
-        try Data("first line\n".utf8).write(to: url)
+        // The file starts empty and is written only once the replacement is the sole reader. The abandoned stream's
+        // pump is a `Task`, so whether it polls before `chunks()` is called again is the scheduler's to decide, and
+        // on a loaded host it does; the read offset belongs to the tailer and not to one stream, by design, so bytes
+        // written before the restart are delivered to the stream nobody reads and the replacement then correctly has
+        // nothing to say. What this test is about is the replacement's pump, so nothing here is left to that race.
+        try Data().write(to: url)
 
         let tailer = TaskOutputTailer(path: url, pollInterval: .milliseconds(10))
-        let watchdog = Task { try? await Task.sleep(for: .seconds(10)); await tailer.stop() }
+        let delivered = ChunkCount()
+        let watchdog = hangGuard(delivering: delivered, stopping: tailer)
         defer { watchdog.cancel() }
 
         var abandoned: AsyncStream<OutputChunk>? = await tailer.chunks()
@@ -166,14 +196,18 @@ final class TaskOutputTailerTests: XCTestCase {
         _ = abandoned                                       // held, then dropped: the finish already happened above
         abandoned = nil
 
-        // The old handler's `Task` has to have run by now; if it could still stop this actor, it has.
+        // A floor, not a timeout: the old handler's `Task` has to have run by now, and a busy host can only make it
+        // more true. If that handler could still stop this actor, it has.
         try await Task.sleep(for: .milliseconds(120))
         let polling = await tailer.isPolling
         XCTAssertTrue(polling, "the replacement's pump outlives the stream it replaced")
 
+        // The loop is ended by the verdict chunk, not by a clock; the guard above only fails a stream that stalls.
+        try tree.appendRaw(Data("first line\n".utf8), to: url)
         var received: [OutputChunk] = []
         for await chunk in replacement {
             received.append(chunk)
+            delivered.increment()
             if received.count == 1 { try tree.appendRaw(Data("[exited with code 0]\n".utf8), to: url) }
             if chunk.exitCode != nil { await tailer.stop() }
         }
@@ -190,7 +224,7 @@ final class TaskOutputTailerTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: url.path), "the file does not exist when the tailer starts")
 
         let tailer = TaskOutputTailer(path: url, pollInterval: .milliseconds(10))
-        let watchdog = Task { try? await Task.sleep(for: .seconds(10)); await tailer.stop() }
+        let watchdog = Task { try? await Task.sleep(for: TestTiming.hangGuard); await tailer.stop() }
         defer { watchdog.cancel() }
         let writer = Task {
             try? await Task.sleep(for: .milliseconds(150))
@@ -238,7 +272,7 @@ final class TaskOutputTailerTests: XCTestCase {
         }
 
         let stream = await tailer.chunks()
-        let watchdog = Task { try? await Task.sleep(for: .seconds(10)); await tailer.stop() }
+        let watchdog = Task { try? await Task.sleep(for: TestTiming.hangGuard); await tailer.stop() }
         defer { watchdog.cancel() }
         var count = 0
         for await _ in stream { count += 1 }

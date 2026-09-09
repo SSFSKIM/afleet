@@ -25,8 +25,20 @@ let package = Package(
     ],
     targets: [
         // MARK: - C7.1 terminal core (owner: C7.1; also owns this file)
-        .target(name: "TerminalCore", dependencies: [core, ghosttyTerminal, ghosttyKit], swiftSettings: v6),
+        .target(name: "CDarwinWaitStatus"),
+        .target(
+            name: "TerminalCore",
+            dependencies: [
+                "CDarwinWaitStatus",
+                core,
+                ghosttyTerminal,
+                ghosttyKit,
+                .product(name: "GhosttyTheme", package: "libghostty-spm"),
+            ],
+            swiftSettings: v6
+        ),
         .testTarget(name: "TerminalCoreTests", dependencies: ["TerminalCore"], swiftSettings: v6),
+        .executableTarget(name: "S1Harness", dependencies: ["TerminalCore"], path: "Spikes/S1Harness", swiftSettings: v6),
         // MARK: - end of C7.1
 
         // MARK: - C7.2 editor core and link routing (owner: C7.2)
@@ -82,7 +94,27 @@ let package = Package(
         // MARK: - end of C7.4
 
         // MARK: - C7.5 files panel (owner: C7.5)
-        .target(name: "FilesPanel", dependencies: ["EditorCore", "LinkRouting", "PanelHostAPI", fleet], swiftSettings: v6),
+        // `SourceControlCore` and `core` are required, not decorative. The `.diff` target this leaf
+        // registers on `LinkRouter` renders a pair of whole texts, and W7 makes every `git`
+        // invocation and every parser C7.3's — `GitDiff.blob` and `GitDiff.workingTreeFile` exist,
+        // by C7.3's own account, "because the Monaco bridge takes two texts rather than a patch",
+        // which is this use. A second git reader inside this target is what W7 forbids. `core` is
+        // the member-import-visibility reason C5 recorded for `PanelHostAPITests` and C7.2 for
+        // `LinkRoutingTests`: neither `LinkRouting` nor `PanelHostAPI` re-exports AfleetCore, so a
+        // target naming a `WorkspaceLink` or a `DiffRef` must depend on the module defining them.
+        // W1's row predates both and is amended at C7.5's gate (composite, 2026-09-09).
+        .target(name: "FilesPanel",
+                dependencies: [core, "EditorCore", "SourceControlCore", "LinkRouting", "PanelHostAPI", fleet],
+                swiftSettings: v6),
+        // W1: "every panel target gets one [test target] when a panel leaf lands". The dependencies
+        // past `FilesPanel` are the ones the tests name types from directly — `EditorCommand` and
+        // `EditorResources` from EditorCore, `LinkRouter` from LinkRouting, `LinkTarget` and
+        // `ChannelContext` from PanelHostAPI, `ToolRunner` from SourceControlCore, `WorkspaceLink`
+        // from AfleetCore, the store from FleetKit — under that same visibility rule.
+        .testTarget(name: "FilesPanelTests",
+                    dependencies: ["FilesPanel", "EditorCore", "SourceControlCore", "LinkRouting",
+                                   "PanelHostAPI", core, fleet],
+                    swiftSettings: v6),
         // MARK: - end of C7.5
 
         // MARK: - C7.6 browser panel (owner: C7.6)
