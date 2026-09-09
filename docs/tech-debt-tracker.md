@@ -1943,3 +1943,19 @@ Reserved range 247–261.
      a `BrowserWebTab` built around a configuration it did not make — a change to
      `BrowserWebViewFactory`'s one-way ownership. Owner: C7.6 at closeout if a page needs it,
      otherwise the next leaf that touches `BrowserWebTab`. Filed 2026-09-09 at the R3/R4 fix wave.
+
+251. **A second main window would have two Browser panels claiming the same `WKWebView`, and one of
+     them would lose its page with nothing to say about it.** `AfleetApp` retains one `AppModel`
+     outside its `WindowGroup` and does not disable additional main windows, and `PanelColumnView`
+     passes `.panel` as the surface for every instance it draws. `PanelSurface.panel` carries no
+     window identity — wave C gave that to `poppedOutWindow(tab:channel:)` because a pop-out is a
+     window and needs one — so two main windows are one surface to `BrowserModel`: both would render
+     the same web views, an `NSView` has one superview, and the window that lost them would keep
+     drawing an ordinary Browser panel rather than the "Showing in the main window" placeholder that
+     exists for exactly this. Real, and **currently unreachable**: with one main window there is one
+     `.panel` and the identity is not needed. The treatment is known and is the one wave C already
+     applied to pop-outs — give the main surface its window's identity too, so `liveSurfaces` and
+     the "elsewhere" state work per window. It is not filed as this leaf's because **whether afleet
+     permits a second main window at all is C5's design question**, not the Browser panel's: the
+     answer decides between extending the identity and disabling the command, and a leaf must not
+     pick. Owner: C5. Filed 2026-09-09 at the R5 fix wave (wave D).
