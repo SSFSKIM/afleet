@@ -1,6 +1,7 @@
 // TerminalPanel: owned by C7.4 (docs/doperpowers/specs/2026-09-09-c7.4-terminal-panel.md).
 import Foundation
 import Observation
+import PanelHostAPI
 
 /// Which mounted host holds a pane's `NSView`, when the host retains one session per (tab,
 /// channel) and hands it to every renderer of that pair — after a pop-out, two (spec Design §8).
@@ -86,7 +87,19 @@ public final class PaneFocusDebt {
     public var isStanding: Bool { isOwed }
 
     /// Takes the debt if it stands, and leaves it settled either way.
-    public func claim() -> Bool {
+    ///
+    /// The surface is what says whether this mount is itself a person asking. It is asked here
+    /// rather than at the call site because "which mounts mean *type here now*" is one rule and
+    /// belongs in one place.
+    public func claim(mountedIn surface: PanelSurface) -> Bool {
+        // A popped-out window issues the debt it is about to pay. Asking for one *is* asking for
+        // this pane: what the person asked for is a window whose whole content is it. Which is a
+        // different thing from the claim merely coming back when that window closes — the main
+        // window's host is rebuilt there by nobody's request, and takes nothing.
+        //
+        // Issued here and nowhere else, so it is one debt per mounted host: a re-render updates a
+        // container and never makes one, and a pop-out opened again is a new host and a new asking.
+        if case .poppedOutWindow = surface { isOwed = true }
         defer { isOwed = false }
         return isOwed
     }

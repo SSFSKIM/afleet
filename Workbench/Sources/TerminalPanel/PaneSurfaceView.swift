@@ -1,6 +1,7 @@
 // TerminalPanel: owned by C7.4 (docs/doperpowers/specs/2026-09-09-c7.4-terminal-panel.md).
 import AppKit
 import Observation
+import PanelHostAPI
 import SwiftUI
 import TerminalCore
 
@@ -13,6 +14,10 @@ struct PaneSurfaceHost: View {
 
     let pane: TerminalPane
 
+    /// Which window is drawing this. It reaches the container because it is what says whether the
+    /// container is being built for a person (see ``PaneFocusDebt``).
+    let drawnIn: PanelSurface
+
     /// This host's claim, and the pane it holds it against. `@State` and not the session's,
     /// because it is a fact about *this* mounted view and dies with it.
     @State private var holder = PaneClaimHolder()
@@ -20,7 +25,7 @@ struct PaneSurfaceHost: View {
     var body: some View {
         Group {
             if holder.holdsView(of: pane) {
-                PaneSurfaceView(surface: pane.surface, focus: pane.focusDebt)
+                PaneSurfaceView(surface: pane.surface, focus: pane.focusDebt, drawnIn: drawnIn)
             } else {
                 elsewhere
             }
@@ -255,6 +260,9 @@ struct PaneSurfaceView: NSViewRepresentable {
     /// every container the pane's hosts build and drop (see ``PaneFocusDebt``).
     let focus: PaneFocusDebt
 
+    /// Which window this host is being built for.
+    let drawnIn: PanelSurface
+
     /// The surface, held so the static teardown — which is handed no representable — can name the
     /// view it is being asked to release.
     @MainActor
@@ -285,7 +293,7 @@ struct PaneSurfaceView: NSViewRepresentable {
     /// host mounted over a pane is answering the person who asked for it (see ``PaneFocusDebt``).
     func makeContainer() -> PaneSurfaceContainer {
         let container = PaneSurfaceContainer()
-        container.adopt(surface.view, takingFocus: focus.claim())
+        container.adopt(surface.view, takingFocus: focus.claim(mountedIn: drawnIn))
         return container
     }
 }

@@ -31,7 +31,7 @@ struct TerminalPanelView: View {
                 // Identified by the pane itself. Without it a selection change reuses the previous
                 // pane's subtree — and its host's `@State` claim, which belongs to a stack the pane
                 // now on screen knows nothing about (spec Design §8).
-                PaneView(session: session, pane: pane)
+                PaneView(session: session, pane: pane, surface: surface)
                     .id(PaneSubtree(pane: ObjectIdentifier(pane), surface: surface))
             } else {
                 noPanes
@@ -114,11 +114,14 @@ private struct PaneView: View {
 
     let session: TerminalPanelSession
     let pane: TerminalPane
+    /// Which window is drawing this pane. A popped-out window is one a person asked for with this
+    /// pane in it, and the pane's host is told so (spec Design §8).
+    let surface: PanelSurface
 
     var body: some View {
         let readout = PaneReadout(pane: pane)
         VStack(spacing: 0) {
-            PaneSurfaceHost(pane: pane)
+            PaneSurfaceHost(pane: pane, drawnIn: surface)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             if readout.status != .running {
                 Divider()
