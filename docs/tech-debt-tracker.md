@@ -3991,3 +3991,28 @@ needs more. Nothing above is renumbered.
      it would rather state the rule once where link targets are described. Raised by C6.4 at the
      `2b9c18d` merge.
 
+
+181. **A relay's delivery state does not survive a relaunch, so a *Retry* the user was offered
+     stops existing.** `AgentRelayRegistry` (`App/Agents/AgentRelayRegistry.swift`) is an
+     app-scoped in-memory object: it holds one record per *Send message* and the closure that
+     re-sends it, and nothing writes either anywhere (X9 forbids the config home, and this leaf
+     has no store of its own). The state itself is derived from the channel's timeline and would
+     survive, but the *record* — which prompt uuid was a relay, and for which run — does not, so
+     after a relaunch a relayed message is an ordinary user message again and its *Not delivered*
+     reading and *Retry* are gone. The reading is honest while it lasts and simply absent
+     afterwards, which is why this is debt and not a defect; closing it means a small persisted
+     table keyed by channel and prompt uuid, holding a digest and a run id and no text (§11).
+     Owner: C6.4's successor or whichever leaf lands panel-state persistence. Raised by C6.4 at
+     Task 7.
+
+182. **The delivery arm's text match is line-granular, and the forwarded frame's real shape is
+     unpinned.** `AgentRelayDigest` (`App/Agents/AgentRelayState.swift`) concludes *Delivered*
+     when the digest of the whole normalised candidate, one of its paragraphs, or one of its lines
+     equals the sent message's — which accepts a wrapper the harness prepends and refuses a mere
+     mention. Nothing in the pinned bundle states whether the engine forwards a `SendMessage`
+     body verbatim, so a harness that wrapped the message *within* a line (a prefix on the same
+     line, or a re-indent) would leave a delivered message reading *Relayed*, and then
+     *Not delivered* once the run's notification arrived — a false negative, which is the safe
+     direction but still wrong. Task 8's fixture is what pins the real shape; if it shows a
+     within-line wrapper, the match needs a containment test over the normalised line rather than
+     an equality one. Owner: C6.4 Task 8. Raised by C6.4 at Task 7.
