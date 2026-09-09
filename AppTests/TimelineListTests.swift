@@ -152,6 +152,60 @@ final class TimelineListTests: XCTestCase {
         }
     }
 
+    /// **When the anchored row is evicted the correction falls back to its nearest survivor.**
+    ///
+    /// A retraction removes rows rather than adding them — a refusal's `supersedes`, a rewind, a
+    /// repair — and it can take the row the reader was anchored to along with the rows above it.
+    /// The correction then had no anchor to find and gave up, so the viewport kept its raw offset
+    /// while the document above it got shorter: the reader's place jumps by the whole height of what
+    /// left, which is the same failure content arriving above the viewport causes and the one
+    /// parity §41.8 is written about.
+    ///
+    /// Discriminating on the survivor and not on the count: a list that simply scrolled somewhere
+    /// after the eviction passes any "the offset changed" assertion there is.
+    func testTheScrollFallsBackToTheNearestSurvivorWhenTheAnchorIsEvicted() throws {
+        let controller = TimelineTableController()
+        try FrameTimeHarness.hosted(controller.scrollView, size: Self.viewport) { hosting in
+            Self.commit(Self.rows(60, from: 100), to: controller, in: hosting)
+            XCTAssertGreaterThan(controller.tableView.bounds.height, Self.viewport.height,
+                                 "the table is no taller than its viewport, so nothing here could scroll")
+
+            // Off a row boundary deliberately: the row nearest the top edge is then part-scrolled off
+            // it, which is the ordinary case and the one a correction that ignored the offset passes.
+            Self.scroll(controller, to: controller.tableView.bounds.height / 2 + 11)
+            XCTAssertFalse(controller.scroll.isPinnedToBottom,
+                           "the viewport still reports itself pinned after scrolling into the middle")
+
+            let anchored = try XCTUnwrap(Self.topRowKey(of: controller),
+                                         "no row was found at the viewport's top edge, so there is no anchor to hold")
+            let position = try XCTUnwrap(controller.rows.firstIndex { $0.key == anchored },
+                                         "the anchored row is not in the table it was read from")
+            XCTAssertGreaterThan(position, 2,
+                                 "the anchor sits at row \(position), too near the top for a surviving predecessor")
+            let survivor = controller.rows[position - 3].key
+            let before = try XCTUnwrap(Self.offset(ofRowKeyed: anchored, in: controller),
+                                       "the anchored row has no rectangle before the commit")
+            XCTAssertNotEqual(before, 0, accuracy: 0.5,
+                              "the anchored row sits exactly on the viewport's top edge, so this asserts "
+                              + "nothing about the offset being carried")
+
+            // The retraction: the anchored row and the two rows above it leave.
+            let evicted = Set([position - 2, position - 1, position].map { 100 + $0 })
+            Self.commit((100..<160).filter { !evicted.contains($0) }.map { Self.row(index: $0) },
+                        to: controller, in: hosting)
+            XCTAssertEqual(controller.rows.count, 57,
+                           "the table holds \(controller.rows.count) row(s) after 3 of 60 were retracted")
+            XCTAssertNil(Self.offset(ofRowKeyed: anchored, in: controller),
+                         "the anchored row survived the retraction, so the fallback below is never reached")
+
+            let after = try XCTUnwrap(Self.offset(ofRowKeyed: survivor, in: controller),
+                                      "the survivor this correction must fall back to is not in the table")
+            XCTAssertEqual(after, before, accuracy: 1,
+                           "the reader's place moved \(Int(abs(after - before))) point(s) when the row it was "
+                           + "anchored to was retracted")
+        }
+    }
+
     // MARK: - The column's one-expression swap
 
     /// The column draws the renderer for a populated channel and its placeholders for the other

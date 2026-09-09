@@ -198,7 +198,7 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
         // new item — has to reach the roots that view already holds.
         pruneHosts()
         if contextChanged { refreshHostedRoots() }
-        settleScroll(anchor: anchor, appended: appended)
+        settleScroll(anchor: anchor, appended: appended, previously: previousKeys)
     }
 
     /// The first key this publish appended **after** everything the previous publish held, which is
@@ -375,16 +375,36 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
     /// Without the correction, content arriving above the viewport shoves the reader's place down by
     /// exactly the height of what arrived, which is the third of parity §41.8's three behaviours and
     /// the one a naive list gets wrong.
-    private func settleScroll(anchor: ViewportAnchor?, appended: Int) {
+    /// `previously` is the row order this publish replaced, and it is where an evicted anchor still
+    /// has neighbours. Empty for a settle that moved no rows — a hosted row growing in place — where
+    /// there is nothing to fall back from.
+    private func settleScroll(anchor: ViewportAnchor?, appended: Int, previously previousKeys: [String] = []) {
         tableView.layoutSubtreeIfNeeded()
         if scroll.isPinnedToBottom, context?.autoScrollEnabled ?? true {
             scrollToBottom()
             return
         }
         if appended > 0 { scroll.unseenCount += appended }
-        guard let anchor, let index = index(ofKey: anchor.key) else { return }
+        guard let anchor else { return }
+        // The anchored row itself, or — where this publish retracted it — the nearest row above it
+        // that survived. Giving up instead is the same failure the correction exists to prevent:
+        // the viewport keeps its raw offset while the document above it gets shorter, so the
+        // reader's place jumps by the whole height of what left.
+        guard let index = index(ofKey: anchor.key) ?? nearestSurvivor(above: anchor.key, in: previousKeys)
+        else { return }
         let target = tableView.rect(ofRow: index).minY - anchor.offset
         scrollTo(y: target)
+    }
+
+    /// The row this publish kept that stood nearest above the anchor in the order before it — the
+    /// neighbourhood the reader was actually looking at, read from the previous row order because
+    /// that is the only place a retracted key still has neighbours.
+    private func nearestSurvivor(above key: String, in previousKeys: [String]) -> Int? {
+        guard let position = previousKeys.firstIndex(of: key) else { return nil }
+        for candidate in previousKeys[..<position].reversed() {
+            if let index = index(ofKey: candidate) { return index }
+        }
+        return nil
     }
 
     /// What the jump-to-bottom pill does, and what a pinned viewport does on every publish.
