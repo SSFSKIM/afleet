@@ -1,9 +1,10 @@
 # Human witness legs — everything only a person can see (2026-09-09)
 
-Every leaf of C6 and C7 that has merged closed its gates headlessly and then named,
-in its own Outcomes, the clauses a machine could not take. This file collects those
-clauses in one place, in merge order, so the operator can walk them in one sitting.
+The merged C6 and C7 leaves recorded headless evidence and outstanding human/live legs
+in their Outcomes. This file collects those legs and C6's cross-owner acceptance
+prerequisites. It is not proof that all parent acceptance is implemented or passed.
 Nothing here is a claim: each leg is unwitnessed until a person witnesses it.
+Implementation-blocked legs cannot be completed merely by changing accounts.
 
 **How to run the app.** `make build` (Debug, the `afleet` scheme) and launch it. Legs
 marked *live* — the ones that spawn or attach to a real engine — run only under the
@@ -20,8 +21,8 @@ merge: reports emit counts.
 
 **Reading a leg.** Each line gives the §14 checklist item it belongs to, the action,
 what passing looks like (quoted from the spec where the spec has its own wording),
-and one clause on what the headless half already proved. Section headers carry the
-leaf's merge hash and nothing else.
+and one clause on what the headless half already proved. Leaf section headers identify
+their merge; the cross-owner section names its unresolved prerequisite.
 
 ---
 
@@ -43,6 +44,30 @@ Backs items 24, 25 and 27 — Monaco is the editor all three render in — but h
       the scroll reads as smooth to the eye. Headless: cold load median 556 ms against
       a 1,000 ms budget, first render of the 5 MB file in 89–128 ms, scripted scroll
       p50 17 ms / p95 24–33 ms, all five Monaco workers proved live by attributed traffic.
+
+## C6 — Cross-owner prerequisite: New channel (tracker 162)
+
+**Blocked by implementation, not just live policy.** No new-channel path exists, and
+`isolatedSettingsForNewChannels` has no spawn consumer. Shell/lifecycle owns the
+implementation; C6 retains integration verification under its inherited acceptance.
+These legs are additions to the historical leaf checklist, not newly passed checks.
+
+- [ ] IMPLEMENTATION BLOCKED **Item 3, New channel** (live) — on a project, choose
+      *New channel* and send a message. A new transcript must appear with the UUID afleet
+      chose, and the channel must gain an AI title after the first turn. No integrated
+      creation/title evidence is recorded. Answer mapping for questions/plans does not
+      cover this item. The first-turn leg also needs an account permitting prompted turns.
+- [ ] IMPLEMENTATION BLOCKED **Item 47, Trust** (live) — in a directory never opened in
+      the engine, *New channel* must open history-only with the trust banner and no process;
+      *Review trust in terminal* must run `claude`, and accepting its dialog then exiting
+      must lead to an owned spawn. Headless: the banner and terminal action have evidence,
+      including routing to C7.4's pane runner; the required new-channel entry is absent.
+
+The same prerequisite blocks the isolated-settings setup used by items **4, 5, 41 and 52**
+and the card-diff leg below. Verify the Developer setting reaches the new channel's
+spawn (`--setting-sources ""`, plus `--strict-mcp-config` when §6.12 requires it).
+Isolation injected at a test process-factory seam does not prove this product setting.
+No account change, fixture signature or checklist walk closes absent implementation.
 
 ## C6.2 — Composer and channel header (`c2dae0f`)
 
@@ -92,9 +117,10 @@ Three looks legs; "every gate above asserts the value a click sends", and "that 
 diff is readable … [is] looks, and no headless runner takes them". The prompted half of
 G5 is in the blocked section below. Note that tracker 157 — the reason "in the running
 app a card's state does not yet leave `.pending`" — was closed as contract Y7 at C6.1's
-merge, which lands after this one, so these legs are runnable now and were not then.
+merge, which lands after this one. That removes the pending-state blocker, not tracker
+162's isolation-setting blocker on the diff leg.
 
-- [ ] **A diff on a card is readable** (items 4, 5) — in a disposable directory with
+- [ ] IMPLEMENTATION BLOCKED **A diff on a card is readable** (items 4, 5; tracker 162) — in a disposable directory with
       *Isolated settings for this channel* on, drive a `Write` card to a pending state and
       read its diff. Passing is that the diff is readable at the card's size. Headless:
       bounded previews and diffs are asserted by value, never by legibility.
@@ -172,11 +198,12 @@ after this merge, and the five visual legs waves C, D and E added.
 
 ## C6.1 — Timeline renderer (`947c7cc`)
 
-Three legs. S7 passed at p50 3.51 ms / p99 7.66 ms over 1,781 samples, but "the spike's
-1.47 ms was a minimal renderer and the tenfold headroom is now twofold", and the corpus
-that bought the number is invented prose.
+Three legs. Historical S7 measurements were p50 3.51 ms / p99 7.66 ms over 1,781
+samples, compared with the minimal spike's 1.47 ms. The invented-prose workload measures
+markdown hosting, the table and scroll correction, not production item builders;
+tracker 427 remains a deferred performance-coverage gap.
 
-- [ ] **A markdown-heavy turn, side by side** (items 2, 3; §12's fidelity witness) — open the
+- [ ] **A markdown-heavy turn, side by side** (item 2; §12's fidelity witness, not item 3's creation/title check) — open the
       same markdown-heavy turn in afleet and in the terminal, beside each other. Passing is
       that afleet's rendering is faithful. Headless: "this is what the invented S7 corpus
       bought its frame time with, and it is the one thing no gate in this leaf can supply".
@@ -293,8 +320,12 @@ half exercised a single-run tree (184). The prompted half of G6 is in the blocke
 These are the live legs whose acceptance names a *model behaviour* — they need a prompted
 turn, and prompted turns are refused by the scratch account's organisation policy. The
 composite records them as blocked and carried as a manual witness; the turns budgeted for
-them are **unspent** and travel forward. Do not attempt these: a failure here is the policy,
-not the app, and the fix is "an account change or an API key, not a re-run".
+them are **unspent** and travel forward. Do not attempt prompted turns on this account:
+the policy blocker requires an account change or an API key, not a re-run. That does not
+remove product blockers: items 4, 5, 41 and 52 also depend on tracker 162's isolation consumer,
+and item 3's prompted half is listed with its missing new-channel implementation above.
+The recorded leaf turn budgets below are unchanged; the added coverage is not new spend
+or evidence that those budgets exercise every parent clause.
 
 **C6.2 G6 — four turns unspent, zero of four spent.**
 
@@ -309,17 +340,28 @@ not the app, and the fix is "an account change or an API key, not a re-run".
 
 **C6.3 G5 — six turns unspent, plus the D13 allowance.**
 
-- [ ] BLOCKED **Item 4, Permission** — in a disposable directory with *Isolated settings* on, in
+- [ ] POLICY + IMPLEMENTATION BLOCKED **Item 4, Permission** (tracker 162) — in a disposable directory with *Isolated settings* on, in
       `default` mode, `Create a file named ask.txt containing hello`; a `Write` card shows path
       and content, *Allow once* writes it and the log records `user_temporary`.
-- [ ] BLOCKED **Item 5, Always allow** — repeat with a second file; the card offers *Always allow*,
+- [ ] POLICY + IMPLEMENTATION BLOCKED **Item 5, Always allow** (tracker 162) — repeat with a second file; the card offers *Always allow*,
       the log records `updatedPermissions` as `user_permanent`, and a third file writes with no card.
 - [ ] BLOCKED **Item 6, Question** — `Use AskUserQuestion to ask me whether I prefer tabs or
       spaces`; a question card renders and selecting an option continues the turn.
 - [ ] BLOCKED **Item 7, Plan** — picker to `plan`, `Plan a hello-world script`; a plan card renders
       and *Approve* switches the picker back.
-- [ ] BLOCKED **Item 41, Deny** — *Deny…* on a `Write` card with `not now`; the file is not written,
+- [ ] POLICY + IMPLEMENTATION BLOCKED **Item 41, Deny** (tracker 162) — in the isolated
+      channel from item 4, click *Deny…* on a `Write` card with `not now`; the file is not written,
       the card shows denied, the summary lists the denial, "Claude's next message reflects the reason".
+
+**C6 integration — item 43's real-engine end-to-end leg remains unavailable.**
+
+- [ ] POLICY BLOCKED **Item 43, Malformed host answer** — arm the implemented Developer
+      action *Send malformed answer to next permission*, then approve a permission card.
+      Passing is the binary's denial text rendered in the timeline (the prefix specified
+      in §14 item 43), followed by the channel continuing. Headless: C6.3's fixture proves
+      rendering and corrective `91e0902` implements the arming action; neither is a witnessed
+      real-engine round trip. The action is not missing implementation or a second deferred
+      review finding. No live pass is recorded.
 
 **C6.4 G6 — six turns unspent, zero of six spent.**
 
@@ -340,10 +382,14 @@ not the app, and the fix is "an account change or an API key, not a re-run".
       `also list hidden files`: *Pending*, then *Relayed* when the `SendMessage` call naming the
       run returns reporting success, then *Delivered* when the run's transcript gains the text.
       All five arms replay from the staged fixture once it is signed (G4).
-- [ ] BLOCKED **Item 52, Subagent permission** — in the isolated channel, ask an agent to write
+- [ ] POLICY + IMPLEMENTATION BLOCKED **Item 52, Subagent permission** (tracker 162) — in the isolated channel, ask an agent to write
       a file; the permission card is labelled `Explore` with the run's description, the node
       shows a waiting badge, Activity lists it, and allowing it continues both.
 
-Every one of these has a `fake-claude` fixture arm that *is* proved — the cards, dialogs,
-cancellation, malformed answer and unknown request all replay headlessly. What the policy
-withholds is only the half that requires a live model to have seen something.
+The leaves record headless fixture/component evidence for cards, dialogs, cancellation,
+malformed-answer rendering and unknown requests. That is not end-to-end evidence for every
+leg here: `send-message-delivery` still awaits human review/signature and non-skipping replay;
+New channel, trust entry and the isolation consumer remain implementation-blocked. C6
+acceptance remains open under the composite Outcomes' closure conditions. Tracker 397/428
+fixes are in progress on a sibling branch, not closed; tracker 435 still lacks relay-conclusion
+persistence across rebuild without observation. No boxes are checked by this correction.

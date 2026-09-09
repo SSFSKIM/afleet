@@ -6,9 +6,11 @@
 > one level down. **Track:** composite — this document is the decomposing run at dispatch the
 > parent's §17 C6 row asked for; each leaf runs the controlled track (child spec → plan →
 > execute) in its own worktree. **Status:** cut **approved by the human 2026-09-08**; all four
-> leaves merged by 2026-09-10; **recomposed 2026-09-10** on `main` `91e0902` (Outcomes &
-> Retrospective below); closes when the human-witness checklist's C6 legs are walked and
-> `send-message-delivery` is signed.
+> leaves merged by 2026-09-10; **integration review completed 2026-09-10** on `main` `91e0902`
+> (Outcomes & Retrospective below); **parent acceptance remains open**, including item 3
+> (*New channel*). Tracker 162 is a cross-owner prerequisite: shell/lifecycle implementation,
+> C6 integration verification. Closure conditions are recorded in Outcomes; a checklist walk
+> and the `send-message-delivery` signature alone do not close C6.
 >
 > This document treats the parent's §17 C6 section and its design inheritance (§6.6, §7.3,
 > §7.5, §7.6, §7.7, §8.3 through §8.8, contracts X4, X5, X7, X9, X10) as landed and records
@@ -46,8 +48,9 @@ on `main` after the last leaf merges — not the sum of the leaves' gates:
 - **S7** passes on the ten-message corpus at thirty updates per second under 16 ms per frame,
   or the WKWebView fallback is adopted with a Revision Note on the parent. **Met 2026-09-09 at
   C6.1's merge:** p50 3.51 ms, p99 7.66 ms, worst 10.34 ms over 1,781 samples and 60 s against the
-  finished renderer — inside the bound, but the spike's 1.47 ms was a minimal renderer and the
-  tenfold headroom is now twofold; every later row kind spends from what is left. The verdict
+  markdown-hosting path — inside the bound, but the spike's 1.47 ms was a minimal renderer and the
+  tenfold headroom is now twofold on that workload. Production item builders were not measured
+  (tracker 427); this is not a finished-surface frame-budget result. The verdict
   had three branches (pass; pass with an AppKit fast path, a Y1 amendment the architect would
   apply on `main`; the fallback) and the first held. A markdown-heavy turn beside the terminal is
   a human leg. The merge review's host-reuse fix (one hosting view per surviving row) moved the
@@ -675,22 +678,25 @@ time and records it, and no code block renders in a `WKWebView`.
 
 ## Outcomes & Retrospective
 
-**Recomposition 2026-09-10 on `main` `91e0902`** (App floor 2,501 executed, 30 skipped, 0 failures across 19 bundles). Four
-leaves merged between 2026-09-08 and 2026-09-10; the verification ran against the six bullets of
-Parent-Level Acceptance above and the parent's §17 C6 list, not the sum of the gates. Two `astra-high`
-readers over `dc9505a` (acceptance and seams; lifecycle and state under adverse order) returned five and
-seven findings; ten became correctives on two branches merged below, one became tracker 427, and one
-(item 43's live half) is a prompted turn the account cannot run.
+**Integration review completed 2026-09-10 on `main` `91e0902`; parent acceptance open.** The historical App floor was
+2,501 executed, 30 skipped, 0 failures across 19 bundles. Four leaves merged between 2026-09-08
+and 2026-09-10; review used Parent-Level Acceptance above and the parent's §17 C6 list, not the sum
+of the leaf gates. Two `astra-high` readers over `dc9505a` (acceptance and seams; lifecycle and state
+under adverse order) returned five and seven findings: **eleven implemented corrections** on the two
+branches below and **one deferred benchmark workload**, tracker 427. Item 43's Developer action was
+one of those eleven; its unavailable real-engine end-to-end evidence is not a second deferred finding.
+This review and its test floor do not demonstrate every inherited acceptance item.
 
 | Bullet | How it stands on the merged tree |
 |---|---|
-| Checklist items against the CLI or fixtures | Demonstrated headless, each by the leaf named in the tracking map: 2, 6–8, 10, 12, 13, 29, 30, 37, 40–42, 44, 45, 57, 60, 61 (composer, cards, dialogs, threads); 4 and 5 in the timeline through C6.1's `decision` slot over C6.3's component; 9, 38, 49–51 in the Agents tab (C6.4's G1–G5), 52's card half by the corrective below. Three items held only at the component and not on the product path until the correctives: **62** (the `model_consent_fallback` frame had a test that supplied it by hand and no host that passed it — `91e0902`), **52** (the main-timeline permission card said "In a subagent run" while the tree it needed had arrived two merges earlier — `91e0902`), **43** (the Developer arming action the item names did not exist — `91e0902`; its rendering half was C6.3's fixture arm all along). **3** holds at the answer-mapping level (`updatedInput` for questions and plans); its wire half is C1's probe. **47** holds for the trust banner and *Review trust in terminal*, which now reaches C7.4's pane runner; the *New channel* it opens from does not exist (tracker 162, a shell gap outside this composite). Every item's model-behaviour half is a prompted turn, blocked by organisation policy on this account and listed in the checklist. |
+| Checklist items against the CLI or fixtures | Demonstrated headless, each by the leaf named in the tracking map: 2, 6–8, 10, 12, 13, 29, 30, 37, 40–42, 44, 45, 57, 60, 61 (composer, cards, dialogs, threads); 4 and 5 in the timeline through C6.1's `decision` slot over C6.3's component; 9, 38, 49–51 in the Agents tab (C6.4's G1–G5), 52's card half by the corrective below. Three items held only at the component and not on the product path until the correctives: **62** (the `model_consent_fallback` frame had a test that supplied it by hand and no host that passed it — `91e0902`), **52** (the main-timeline permission card said "In a subagent run" while the tree it needed had arrived two merges earlier — `91e0902`), **43** (the Developer arming action the item names did not exist — `91e0902`; its rendering half was C6.3's fixture arm all along). Item **43** still lacks real-engine end-to-end evidence; prompted tests are blocked by organisation policy. Items **3** and **47**, and the isolation-dependent legs of **4, 5, 41 and 52**, also have the implementation prerequisite below; policy is not their only blocker. |
+| Item 3 — New channel; item 47 — Trust | **Open, blocked by implementation (tracker 162).** Item 3 is §14's *New channel*, not answer mapping: afleet must choose a UUID, create a new transcript on send and show an AI title after the first turn. No new-channel path exists, and the isolated-settings toggle has no consumer. Item 47's trust banner and terminal action have component/integration evidence, but its required entry through *New channel* is absent. Shell/lifecycle owns that implementation; C6 retains integration verification of both items and the isolation-dependent permission legs. A live account change cannot supply missing implementation. |
 | Item 24's link emission | `FileLinkTests`: a path in a Read row emits `WorkspaceLink.file` with its line through X7's `LinkRouterCapability`; the timeline now sends `.newWindow` on Cmd-click (C7's corrective). |
-| S7 | Met 2026-09-09 as recorded above (p50 3.51 ms, p99 7.66 ms, worst 10.34 ms over 1,781 samples). The workload streams markdown rows that carry no item, so it measures the streaming budget and not the item builders — tracker 427; the bound stands for what S7 states. |
+| S7 | Met 2026-09-09 as recorded above (p50 3.51 ms, p99 7.66 ms, worst 10.34 ms over 1,781 samples). The workload streams markdown rows that carry no item, so it measures markdown hosting, the table and scroll correction under streaming load, not production item builders. Tracker 427 remains a deferred performance-coverage gap; the S7 result is scoped to that workload. |
 | `nested-depth-2` | C6.4's G1 in three arms over the corrected clause: the join alone when the sidecar is withheld, the sidecar first when present with the join's agreeing answer retained, a disagreeing source drawn rather than hidden; one node per repeated `task_started`. A parent whose sidecar is read after its child's now lists the child (`ec054f6`). |
 | The differential invariant | Held by both readers: no reducer was added by any leaf; every drawn item is a `TimelineItem` or a C3 overlay entry, and the relay's records are annotations on the user row, never items. |
 | X9 | No new direct write anywhere under `App/` from the four leaves; `AppFileWrites` still observes the seam; the config-home witnesses of C6.2, C6.3 and C6.4's zero-turn gates read zero unattributed changes. The prompted scenarios were never exercised on this account, so their witness is the checklist's. |
-| The seams (Y2–Y8) | Y2's one component in four hosts; Y3's `.thread` handover and `.agents` registration both in `performLaunch` with no double registration across restart; Y4 through the installed navigator and one selection store; Y5's every action behind X5; Y7's one reservation set and the fold's signal on every row; Y8's reading on the row (its rendered placement is 398). C6.4's five seam states each have one writer and an observing reader. The seams the readers broke were behind the product path, not between leaves: a callback as the only writer of the retraction registry (`91e0902`), a *Retry* capturing a workspace that *Check again* replaces and a relay reading its turn boundary from wire-only frames a rebuild does not carry (`ec054f6`), process exit retiring decisions but not agent nodes, and a scroll anchor that could be evicted (`ec054f6`). |
+| The seams (Y2–Y8) | Y2's one component in four hosts; Y3's `.thread` handover and `.agents` registration both in `performLaunch` with no double registration across restart; Y4 through the installed navigator and one selection store; Y5's every action behind X5; Y7's one reservation set and the fold's signal on every row; Y8's reading on the row (its rendered placement is 398). C6.4's seam review found writers and readers, but did not prove relay conclusions persist without an observation before rebuild (tracker 435 remains open). The seams the readers broke were behind the product path, not between leaves: a callback as the only writer of the retraction registry (`91e0902`), a *Retry* capturing a workspace that *Check again* replaces and a relay reading its turn boundary from wire-only frames a rebuild does not carry (`ec054f6`), process exit retiring decisions but not agent nodes, and a scroll anchor that could be evicted (`ec054f6`). |
 
 **What the recomposition found that no leaf could.** Every corrective was a clause that held at the
 component and not on the product path: a value with a test that supplied it by hand and no caller; a
@@ -702,13 +708,28 @@ right, and the pattern C6.1 named — state written for a reader that did not ex
 *clauses read from the prose rather than the bundle* (item 51's fourth arm, the `b412f2e` order, the
 `.agents` handover that held nothing); a test that reaches the seam by hand proves the component and
 must say so; a fixture may invent nothing, and the one synthetic recording this cut added was argued
-frame by frame at its definition sites. **What remains.** The human-witness checklist's C6 sections
-(26 legs, thirteen of them prompted turns blocked by policy, with sixteen budgeted turns
-unspent: C6.2 four, C6.3 six, C6.4 six); the
-signature of `send-message-delivery`; tracker 162 for the shell (the new-channel path item 47 stands
-on); the entries the correctives filed (427, 428, 435–441) and the leaves' own, each with an owner; the
-Codex review route once its quota resets. The composite closes when the checklist's C6 legs are walked
-and nothing new is filed against an item.
+frame by frame at its definition sites. **What remains.** The original checklist recorded 26 C6 legs, thirteen prompted,
+with sixteen budgeted turns unspent (C6.2 four, C6.3 six, C6.4 six). Those are historical counts,
+not complete acceptance coverage; the checklist now also names items 3, 47 and 43 and separates
+implementation blockers from policy-blocked live evidence. Tracker 162 remains a cross-owner C6
+acceptance prerequisite, not an exclusion. Fixes for 397 (readbacks after drain/reopen) and 428
+(rewind's main-stream UUID) are **in progress on a sibling branch**, not closed. Tracker 435 still
+lacks relay-conclusion persistence across rebuild without observation; 427 still lacks production
+item-builder performance coverage. Other corrective entries (436–441), leaf debt and the deferred
+Codex review route remain recorded with their owners.
+
+**Closure conditions.** All inherited Parent-Level Acceptance clauses must be demonstrated on the
+integrated tree by the CLI or fixtures exactly as specified. This includes shell/lifecycle delivery
+of tracker 162 and C6 verification of item 3's afleet-selected UUID, new transcript and first-turn
+AI title, item 47's new-channel trust entry through owned spawn, and the isolated-settings spawn
+consumer used by permission legs. Acceptance-affecting gaps must be resolved and verified, including
+397/428's pending fixes and 435's unobserved-rebuild relay conclusion; an in-progress fix is not
+proof. The required human/live legs must then actually be witnessed on an account that permits
+them, including item 43's malformed-answer denial and continued channel, with the X9 witness;
+`send-message-delivery` must be human-reviewed and signed, verified, and its replay test execute
+without skipping. Preserve S7's measured workload and report tracker 427 as deferred performance
+coverage, not proof of production item-builder timing. Neither a signature nor a walk of the old,
+incomplete checklist substitutes for these requirements. No new witness or pass is claimed here.
 
 **Lineage check (2026-09-10, at recomposition).** Each leaf's parent-pin against this document's final
 revision: C6.1, C6.2 and C6.3 pinned `5e24f1a` (the Y1 skeleton). C6.2 saw item 13's correction in
@@ -760,12 +781,18 @@ leaf executed against differently without a corrective now on `main`.
 - 2026-09-10 **C6 recomposition** on `main` `91e0902` (floor 2,501 executed, 30 skipped, 0 failures). Verification against the
   six bullets of Parent-Level Acceptance and the parent's §17 C6 list, by two `astra-high` readers
   over `dc9505a` (acceptance and seams; lifecycle and state under adverse order): twelve findings,
-  ten closed by two correctives on `main` (`91e0902` decisions: item 62's frame on the card,
+  eleven implemented corrections in two correctives on `main` (`91e0902` decisions: item 62's frame on the card,
   the `edit_prompt` prefill, item 52's card label from the tree, the retraction registry fed by the
   published overlay, item 43's Developer action, §11 in `DialogCardTests`; `ec054f6` agents: relay
   settlement across *Check again* by correlation, *Retry* through the current workspace, a parent
   created after its child, process exit ending runs and emptying the mirror with `processReplaced`
-  wired, the scroll anchor's survivor), one filed as 427 (S7's workload carries no item) and one
-  (item 43's live half) a prompted turn the account cannot run. Lineage check written above. What
-  only a human can witness is `docs/doperpowers/checklists/2026-09-09-human-witness-legs.md`; the
-  composite closes when its C6 legs are walked and `send-message-delivery` is signed. 
+  wired, the scroll anchor's survivor), and one deferred as 427 (S7's markdown-hosting workload
+  carries no item). Item 43's action is implemented; its real-engine evidence remains unavailable,
+  not a second deferred review finding. Lineage check written above. This completes integration
+  review, not parent acceptance.
+- 2026-09-10 acceptance-record correction: §14 item 3 is *New channel*, not answer mapping.
+  Tracker 162 remains under C6 acceptance with shell/lifecycle implementation ownership and C6
+  integration verification, including item 47 and isolation-dependent legs. The human checklist
+  now covers items 3, 47 and 43 without claiming a witness. Outcomes states the full closure
+  conditions; 397/428 are in progress, 435 and 427 remain evidence gaps. Historical test and S7
+  measurements are unchanged; S7 does not measure production item builders.
