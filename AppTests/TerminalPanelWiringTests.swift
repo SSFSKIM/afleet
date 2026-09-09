@@ -69,6 +69,7 @@ final class TerminalPanelWiringTests: XCTestCase {
         let runner = rig.replaceTerminalRunner()
         let session = WiringFixtures.session(11)
         let job = WiringFixtures.job("jshow", session: session, cwd: rig.cwd)
+        rig.paintRows([(session, rig.cwd)])
         await rig.lifecycle.stagePane(.success(WiringFixtures.request(purpose: .attach(job.short), cwd: rig.cwd)))
         await runner.observeFocus { [shell = rig.shell] in shell.focus }
         XCTAssertNotEqual(rig.shell.focus, .channel(session), "the test must begin somewhere else")
@@ -100,6 +101,50 @@ final class TerminalPanelWiringTests: XCTestCase {
         let attached = await rig.lifecycle.attachedJobs
         XCTAssertEqual(attached, [job.short], "Attach did not go through LifecycleAPI.attach")
         XCTAssertNil(rig.browser.jobBanners[job.short.rawValue], "a successful Attach left a banner")
+    }
+
+    /// X5 refusing is not a reason to move the window. The selection used to happen before the
+    /// request was asked for, so a refused *Attach* left the main window standing in a channel
+    /// where nothing had opened and nothing was going to — the user sent somewhere else to read a
+    /// banner on the row they had just clicked.
+    func testAnX5RefusalLeavesTheWindowWhereItWas() async throws {
+        let rig = try await WiringRig()
+        defer { rig.stop() }
+        let runner = rig.replaceTerminalRunner()
+        let session = WiringFixtures.session(12)
+        let job = WiringFixtures.job("jrefuse", session: session)
+        rig.paintRows([(session, rig.cwd)])
+        await rig.lifecycle.stagePane(.failure(.notOwned))
+        let before = rig.shell.focus
+
+        await SidebarView.openJobPane(job, verb: .attach, browser: rig.browser, shell: rig.shell)
+
+        XCTAssertEqual(rig.shell.focus, before, "a refused Attach moved the window anyway")
+        XCTAssertNotNil(rig.browser.jobBanners[job.short.rawValue], "the row refused without saying so")
+        let received = await runner.received
+        XCTAssertEqual(received.count, 0, "a refused Attach opened a pane")
+    }
+
+    /// And a channel with no row is not somewhere the window can go. The panel column resolves the
+    /// channel it draws through `FleetBrowserModel.row`, so selecting a session the browser has no
+    /// row for leaves the column on its pick-a-channel placeholder — the pane invisible again,
+    /// which is the failure the selection was added to close.
+    func testAChannelWithNoRowIsNotSelected() async throws {
+        let rig = try await WiringRig()
+        defer { rig.stop() }
+        let runner = rig.replaceTerminalRunner()
+        let session = WiringFixtures.session(13)
+        let job = WiringFixtures.job("jnorow", session: session, cwd: rig.cwd)
+        await rig.lifecycle.stagePane(.success(WiringFixtures.request(purpose: .attach(job.short), cwd: rig.cwd)))
+        _ = rig.app.panels.context(for: rig.key, cwd: rig.cwd)
+        rig.app.panels.focusChannel(rig.key)
+        let before = rig.shell.focus
+
+        await SidebarView.openJobPane(job, verb: .attach, browser: rig.browser, shell: rig.shell)
+
+        XCTAssertEqual(rig.shell.focus, before, "the window moved to a channel with no row to draw")
+        let received = await runner.received
+        XCTAssertEqual(received.count, 1, "the pane did not open")
     }
 
     // MARK: - Group 3: *Logs*
@@ -354,6 +399,19 @@ private struct WiringRig {
     /// The sidebar acts through the shell — it is what selects a channel — and the shell reads the
     /// same host the app holds, exactly as `RootView` builds the pair.
     let shell: ShellModel
+
+    /// Paints listed rows for the sessions named, because a job's channel is resolved through the
+    /// row that names it and a rig built by hand has an empty fleet. One call per test: the paint
+    /// replaces the snapshot rather than adding to it, exactly as a fresh index build does.
+    func paintRows(_ rows: [(session: SessionID, cwd: URL?)]) {
+        let moment = Date()
+        var entries: [SessionID: IndexEntry] = [:]
+        for row in rows {
+            entries[row.session] = SidebarFixtures.entry(row.session, configHome: configHome,
+                                                         cwd: row.cwd?.path, mtime: moment)
+        }
+        browser.apply(IndexSnapshot(configHome: configHome, builtAt: moment, entries: entries))
+    }
 
     /// Takes `.terminal`'s pane runner for a recording one, for the groups that assert where a
     /// request travelled rather than what the panel did with it.

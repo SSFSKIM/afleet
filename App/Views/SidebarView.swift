@@ -138,8 +138,16 @@ struct SidebarView: View {
     /// channel that row is about, so the window goes there: without this the host selected the
     /// Terminal tab while the panel column went on deriving its channel from `shell.focus`, and
     /// *Attach* started a pane in a channel nobody was looking at. Item 15 says *Attach* shows the
-    /// job's screen, and an invisible pane is not that. The selection happens **before** X5 is
-    /// asked, so the window is already on the channel when the client's first bytes arrive.
+    /// job's screen, and an invisible pane is not that.
+    ///
+    /// **Two conditions on that move, and both are about what the user would be shown.** It happens
+    /// only *after* X5 has answered, because a refusal moves nobody: the window would otherwise be
+    /// standing in a channel where nothing opened, to read a banner on the row it was sent from.
+    /// And it happens only for a channel the browser has a **row** for, because `PanelColumnView`
+    /// resolves the channel it draws through that row — selecting a session with none leaves the
+    /// column on its pick-a-channel placeholder, which is the invisible pane again. It still
+    /// happens **before** `panels.run`, so the window is already there when the client's first
+    /// bytes arrive.
     static func openJobPane(_ job: JobEntry, verb: JobPaneVerb,
                             browser: FleetBrowserModel, shell: ShellModel) async {
         let panels = shell.panels
@@ -147,7 +155,6 @@ struct SidebarView: View {
         if panels.context(for: channel) == nil, let cwd = browser.paneCWD(for: job, in: channel) {
             _ = panels.context(for: channel, cwd: cwd)
         }
-        shell.select(channel.session)
         let request: PaneRequest?
         switch verb {
         case .attach: request = await browser.attach(job)
@@ -155,6 +162,7 @@ struct SidebarView: View {
         }
         // A refusal from X5 has already been written onto the row by the browser.
         guard let request else { return }
+        if browser.row(channel.session) != nil { shell.select(channel.session) }
         do {
             try await panels.run(request, for: channel)
         } catch {
