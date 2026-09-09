@@ -476,6 +476,53 @@ final class TimelineListTests: XCTestCase {
         }
     }
 
+    // MARK: - The preview's own channel (round 3, scalpel-4 #4)
+
+    /// The **streaming preview** is drawn against the channel's context, as every item row is.
+    ///
+    /// **Discriminating.** The context was injected onto the item roots and the preview root was
+    /// returned bare, so a link pressed in the message being streamed reached `open` with no
+    /// context, was declined, and fell through to the system — where a relative path names a file
+    /// in the app's own directory or no file at all. The reader cannot tell a streaming message
+    /// from a settled one, and the link works in one and not the other.
+    ///
+    /// The witness is the capability, not the injection: the context found on the preview root is
+    /// used to open a relative destination, and the recording router is asked what it received.
+    func testThePreviewRowIsDrawnAgainstTheChannelsContext() async throws {
+        let controller = TimelineTableController()
+        let router = RecordingLinkRouter()
+        let cwd = URL(fileURLWithPath: "/tmp/afleet-timeline-list/invented-project")
+        controller.apply(TimelineRenderInput(rows: Self.rows(2),
+                                             preview: Self.preview("an invented streaming line")),
+                         context: InventedItems.context(links: router, cwd: cwd))
+        let preview = try XCTUnwrap(controller.previewRow, "the table holds no preview row to draw")
+
+        let carried = ViewTree.values(of: TimelineRenderContext.self, in: controller.root(for: preview))
+        XCTAssertEqual(carried.count, 1,
+                       "the preview root carries \(carried.count) render context(s), not the channel's one")
+        let context = try XCTUnwrap(carried.first)
+
+        let relative = try XCTUnwrap(TimelineLinkDestination.url(for: "notes.md"))
+        XCTAssertTrue(TimelineLinkDestination.open(relative, in: context),
+                      "a relative link in the preview was declined, so it falls through to the system")
+        var delivered = false
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if await router.opened.count == 1 { delivered = true; break }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertTrue(delivered, "the channel's link capability received nothing within the wait")
+        let opened = await router.opened
+        XCTAssertEqual(opened.first, .file(cwd.appending(path: "notes.md"), line: nil),
+                       "the preview's relative link was not resolved against the channel's directory")
+
+        // The floor: an item row carried one all along, so this asserts about the preview and not
+        // about the injection having been removed everywhere.
+        let item = try XCTUnwrap(controller.rows.first, "the table holds no item row")
+        XCTAssertEqual(ViewTree.values(of: TimelineRenderContext.self, in: controller.root(for: item)).count, 1,
+                       "an item root no longer carries the channel's context")
+    }
+
     // MARK: - Fixtures
 
     /// The window every scroll assertion is made in. Short enough that sixty rows overflow it, which

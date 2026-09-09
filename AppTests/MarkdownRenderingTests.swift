@@ -455,4 +455,87 @@ final class MarkdownRenderingTests: XCTestCase {
         XCTAssertEqual(markdown.parseCount, 1,
                        "the accepted write counted \(markdown.parseCount) parse(s)")
     }
+
+    // MARK: - Sanitising after the parse (round 3, sweep #1)
+
+    /// A §12 character written as a **character reference** never reaches the drawn text.
+    ///
+    /// **Discriminating.** The sanitiser ran once, on the source, *before* the parse; the parser
+    /// then decoded `&#x202E;` and every other numeric or named reference into the raw scalar and
+    /// the walk copied it into a text run, a link label and a heading. So the one pass that
+    /// existed could be passed by writing the override as an entity, which is the cheapest thing
+    /// an untrusted string can do. The floor is the second half: the prose around the references
+    /// is still rendered, so a walk that dropped its text entirely would not pass this.
+    func testCharacterReferencesForStrippedScalarsDoNotReachTheDrawnText() {
+        var phases = RenderPhases()
+        let source = """
+        # hea&#xFEFF;ding
+
+        before &#x202E; after, a &#8203; zero width and a &#x2028; separator.
+
+        a **str&#x202E;ong** word, an *emp&#8203;hasis* and a [la&#x202E;bel](https://example.invalid/page)
+
+        > a quo&#x202E;ted line
+        """
+        let rendered = MarkdownText().attributed(source, highlighter: CodeHighlighter(), phases: &phases)
+        let scalars = Set(rendered.string.unicodeScalars.map(\.value))
+        for stripped: UInt32 in [0x202E, 0x200B, 0xFEFF, 0x2028] {
+            XCTAssertFalse(scalars.contains(stripped),
+                           "U+\(String(stripped, radix: 16, uppercase: true)) reached the drawn text")
+        }
+        // The floor: the words the references sat between are all still there.
+        for word in ["heading", "before", "after", "strong", "emphasis", "label", "quoted"] {
+            XCTAssertTrue(rendered.string.contains(word),
+                          "the text around the references was lost; \(rendered.length) character(s) were rendered")
+        }
+    }
+
+    // MARK: - Emphasis over nested inline content (round 3, scalpel-4 #5)
+
+    /// Bold and italic are **applied over** their children rather than replacing them.
+    ///
+    /// **Discriminating.** Both arms built a new run from the node's plain-text projection, which
+    /// keeps a nested link's label and throws its destination away — the link is then blue-free,
+    /// dead text — and which projects an `InlineHTML` node, having no children, to the empty
+    /// string, so `**a <b>b</b> c**` lost its tags. The floor is that the emphasis itself is still
+    /// applied, or a walk that ignored `Strong` entirely would pass the first two assertions.
+    func testEmphasisKeepsTheInlineContentUnderIt() throws {
+        let rendered = build("**[guide](https://example.invalid/page)** and *a <b>b</b> c* here")
+        XCTAssertEqual(destinations(rendered), ["https://example.invalid/page"],
+                       "a strong-wrapped link carried \(destinations(rendered).count) destination(s), not 1")
+        XCTAssertTrue(rendered.string.contains("<b>b</b>"),
+                      "the inline HTML under the emphasis was lost; \(rendered.length) character(s) were rendered")
+
+        // The emphasis is still applied, on top of the runs it was applied over.
+        let label = try XCTUnwrap(rendered.string.range(of: "guide"), "the strong link's label was not rendered")
+        let at = rendered.string.distance(from: rendered.string.startIndex, to: label.lowerBound)
+        let font = rendered.attribute(.font, at: at, effectiveRange: nil) as? NSFont
+        XCTAssertTrue(font?.fontDescriptor.symbolicTraits.contains(.bold) ?? false,
+                      "the strong-wrapped link's label is not bold")
+        let italic = try XCTUnwrap(rendered.string.range(of: "c here"), "the emphasised run was not rendered")
+        let atItalic = rendered.string.distance(from: rendered.string.startIndex, to: italic.lowerBound)
+        let italicFont = rendered.attribute(.font, at: atItalic, effectiveRange: nil) as? NSFont
+        XCTAssertTrue(italicFont?.fontDescriptor.symbolicTraits.contains(.italic) ?? false,
+                      "the emphasised text is not italic")
+    }
+
+    // MARK: - The ordered list's own numbering (round 3, scalpel-4 #6)
+
+    /// A list that begins at `4.` is drawn from four.
+    ///
+    /// **Discriminating.** The walk numbered from the enumeration offset and never read the list's
+    /// own start, so a numbered list continuing an earlier one — which is how model output writes
+    /// step four of a procedure — was renumbered from one, silently telling the reader to do the
+    /// wrong step. The floor is the second half: a list that does start at one still says one.
+    func testAnOrderedListKeepsItsStartNumber() {
+        let continued = build("4. an invented step\n5. another invented step\n")
+        XCTAssertTrue(continued.string.contains("4. "),
+                      "the list did not start at four; \(continued.length) character(s) were rendered")
+        XCTAssertTrue(continued.string.contains("5. "), "the list's second item is not five")
+        XCTAssertFalse(continued.string.contains("1. "), "the list was renumbered from one")
+
+        let ordinary = build("1. an invented step\n2. another invented step\n")
+        XCTAssertTrue(ordinary.string.contains("1. ") && ordinary.string.contains("2. "),
+                      "an ordinary list no longer numbers from one")
+    }
 }
