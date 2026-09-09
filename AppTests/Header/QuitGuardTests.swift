@@ -682,7 +682,9 @@ final class QuitGuardTests: XCTestCase {
                        "\(seen.first?.channels.count ?? -1) channel(s) were named; the fleet was idle")
         XCTAssertEqual(seen.first?.panes.paneCount, 2,
                        "the dialog was handed \(seen.first?.panes.paneCount ?? -1) of 2 running panes")
-        let sentence = QuitGuard.warning(seen.first?.channels ?? [], seen.first?.panes ?? .none)
+        XCTAssertEqual(guardModel.lastAskedPanes.paneCount, 2,
+                       "the guard recorded \(guardModel.lastAskedPanes.paneCount) of 2 panes it asked about")
+        let sentence = QuitGuard.warning(guardModel.lastAsked, guardModel.lastAskedPanes)
         XCTAssertTrue(sentence.contains("2 Terminal pane(s) in 1 channel(s)"),
                       "the sentence did not name the running panes at all")
     }
