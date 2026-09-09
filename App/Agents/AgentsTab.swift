@@ -54,6 +54,32 @@ final class AgentsTab: PanelTab {
         guard let model = session as? AgentsModel else { return nil }
         return AgentsPanelView(model: model, surface: surface)
     }
+
+    // MARK: - The command link (child spec D15, tracker 207)
+
+    /// The Agents tab's claim on `WorkspaceLink.command("agents")`, X10's `.native` destination that
+    /// nothing has answered until now — `/agents` typed in the composer answers with a diagnostic.
+    ///
+    /// **Registered with the tab and never with a session**, the Browser's and Files' rule: a
+    /// session is built lazily for rendering, so a link raised before anyone opened the tab would
+    /// otherwise resolve to nothing. Selecting the tab is the whole of what it does — the panel then
+    /// draws whichever channel the window is on, which is what "open the Agents panel" means.
+    ///
+    /// `selectTab` is injected for the reason `BrowserLinkTargets.TabRequest` is: `PanelHost.select`
+    /// is the host's and a target holding the host is a retain path.
+    nonisolated static let commandDestination = "agents"
+
+    /// Higher than the Browser's page claim because this is a claim on one exact command string
+    /// rather than on a class of links; nothing else in the app claims a `.command` at all.
+    nonisolated static let specificity = 50
+
+    func linkTargets(through selectTab: @escaping @MainActor @Sendable () -> Void) -> [LinkTarget] {
+        [LinkTarget(tab: .agents, specificity: Self.specificity,
+                    handles: { link in
+                        if case .command(let name) = link { name == Self.commandDestination } else { false }
+                    },
+                    open: { _, _ in selectTab() })]
+    }
 }
 
 /// What the panel draws. Task 3 replaces this body with the run tree and its two empty states; the

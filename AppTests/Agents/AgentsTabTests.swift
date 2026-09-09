@@ -140,8 +140,56 @@ final class AgentsTabTests: XCTestCase {
                      "the tab built a view over a session that is not its own")
     }
 
+    // MARK: - The `/agents` command link (child spec D15, tracker 207)
+
+    /// A `WorkspaceLink.command("agents")` reaches this target and selects the tab, and nothing else
+    /// claims it: the router's fallback — which is what answers `/agents` with a diagnostic today —
+    /// never runs.
+    func testTheCommandLinkSelectsTheTab() async throws {
+        let fallbacks = FallbackRecorder()
+        let router = HostLinkRouter(externalOpener: { _ in fallbacks.note() },
+                                    diagnostic: { _ in fallbacks.note() })
+        let selections = SelectionRecorder()
+        let tab = AgentsTab(timelines: { _ in nil }, selection: AgentSelectionStore())
+        for target in tab.linkTargets(through: { selections.selected() }) {
+            await router.register(target)
+        }
+
+        await router.open(.command("agents"), from: .currentPanel)
+
+        XCTAssertEqual(selections.count, 1, "the command selected the tab \(selections.count) time(s), not 1")
+        XCTAssertEqual(fallbacks.count, 0,
+                       "the router fell back \(fallbacks.count) time(s), so nothing claimed the command")
+
+        // The claim is on this one command string and not on commands in general: `tasks` and
+        // `switcher` stay open and stay other owners' (tracker 207).
+        await router.open(.command("tasks"), from: .currentPanel)
+        XCTAssertEqual(selections.count, 1,
+                       "another command reached the Agents target, which claims \(selections.count) of 2")
+        XCTAssertEqual(fallbacks.count, 1, "an unclaimed command did not reach the router's fallback")
+    }
+
     // MARK: - Doubles
 
     /// A session of another tab's kind, so the guard in `panelView` has something to refuse.
     private final class OtherSession: PanelTabSession {}
+
+    /// Counts, never links: what the router did with a link that nothing claimed (§11).
+    ///
+    /// The router's two fallbacks are non-isolated `@Sendable` closures — they are taken at its
+    /// construction and can run anywhere — so the counter is a locked box, the shape `URLBox` takes
+    /// beside it and for the same reason.
+    private final class FallbackRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored = 0
+        var count: Int { lock.lock(); defer { lock.unlock() }; return stored }
+        func note() { lock.lock(); stored += 1; lock.unlock() }
+    }
+
+    /// The tab's own selection request, which is `@MainActor` and needs no lock.
+    @MainActor
+    private final class SelectionRecorder {
+        private(set) var count = 0
+        func selected() { count += 1 }
+    }
 }

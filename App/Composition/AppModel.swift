@@ -454,6 +454,15 @@ final class AppModel: FilesTabHost {
             agentNavigation = AgentNavigator(selection: agentSelection,
                                              focusChannel: { [shell] key in shell.select(key.session) },
                                              selectTab: { [panels] in panels.select(.agents) })
+            // Its `/agents` command target (child spec D15, tracker 207), registered **with the
+            // tab** and awaited — a session is built lazily for rendering, so a link raised before
+            // anyone opened the tab must still resolve. It cannot go beside the Browser's at the
+            // top of this call: the tab does not exist until the lifecycle does, three lines above.
+            // Awaiting here is still strictly before the first link that can be raised, because
+            // nothing this launch reached is on screen until `route` is published below.
+            for target in agents.linkTargets(through: { [panels] in panels.select(.agents) }) {
+                await panels.links.register(target)
+            }
         }
         await startActivity(over: reached)
         // **Last.** Publishing the route is what puts the actionable surfaces on screen — the
