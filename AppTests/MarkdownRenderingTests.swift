@@ -456,6 +456,35 @@ final class MarkdownRenderingTests: XCTestCase {
                        "the accepted write counted \(markdown.parseCount) parse(s)")
     }
 
+    // MARK: - Emphasis over nested inline content (round 3, scalpel-4 #5)
+
+    /// Bold and italic are **applied over** their children rather than replacing them.
+    ///
+    /// **Discriminating.** Both arms built a new run from the node's plain-text projection, which
+    /// keeps a nested link's label and throws its destination away — the link is then blue-free,
+    /// dead text — and which projects an `InlineHTML` node, having no children, to the empty
+    /// string, so `**a <b>b</b> c**` lost its tags. The floor is that the emphasis itself is still
+    /// applied, or a walk that ignored `Strong` entirely would pass the first two assertions.
+    func testEmphasisKeepsTheInlineContentUnderIt() throws {
+        let rendered = build("**[guide](https://example.invalid/page)** and *a <b>b</b> c* here")
+        XCTAssertEqual(destinations(rendered), ["https://example.invalid/page"],
+                       "a strong-wrapped link carried \(destinations(rendered).count) destination(s), not 1")
+        XCTAssertTrue(rendered.string.contains("<b>b</b>"),
+                      "the inline HTML under the emphasis was lost; \(rendered.length) character(s) were rendered")
+
+        // The emphasis is still applied, on top of the runs it was applied over.
+        let label = try XCTUnwrap(rendered.string.range(of: "guide"), "the strong link's label was not rendered")
+        let at = rendered.string.distance(from: rendered.string.startIndex, to: label.lowerBound)
+        let font = rendered.attribute(.font, at: at, effectiveRange: nil) as? NSFont
+        XCTAssertTrue(font?.fontDescriptor.symbolicTraits.contains(.bold) ?? false,
+                      "the strong-wrapped link's label is not bold")
+        let italic = try XCTUnwrap(rendered.string.range(of: "c here"), "the emphasised run was not rendered")
+        let atItalic = rendered.string.distance(from: rendered.string.startIndex, to: italic.lowerBound)
+        let italicFont = rendered.attribute(.font, at: atItalic, effectiveRange: nil) as? NSFont
+        XCTAssertTrue(italicFont?.fontDescriptor.symbolicTraits.contains(.italic) ?? false,
+                      "the emphasised text is not italic")
+    }
+
     // MARK: - The ordered list's own numbering (round 3, scalpel-4 #6)
 
     /// A list that begins at `4.` is drawn from four.

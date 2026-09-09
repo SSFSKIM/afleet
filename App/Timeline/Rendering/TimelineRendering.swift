@@ -817,11 +817,9 @@ final class MarkdownText: @unchecked Sendable {
                                               attributes: [.font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
                                                            .backgroundColor: NSColor.quaternarySystemFill]))
             case let strong as Strong:
-                out.append(NSAttributedString(string: plain(strong),
-                                              attributes: [.font: NSFont.boldSystemFont(ofSize: 13)]))
+                out.append(emphasised(strong, with: .bold))
             case let emphasis as Emphasis:
-                out.append(NSAttributedString(string: plain(emphasis),
-                                              attributes: [.font: NSFont(descriptor: NSFont.systemFont(ofSize: 13).fontDescriptor.withSymbolicTraits(.italic), size: 13) ?? NSFont.systemFont(ofSize: 13)]))
+                out.append(emphasised(emphasis, with: .italic))
             case let strike as Strikethrough:
                 out.append(struckThrough(strike))
             case let link as Markdown.Link:
@@ -856,6 +854,33 @@ final class MarkdownText: @unchecked Sendable {
             }
         }
         return out
+    }
+
+    /// Emphasis **applied over** the runs under it, rather than replacing them.
+    ///
+    /// The two arms used to build one run from the node's plain-text projection, which is lossy in
+    /// both directions: a nested link kept its label and lost its destination — blue text that does
+    /// nothing — and an `InlineHTML` node, having no children, projected to the empty string, so
+    /// `**a <b>b</b> c**` reached the reader with its tags gone. Walking the children through
+    /// `inline` keeps every attribute they carry and adds the trait on top of the fonts they
+    /// already have, which is also what nests one emphasis inside another.
+    private static func emphasised(_ markup: Markup,
+                                   with trait: NSFontDescriptor.SymbolicTraits) -> NSAttributedString {
+        let content = NSMutableAttributedString(attributedString: inline(markup))
+        let whole = NSRange(location: 0, length: content.length)
+        // Collected before anything is written: mutating an attribute inside its own enumeration
+        // rewrites the ranges the enumeration is walking.
+        var runs: [(NSRange, NSFont)] = []
+        content.enumerateAttribute(.font, in: whole) { value, range, _ in
+            runs.append((range, value as? NSFont ?? NSFont.systemFont(ofSize: 13)))
+        }
+        for (range, font) in runs {
+            let descriptor = font.fontDescriptor
+                .withSymbolicTraits(font.fontDescriptor.symbolicTraits.union(trait))
+            guard let restyled = NSFont(descriptor: descriptor, size: font.pointSize) else { continue }
+            content.addAttribute(.font, value: restyled, range: range)
+        }
+        return content
     }
 
     /// `del` matches only `~~x~~` — the first of the two reproducible `marked` overrides
