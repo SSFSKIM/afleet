@@ -46,12 +46,34 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
     /// a fragment rather than rebuilding the message (§4).
     private(set) var previewRow: RenderedRow?
 
+    /// The text the preview row was last drawn from, which is what says whether the next preview
+    /// under the same key **continues** this one or is a second incarnation of it (§4).
+    ///
+    /// C3 clears the preview on the `assistant` frame and lets a later `content_block_start` open a
+    /// fresh one, and a preview with no message id keys the same either time — so "same key, no
+    /// shorter" is not continuation, and reading it as one splices the new message's tail onto the
+    /// old message's body. Continuation is a prefix, which coalescing cannot forge.
+    private var previewText = ""
+
     /// What the table draws: the items, then the streaming preview if there is one.
     var rows: [RenderedRow] { previewRow.map { itemRows + [$0] } ?? itemRows }
 
     /// Row heights by the row's own key. `ItemID` carries a config-home path and is never logged; it
     /// is a dictionary key here and nothing else.
     private var heights: [String: CGFloat] = [:]
+
+    /// The width every cached height was measured at. A height is a function of the id *and* the
+    /// width; a window dragged narrower keeps drawing wrapped text at its old height unless the
+    /// cache goes with the width.
+    private var measuredWidth: CGFloat?
+
+    /// The rows the table currently has mounted, by key, so a reload updates the view a row already
+    /// has rather than building a second one and dropping the SwiftUI state that was in the first.
+    private var hosts: [String: TimelineRowHostView] = [:]
+
+    /// How many times a hosted row has told the table its content changed size. Counted for the same
+    /// reason `reloadedRows` is: an invalidation path nothing can read is a path nothing can hold.
+    private(set) var hostedHeightNotes = 0
 
     /// How many heights this controller has had to measure, cumulatively. A cache dropped wholesale
     /// on every publish re-measures the whole table, and this is what says so in a count.
@@ -98,6 +120,13 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
         tableView.backgroundColor = .textBackgroundColor
         tableView.dataSource = self
         tableView.delegate = self
+        // The table follows the viewport's width, which is what makes a row's measured width the
+        // width it is drawn at — and what makes the width invalidation below have something to say.
+        tableView.autoresizingMask = [.width]
+        tableView.postsFrameChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(tableResized),
+                                               name: NSView.frameDidChangeNotification,
+                                               object: tableView)
         scrollView.documentView = tableView
         scrollView.hasVerticalScroller = true
         scrollView.drawsBackground = false
@@ -105,6 +134,13 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
         scrollView.contentView.postsBoundsChangedNotifications = true
         NotificationCenter.default.addObserver(self, selector: #selector(viewportMoved),
                                                name: NSView.boundsDidChangeNotification,
+                                               object: scrollView.contentView)
+        // A document view is not resized by its clip view, so the table's width is followed here.
+        // Without it a window dragged narrower draws every row at the width it had when it was wide
+        // and clips the right-hand half of each of them.
+        scrollView.contentView.postsFrameChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(viewportResized),
+                                               name: NSView.frameDidChangeNotification,
                                                object: scrollView.contentView)
     }
 
@@ -115,6 +151,7 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
     /// One publish, applied: the items reconciled by key, the preview appended to, and the scroll
     /// position either held on its anchor or followed to the bottom.
     func apply(_ input: TimelineRenderInput, context: TimelineRenderContext? = nil) {
+        let contextChanged = Self.differs(self.context, context)
         self.context = context
         // The reader's syntax-highlighting preference, honoured on the publish that carries it. A
         // settled block holds its styled code inside it, so the parsed-block cache goes with the
@@ -122,9 +159,33 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
         // preference turned highlighting off.
         if highlighter.setEnabled(context?.syntaxHighlightingEnabled ?? true) { preferenceChanged() }
         reloadedRows = []
-        let anchor = anchorAtViewportTop()
+        var anchor = anchorAtViewportTop()
+        let previousKeys = itemRows.map(\.key)
         let appended = applyItems(input) + applyPreview(input.preview)
+        // The preview the reader was anchored to has become an item: the anchor moves with it, or
+        // the correction below finds no anchored row and anything that arrived above the
+        // replacement in the same publish shoves the reader's place down by its whole height.
+        if let held = anchor, held.key.hasPrefix("preview:"), previewRow == nil,
+           let replacement = Self.firstAppendedKey(previous: previousKeys, incoming: itemRows.map(\.key)) {
+            anchor = ViewportAnchor(key: replacement, offset: held.offset)
+        }
+        // A row that survived this publish keeps its view, so a context that changed — a cwd the
+        // channel has just learnt, an overlay that has gone stale, a neighbourhood rebuilt around a
+        // new item — has to reach the roots that view already holds.
+        pruneHosts()
+        if contextChanged { refreshHostedRoots() }
         settleScroll(anchor: anchor, appended: appended)
+    }
+
+    /// The first key this publish appended **after** everything the previous publish held, which is
+    /// where the message that was streaming lands. Keys inserted above the old tail are a backfill
+    /// and are not the preview's replacement.
+    static func firstAppendedKey(previous: [String], incoming: [String]) -> String? {
+        let before = Set(previous)
+        guard let tail = previous.last, let position = incoming.firstIndex(of: tail) else {
+            return incoming.first { !before.contains($0) }
+        }
+        return incoming[incoming.index(after: position)...].first { !before.contains($0) }
     }
 
     /// The syntax-highlighting preference flipped: everything already built from it is dropped.
@@ -191,13 +252,19 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
             // durable item's own row is already in `itemRows`, so the message never blinks.
             guard previewRow != nil else { return 0 }
             previewRow = nil
+            previewText = ""
             tableView.removeRows(at: IndexSet(integer: index), withAnimation: [])
             return 0
         }
         let key = Self.previewKey(for: preview)
-        if let existing = previewRow, existing.key == key, preview.text.count >= existing.consumedCharacters {
+        // **A prefix, and not a length.** Two incarnations of the preview arrive under one key
+        // whenever the reducer clears it and a `content_block_start` opens a nil-id one again, and
+        // coalescing can hide the clear entirely; only text that still begins with what is on
+        // screen is the same message going on.
+        if let existing = previewRow, existing.key == key, preview.text.hasPrefix(previewText) {
             let fragment = String(preview.text.dropFirst(existing.consumedCharacters))
             guard !fragment.isEmpty else { return 0 }
+            previewText = preview.text
             appendToLastRow(fragment)
             return 0
         }
@@ -205,6 +272,7 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
         var built = RenderedRow(key: key, source: preview.text)
         built.settle(markdown: markdown, highlighter: highlighter)
         previewRow = built
+        previewText = preview.text
         heights.removeValue(forKey: key)
         guard hadPreview else {
             tableView.insertRows(at: IndexSet(integer: index), withAnimation: [])
@@ -414,7 +482,9 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
         let key = all[row].key
         if let cached = heights[key] { return cached }
         heightMeasurements += 1
-        let measured = height(of: all[row], width: max(tableView.bounds.width, Self.measuringWidth))
+        let width = max(tableView.bounds.width, Self.measuringWidth)
+        measuredWidth = width
+        let measured = height(of: all[row], width: width)
         heights[key] = measured
         return measured
     }
@@ -422,19 +492,110 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let all = rows
         guard all.indices.contains(row) else { return nil }
+        let key = all[row].key
         // SwiftUI hosted per visible row, which is what contract Y1's `AnyView` builder requires and
-        // what S7's `hosting` signpost measures.
-        let hosting: NSView = all[row].item.map { NSHostingView(rootView: body(for: $0)) }
-            ?? NSHostingView(rootView: TimelineMarkdownRow(row: all[row]))
-        hosting.translatesAutoresizingMaskIntoConstraints = true
-        hosting.autoresizingMask = [.width, .height]
-        return hosting
+        // what S7's `hosting` signpost measures — and **the same host across reloads of one key**.
+        // A card's in-flight guard and a question's half-typed draft are SwiftUI state, which lives
+        // in the hosting view: a fresh one per reload throws them away, and a message streaming
+        // beside a card reloads thirty times a second.
+        if let existing = hosts[key] {
+            existing.update(root: root(for: all[row]), context: context)
+            return existing
+        }
+        let host = TimelineRowHostView(key: key, root: root(for: all[row]), context: context)
+        host.onHeightChange = { [weak self] key, height in self?.hostedRow(key, measured: height) }
+        hosts[key] = host
+        return host
+    }
+
+    /// One row's SwiftUI content: whichever builder owns the item's kind (contract Y1), handed the
+    /// render context on its own subtree, or the markdown pipeline for the two rows that are not
+    /// items.
+    private func root(for row: RenderedRow) -> AnyView {
+        guard let item = row.item else { return AnyView(TimelineMarkdownRow(row: row)) }
+        return AnyView(body(for: item))
     }
 
     /// One item's row, drawn by whichever builder owns its kind (contract Y1) and handed the render
     /// context on its own subtree.
     private func body(for item: TimelineRow) -> some View {
         TimelineRowSlot(row: item).environment(\.timelineContext, context)
+    }
+
+    /// Drops the hosts of rows this publish no longer holds. A host outlives its row only as far as
+    /// the end of the publish that removed it.
+    private func pruneHosts() {
+        guard !hosts.isEmpty else { return }
+        let live = Set(rows.map(\.key))
+        hosts = hosts.filter { live.contains($0.key) }
+    }
+
+    /// Hands every mounted row the context again. Only the rows the table has actually built are
+    /// touched, which is the visible ones.
+    private func refreshHostedRoots() {
+        guard !hosts.isEmpty else { return }
+        let byKey = Dictionary(rows.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
+        for (key, host) in hosts {
+            guard let row = byKey[key] else { continue }
+            host.update(root: root(for: row), context: context)
+        }
+    }
+
+    /// A hosted row reporting the height of what it is actually drawing (§3).
+    ///
+    /// The only invalidation this table had accompanied a reload it issued itself, so a disclosure
+    /// opening, a card mounting asynchronously and anything else that changes a row's size without a
+    /// publish behind it was drawn into the height the row had before.
+    func hostedRow(_ key: String, measured height: CGFloat) {
+        let height = max(Self.emptyRowHeight, ceil(height))
+        guard abs((heights[key] ?? -1) - height) > 1 else { return }
+        heights[key] = height
+        hostedHeightNotes += 1
+        guard let index = rows.firstIndex(where: { $0.key == key }) else { return }
+        tableView.noteHeightOfRows(withIndexesChanged: IndexSet(integer: index))
+    }
+
+    /// The viewport's width changed: the table follows it, and the heights follow the table.
+    @objc private func viewportResized() {
+        let width = scrollView.contentView.bounds.width
+        if width > 0, abs(tableView.frame.width - width) > 1 {
+            tableView.setFrameSize(NSSize(width: width, height: tableView.frame.height))
+        }
+        tableResized()
+    }
+
+    /// The table's width changed, so every cached height was measured at a width that is gone.
+    @objc private func tableResized() {
+        let width = max(tableView.bounds.width, Self.measuringWidth)
+        guard let measuredWidth, abs(measuredWidth - width) > 1 else { return }
+        self.measuredWidth = nil
+        heights = [:]
+        for host in hosts.values { host.widthChanged() }
+        let count = rows.count
+        guard count > 0 else { return }
+        tableView.noteHeightOfRows(withIndexesChanged: IndexSet(integersIn: 0..<count))
+    }
+
+    /// Whether two render contexts draw differently.
+    ///
+    /// The value's own fields are compared where they are values, and by identity where they are the
+    /// channel-scoped objects a row shares — a context carrying a *different* collapse state or
+    /// reservation set is a different channel's context, and a row holding the old one would fold
+    /// and answer into an object nothing else reads.
+    static func differs(_ previous: TimelineRenderContext?, _ next: TimelineRenderContext?) -> Bool {
+        guard let previous else { return next != nil }
+        guard let next else { return true }
+        if previous.key != next.key || previous.cwd != next.cwd { return true }
+        if previous.isOverlayStale != next.isOverlayStale
+            || previous.autoScrollEnabled != next.autoScrollEnabled
+            || previous.syntaxHighlightingEnabled != next.syntaxHighlightingEnabled { return true }
+        if previous.neighbourhood.toolCalls != next.neighbourhood.toolCalls
+            || previous.neighbourhood.precedingTimestamps != next.neighbourhood.precedingTimestamps
+            || previous.neighbourhood.agents != next.neighbourhood.agents { return true }
+        return previous.collapse !== next.collapse
+            || previous.editing !== next.editing
+            || previous.retraction !== next.retraction
+            || previous.decisions !== next.decisions
     }
 
     private func height(of row: RenderedRow, width: CGFloat) -> CGFloat {
@@ -444,5 +605,115 @@ final class TimelineTableController: NSObject, NSTableViewDataSource, NSTableVie
         // its longest line rather than wrapping to the column.
         let hosting = NSHostingView(rootView: body(for: item).frame(width: width))
         return max(Self.emptyRowHeight, ceil(hosting.fittingSize.height))
+    }
+}
+
+// MARK: - One mounted row
+
+/// The view one row of the table is drawn by: an `NSHostingView` that **survives the row's reloads**
+/// and reports the height of what it is actually drawing.
+///
+/// Two properties the table cannot have without it. A reload that builds a fresh hosting view throws
+/// away everything SwiftUI keeps for the row — a card's in-flight guard, a question's draft — so the
+/// host is kept and its root is updated instead. And a row whose content changes size with no
+/// publish behind it (a disclosure opening, a card mounting asynchronously) has to say so, or it is
+/// drawn into the height it had before.
+///
+/// **The width is pinned on the SwiftUI side**, exactly as the controller's own measurement pins it:
+/// `fittingSize` is the compressed layout size, and an unpinned row reports the height of its
+/// longest line rather than of the text as it wraps. `NSHostingView.intrinsicContentSize` is the
+/// same trap by another name — it is the content's *ideal* size and ignores the width the row is
+/// drawn at.
+@MainActor
+final class TimelineRowHostView: NSView {
+
+    private let hosting: MeasuringHostingView
+    private(set) var key: String
+
+    /// The context the root this view currently holds was built against.
+    private(set) var renderedContext: TimelineRenderContext?
+
+    /// Told when the content's height changed, with the row's key and the new height.
+    var onHeightChange: ((String, CGFloat) -> Void)?
+
+    /// The row's own content, before the width is pinned onto it.
+    private var content: AnyView
+
+    /// The width the root currently pins, and the height last reported for it.
+    private var pinnedWidth: CGFloat
+    private var reported: CGFloat?
+
+    init(key: String, root: AnyView, context: TimelineRenderContext?) {
+        self.key = key
+        self.renderedContext = context
+        self.content = root
+        self.pinnedWidth = TimelineTableController.measuringWidth
+        hosting = MeasuringHostingView(rootView: Self.pinned(root, to: pinnedWidth))
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = true
+        autoresizingMask = [.width, .height]
+        hosting.translatesAutoresizingMaskIntoConstraints = true
+        hosting.autoresizingMask = [.width, .height]
+        hosting.frame = bounds
+        addSubview(hosting)
+        // Content that grows after it is mounted arrives here, one run loop later: SwiftUI raises
+        // the invalidation while it is laying out, and the new size is readable after it.
+        hosting.onInvalidate = { [weak self] in
+            Task { @MainActor in self?.remeasure() }
+        }
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { nil }
+
+    /// The row this view draws, again: the same hosting view, a new root, and whatever SwiftUI keeps
+    /// for the row kept.
+    func update(root: AnyView, context: TimelineRenderContext?) {
+        renderedContext = context
+        content = root
+        hosting.rootView = Self.pinned(content, to: pinnedWidth)
+        remeasure()
+    }
+
+    /// The width every measurement was made at is gone, so the next one is reported whatever it says.
+    func widthChanged() { reported = nil }
+
+    override func layout() {
+        super.layout()
+        let width = max(bounds.width, TimelineTableController.measuringWidth)
+        if abs(width - pinnedWidth) > 1 {
+            pinnedWidth = width
+            reported = nil
+            hosting.rootView = Self.pinned(content, to: width)
+        }
+        remeasure()
+    }
+
+    /// Reports the content's height when it has moved. The comparison is this view's own last report
+    /// and not the table's cache, so a row mounted and never resized reports once.
+    func remeasure() {
+        let height = ceil(hosting.fittingSize.height)
+        guard height > 0 else { return }
+        if let reported, abs(reported - height) <= 1 { return }
+        reported = height
+        onHeightChange?(key, height)
+    }
+
+    private static func pinned(_ content: AnyView, to width: CGFloat) -> AnyView {
+        AnyView(content.frame(width: width, alignment: .leading))
+    }
+}
+
+/// The hosting view that says when its content's size changed.
+///
+/// SwiftUI invalidates the intrinsic content size whenever the hosted body's ideal size moves, which
+/// is the one signal a row's content gives that no publish carries.
+private final class MeasuringHostingView: NSHostingView<AnyView> {
+
+    var onInvalidate: (() -> Void)?
+
+    override func invalidateIntrinsicContentSize() {
+        super.invalidateIntrinsicContentSize()
+        onInvalidate?()
     }
 }

@@ -2714,3 +2714,23 @@ C6.1's and C6.2's reservations and is expected.
      answered or, under D12, `.inert`. Found at C6.1's round-1 fix wave. Closer: the same
      `isOwned` gate on `makeAnswering`, taken together with whatever C6.3 concludes about a decision
      item's state on a channel with no live overlay. Owner: C6.1 with C6.3.
+328. **A hosted row's asynchronous growth is implemented but witnessed only at its synchronous
+     entry.** `TimelineRowHostView` forwards SwiftUI's `invalidateIntrinsicContentSize` to a
+     deferred re-measure, which is what a card mounting its content a run loop after the row was
+     built relies on; the test drives the same re-measure through `update(root:context:)`, which is
+     synchronous and deterministic. So the *path* is asserted and the *trigger* is not: a SwiftUI
+     release that stops raising that invalidation would leave asynchronously grown rows clipped
+     with every gate green. Found at C6.1's review fix wave, writing the height-invalidation test.
+     Closer: a row whose content grows on its own after a mount, asserted after a bounded wait on
+     the height the table allocates — which needs a hosted window and a row that changes size for a
+     reason the test controls. Owner: C6.1.
+
+329. **A row's height is measured two ways, and the two can disagree by a point.** An unmounted row
+     is measured by the controller — a throwaway hosting view over a width-pinned root, or the
+     TextKit path for the two rows that are not items (tracker 132) — while a mounted row reports
+     its own `fittingSize` through its host. They agree to within a point in everything measured
+     here, and the reporting side wins because it is the height actually drawn, but the first mount
+     of a row can therefore note one height change that changes nothing a reader sees. Found at
+     C6.1's review fix wave. Closer: one measurement path, which means measuring through the row's
+     own host and having no second one — reachable only once every row is mounted before it is
+     measured, which a virtualised table does not do. Owner: C6.1.
