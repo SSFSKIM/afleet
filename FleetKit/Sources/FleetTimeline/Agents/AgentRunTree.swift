@@ -301,12 +301,21 @@ public struct AgentRunTree: Hashable, Sendable {
         return moved
     }
 
-    /// A node the tree has just created takes its place in start order.
+    /// A node the tree has just created takes its place in start order — and takes the children that
+    /// were already waiting for it.
+    ///
+    /// **A link can be made before the parent exists.** The three parent sources arrive in no fixed
+    /// order and a file-only channel reads its sidecars in file-name order, so a child's metadata
+    /// routinely names a parent no node has been created for yet: `link` writes the child's `parent`
+    /// and `rebuildChildren` skips it, because there is nothing to hang it on. Without this the
+    /// branch is then lost in both directions — the parent lists no children, and the child is not a
+    /// root either, because its `parent` is set — so the run is drawn nowhere at all.
     private mutating func insert(_ id: String) {
         sequence[id] = nextSequence
         nextSequence += 1
         order.append(id)
         resort()
+        rebuildChildren()
     }
 
     /// `order` by `elapsedOrigin`, ties broken by the order the tree first heard of the ids. Called after anything

@@ -273,6 +273,60 @@ final class AgentRunTreeTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(tree.node(two.id)).parent, wrongParent)
     }
 
+    // MARK: - A parent created after its child (recomposition finding 3)
+
+    /// **A node created after a child that already named it as parent lists that child.**
+    ///
+    /// `children` is derived from `parent` and rebuilt where a link is made — but a link to a node
+    /// that does not exist yet writes the child's `parent` and rebuilds nothing, because the parent
+    /// is not there to hang it on. Nothing rebuilds it when the parent arrives, so the branch is
+    /// lost in both directions: the parent lists no children and the child is not a root either,
+    /// because its `parent` is set. It is drawn nowhere at all.
+    ///
+    /// This is a real order on disk and not a hypothetical: a file-only channel reads its sidecars
+    /// in the order the directory enumerates them, which is by file name, and a task id sorts
+    /// wherever it sorts. Driven through the public metadata source with invented ids, in the order
+    /// that exercises it (§11).
+    func testAParentCreatedAfterItsChildStillListsTheChild() throws {
+        let session = try XCTUnwrap(SessionID("eeeeeeee-4444-4444-8444-eeeeeeeeeeee"),
+                                    "an invented session id did not parse")
+        var tree = AgentRunTree(configHome: Self.inventedHome, sessionID: session, slug: "an-invented-slug")
+        let parent = "task_invented_parent_b"
+        let child = "task_invented_child_a"
+        let epoch = Date(timeIntervalSince1970: 1_800_000_000)
+
+        // The child's sidecar is read first and names a parent no node exists for yet.
+        tree.apply(agentMetadata: Self.metadata(agentType: "AnInventedChildType", toolUseID: "toolu_invented_child",
+                                                depth: 2, parent: parent),
+                   for: Self.stream(of: child, in: session), at: epoch)
+        XCTAssertEqual(tree.node(child)?.parent, parent, "the child's own source did not set its parent")
+
+        // Then the parent's, which creates the node the link already pointed at.
+        tree.apply(agentMetadata: Self.metadata(agentType: "AnInventedParentType", toolUseID: "toolu_invented_parent",
+                                                depth: 1, parent: nil),
+                   for: Self.stream(of: parent, in: session), at: epoch.addingTimeInterval(1))
+
+        XCTAssertEqual(tree.children(of: parent), [child],
+                       "the parent lists \(tree.children(of: parent).count) child(ren) after the child named it first")
+        XCTAssertEqual(tree.roots, [parent],
+                       "the tree reads \(tree.roots.count) root(s); the child is drawn under its parent or nowhere")
+    }
+
+    /// One metadata record, invented throughout.
+    static func metadata(agentType: String, toolUseID: String, depth: Int, parent: String?) -> AgentMetadataRecord {
+        AgentMetadataRecord(fields: AgentMetadataFields(type: "agent_metadata", agentType: agentType,
+                                                        description: "an invented run", toolUseId: toolUseID,
+                                                        spawnDepth: depth, parentAgentId: parent))
+    }
+
+    /// An invented config home, under nobody's directory and never written to (§11, X9).
+    static let inventedHome = URL(fileURLWithPath: "/invented/tree-config-home")
+
+    /// The agent stream one metadata record belongs to.
+    static func stream(of taskID: String, in session: SessionID) -> LogicalStream {
+        LogicalStream(configHome: inventedHome, sessionID: session, name: .agent(taskID: taskID))
+    }
+
     // MARK: - Node identity
 
     func testARepeatedTaskStartedIsTheSameNode() throws {
