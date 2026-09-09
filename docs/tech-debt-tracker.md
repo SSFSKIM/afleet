@@ -3625,6 +3625,15 @@ four whole-branch review rounds.
      the same wrong reading. Closer: entry 232's `WorkbenchTestSupport` target. Owner: the next
      leaf to add a copy.
 
+     **Two divergences inside this leaf, found at its own fix wave and left standing.**
+     `RepositoryReaderTests` keeps a *second* copy of the git verb allowlist which does not carry
+     `hash-object` — harmless only because no test there reaches `GitDiff`'s unborn-`HEAD` path
+     today, so the two lists have quietly drifted and the next test to reach it fails in a way that
+     looks like a violation rather than a stale list. And `SourceControlModelTests` still asserts
+     argv per test, where `GitHubModelTests` moved the same claim into `tearDown()` so it cannot be
+     forgotten — the weaker form is exactly what let a whole flow escape the gate until the
+     whole-branch review found it.
+
 281. **`GitRepository`'s `name:` defaults to `"repo"`, so two fixtures in one scratch tree collide.**
      The second `git init` builds its history on top of the first's, silently — it cost one real
      red during C7.7's readout tests, presenting as a fixture reporting three lanes where two were
