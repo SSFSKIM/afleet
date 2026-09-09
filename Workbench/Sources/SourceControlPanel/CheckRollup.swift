@@ -70,10 +70,19 @@ public enum CheckRollup: Hashable, Sendable, CaseIterable {
     /// 1. no checks at all is `none`, before anything else can be said;
     /// 2. a failure outranks everything — a run still in flight does not make a failed one pending,
     ///    and a bucket this panel cannot name does not make a failed one unknowable;
-    /// 3. a bucket that is not named outranks a pending, because "still running" is a claim about
-    ///    what will happen and this panel has no basis to make it for a state it has never seen;
+    /// 3. a bucket that is not named **outranks a pending**, because "still running" is a claim
+    ///    about what will happen next and this panel has no basis to make it for a state it has
+    ///    never seen. `[pending, unrecognised]` is therefore `unknown` and not `pending`; that
+    ///    mixture is the one case where this ordering is observable, and the table test has a row
+    ///    for it. T4.2's plan wrote the two the other way round and the plan is what was loose;
+    ///    ruled at the fix wave, 2026-09-09;
     /// 4. anything still pending is `pending`;
-    /// 5. otherwise every check passed or was skipped, which is `passing`.
+    /// 5. otherwise every check passed or was skipped, which is `passing` — **including a list
+    ///    that is entirely `skipping`**. A skipped check did not fail and nothing further will
+    ///    arrive to change it, which is the same judgement `gh`'s own exit code makes; and `none`
+    ///    is already the case for "nothing ran at all", so folding all-skipped into it would erase
+    ///    the difference between a pull request whose jobs were filtered out and one that has no
+    ///    workflow at all. Ruled at the fix wave, 2026-09-09, with its own row in the table.
     public static func of(_ checks: [CheckRun]) -> CheckRollup {
         of(checks.map { CheckBucket(bucket: $0.bucket) })
     }

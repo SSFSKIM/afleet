@@ -197,22 +197,36 @@ public struct GitHubReadout: Equatable, Sendable {
                           message: "GitHub CLI is not signed in, so this tab could not read "
                                  + "GitHub.",
                           hint: authenticationHint)
-        case .commandFailed(let exitCode):
+        case .commandFailed(let tool, let exitCode):
             return Notice(placement: .row,
-                          message: "GitHub CLI could not read this repository (exit \(exitCode)).",
+                          message: "\(name(of: tool)) could not read this repository "
+                                 + "(exit \(exitCode)).",
                           hint: nil)
-        case .timedOut:
+        case .timedOut(let tool):
             return Notice(placement: .row,
-                          message: "GitHub CLI did not answer in time.",
+                          message: "\(name(of: tool)) did not answer in time.",
                           hint: nil)
-        case .unreadable:
+        case .unreadable(let tool):
             return Notice(placement: .row,
-                          message: "GitHub CLI answered with something this panel could not read.",
+                          message: "\(name(of: tool)) answered with something this panel could "
+                                 + "not read.",
                           hint: nil)
-        case .unavailable:
+        case .unavailable(let tool):
             return Notice(placement: .row,
-                          message: "GitHub CLI could not be run.",
+                          message: "\(name(of: tool)) could not be run.",
                           hint: nil)
+        }
+    }
+
+    /// A tool's name in the words this panel uses for it, never the executable's.
+    ///
+    /// Every notice that can be about either tool is worded from here. Two of this tab's three
+    /// reads are `git`'s, and a notice that named the other one sent the user to look at a tool
+    /// that was working.
+    static func name(of tool: Tool) -> String {
+        switch tool {
+        case .gh: "GitHub CLI"
+        case .git: "Git"
         }
     }
 }

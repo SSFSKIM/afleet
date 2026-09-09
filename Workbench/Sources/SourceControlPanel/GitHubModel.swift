@@ -32,18 +32,27 @@ public final class GitHubModel: PanelTabSession {
     ///
     /// The cases are the classification of a `ToolError`, not a copy of one: `stderrTail` is read
     /// to decide *which* of these it is and is then dropped (§6.3, §11). `commandFailed` carries
-    /// the exit code, which is a number `gh` returned rather than a byte it printed — the same line
-    /// C7.6's `BrowserLinkError` draws.
+    /// the exit code, which is a number the tool returned rather than a byte it printed — the same
+    /// line C7.6's `BrowserLinkError` draws.
+    ///
+    /// **Every case that can be either tool's carries which one it was**, exactly as C7.3's
+    /// `RepositoryError` does. Two of this tab's three reads are `git`'s, and a failure value that
+    /// dropped the tool left every notice worded for the other one: a `git` that never answered
+    /// told the user GitHub CLI did not answer in time, sending them to look at a tool that was
+    /// working.
     public enum Failure: Hashable, Sendable {
         case notARepository
         case toolMissing(Tool)
+        /// `gh` is not signed in — and only ever `gh`. `git` prints "authentication failed" for a
+        /// credential helper, a private remote and an expired key alike, and none of those is what
+        /// `gh auth login` fixes (G3's binding clause).
         case notAuthenticated
-        case commandFailed(exitCode: Int32)
-        case timedOut
+        case commandFailed(tool: Tool, exitCode: Int32)
+        case timedOut(tool: Tool)
         /// A document that did not have the shape this panel decodes.
-        case unreadable
+        case unreadable(tool: Tool)
         /// The tool could not be run to an answer at all — a spawn failure, an output cap.
-        case unavailable
+        case unavailable(tool: Tool)
     }
 
     /// How many of each the tab asks for. A window rather than everything: a repository with
@@ -77,8 +86,19 @@ public final class GitHubModel: PanelTabSession {
     public private(set) var isLoading = false
     public private(set) var failure: Failure?
     /// Whether a read cycle has ever finished, so `appear()` is idempotent across the redraws a
-    /// channel switch causes.
+    /// channel switch causes. A **cancelled** cycle does not finish and does not latch it.
     public private(set) var hasRead = false
+
+    /// The cycle that owns the document. Claimed synchronously at the top of `read()`, before any
+    /// await, and checked after every one: four doors open a read and each of them is a suspension
+    /// the next can start inside.
+    ///
+    /// Without it two cycles interleave and the *loser* writes last — the user switches to *All
+    /// open*, that cycle finishes, and the branch-scoped cycle it superseded then resumes and
+    /// assigns its own list under an *All open* control, with every row saying its checks were not
+    /// read because the winner's scope was read after the loser's document. The same defect ran
+    /// through `isLoading` and `failure`.
+    private var generation = 0
 
     public init(cwd: URL, environment: [String: String], runner: any ToolRunning = ToolRunner(),
                 links: (any LinkRouterCapability)? = nil) {
@@ -125,7 +145,10 @@ public final class GitHubModel: PanelTabSession {
     public func select(pullRequest: Int?) async {
         selectedPullRequest = pullRequest
         guard let pullRequest, let root, checks[pullRequest] == nil else { return }
-        await readChecks(for: [pullRequest], root: root)
+        // Under the cycle that produced the list this row belongs to: a read starting while this
+        // round trip is in flight owns the document from then on, and this answer is about a list
+        // that is being replaced.
+        await readChecks(for: [pullRequest], root: root, generation: generation)
     }
 
     /// The working-tree watch reports a branch change (Design §5 and §8). A different branch is a
@@ -146,96 +169,148 @@ public final class GitHubModel: PanelTabSession {
     // MARK: - one read cycle
 
     private func read() async {
+        // Claimed before the first await, because that is the only place it means anything.
+        generation += 1
+        let mine = generation
         isLoading = true
-        failure = nil
-        defer {
-            isLoading = false
-            hasRead = true
-        }
 
         let root: URL
         do {
             root = try await GitCommands.repositoryRoot(cwd: cwd, environment: environment,
                                                         runner: runner)
         } catch {
-            record(error)
-            clear()
+            abandon(error, tool: .git, generation: mine)
             return
         }
+        guard mine == generation else { return }
         self.root = root
 
+        let status: WorkingTreeStatus
         do {
-            let status = try await WorkingTreeStatus.read(root: root, environment: environment,
-                                                          runner: runner)
-            branch = status.branch
-            isDetachedHead = status.branch == nil
+            status = try await WorkingTreeStatus.read(root: root, environment: environment,
+                                                      runner: runner)
         } catch {
-            record(error)
-            clear()
+            abandon(error, tool: .git, generation: mine)
             return
         }
+        guard mine == generation else { return }
+        branch = status.branch
+        isDetachedHead = status.branch == nil
 
         // A detached `HEAD` in the branch scope has no head to filter on, and filtering on nothing
         // is the *all open* list — a different question, silently answered. The list stays empty
         // and the readout says why; the issues are still worth reading.
         var head: String?
         if scope == .branch {
-            guard let branch else {
+            guard let branch = status.branch else {
                 pullRequests = []
                 checks = [:]
-                await readIssues(root: root)
+                reconcileSelection()
+                let failed = await readIssues(root: root, generation: mine)
+                guard mine == generation else { return }
+                settle(failed)
                 return
             }
             head = branch
         }
 
+        var failed: Failure?
         do {
-            pullRequests = try await GhCommands.pullRequests(root: root, head: head, state: "open",
-                                                             limit: Self.pullRequestLimit,
-                                                             environment: environment,
-                                                             runner: runner)
+            let listed = try await GhCommands.pullRequests(root: root, head: head, state: "open",
+                                                           limit: Self.pullRequestLimit,
+                                                           environment: environment,
+                                                           runner: runner)
+            guard mine == generation else { return }
+            pullRequests = listed
         } catch {
-            record(error)
+            guard mine == generation else { return }
+            failed = Self.failure(for: error, tool: .gh)
             pullRequests = []
         }
 
         checks = [:]
+        // A pull request that merged between two reads is not in the list any more, and a
+        // selection pointing at it highlights nothing while the readout goes on naming it. Every
+        // door reconciles here; `select(scope:)` drops its selection outright because the other
+        // list's rows are a different question entirely.
+        reconcileSelection()
         // Branch-scoped, the list is ordinarily zero or one pull request, so reading every row's
         // checks is bounded by the branch rather than by the repository. Otherwise only the
         // selected row earns a round trip (Design §8).
         let wanted = scope == .branch ? pullRequests.map(\.number)
                                       : [selectedPullRequest].compactMap { $0 }
-        await readChecks(for: wanted, root: root)
-        await readIssues(root: root)
+        await readChecks(for: wanted, root: root, generation: mine)
+        guard mine == generation else { return }
+        let issuesFailure = await readIssues(root: root, generation: mine)
+        guard mine == generation else { return }
+        settle(failed ?? issuesFailure)
+    }
+
+    /// Ends the cycle that owns the document: one failure or none, not loading, and read.
+    ///
+    /// The failure published is the **first** of the cycle. Later ones are consequences of it — a
+    /// missing `gh` fails all three reads — and the panel has one area.
+    private func settle(_ failed: Failure?) {
+        failure = failed
+        isLoading = false
+        hasRead = true
+    }
+
+    /// Ends a cycle that failed before it could list anything.
+    ///
+    /// A **cancelled** read is neither a failure nor a finished cycle: the panel asked it to stop,
+    /// so it leaves the document that was on screen, says nothing, and does not latch `hasRead` —
+    /// otherwise the tab shows an empty list with no notice and `appear()` never reads again.
+    private func abandon(_ error: any Error, tool: Tool, generation mine: Int) {
+        guard mine == generation else { return }
+        isLoading = false
+        guard let classified = Self.failure(for: error, tool: tool) else { return }
+        failure = classified
+        clear()
+        hasRead = true
+    }
+
+    /// Drops a selection the current list does not hold.
+    private func reconcileSelection() {
+        guard let selected = selectedPullRequest else { return }
+        if !pullRequests.contains(where: { $0.number == selected }) { selectedPullRequest = nil }
     }
 
     /// Checks for each of `numbers`, sequentially. A pull request whose read fails keeps no entry,
     /// which is what makes its row say "not read" instead of claiming a rollup.
-    private func readChecks(for numbers: [Int], root: URL) async {
+    private func readChecks(for numbers: [Int], root: URL, generation mine: Int) async {
         for number in numbers {
             do {
                 // Exit 8 — checks still pending, rows printed — is a normal answer that
                 // `GhCommands` already accepts (C7.3's D3). It arrives here as rows, not as a
                 // failure, and rolls up to `.pending`.
-                checks[number] = try await GhCommands.checks(root: root, pullRequest: number,
-                                                             environment: environment,
-                                                             runner: runner)
+                let read = try await GhCommands.checks(root: root, pullRequest: number,
+                                                       environment: environment, runner: runner)
+                guard mine == generation else { return }
+                checks[number] = read
             } catch {
-                // Deliberately not `record(error)`: one pull request's checks failing is a fact
-                // about that row, and turning it into the tab's error state would empty a list
-                // that read perfectly well.
+                // Deliberately not recorded as the tab's failure: one pull request's checks
+                // failing is a fact about that row, and turning it into the tab's error state
+                // would empty a list that read perfectly well.
+                guard mine == generation else { return }
                 checks[number] = nil
             }
         }
     }
 
-    private func readIssues(root: URL) async {
+    /// Reads the issue section, and answers with how it failed rather than publishing it: the
+    /// cycle that owns the document decides which failure the panel's one area shows.
+    private func readIssues(root: URL, generation mine: Int) async -> Failure? {
         do {
-            issues = try await GhCommands.issues(root: root, limit: Self.issueLimit,
-                                                 environment: environment, runner: runner)
+            let read = try await GhCommands.issues(root: root, limit: Self.issueLimit,
+                                                   environment: environment, runner: runner)
+            guard mine == generation else { return nil }
+            issues = read
+            return nil
         } catch {
-            record(error)
+            guard mine == generation else { return nil }
             issues = []
+            return Self.failure(for: error, tool: .gh)
         }
     }
 
@@ -248,22 +323,19 @@ public final class GitHubModel: PanelTabSession {
 
     // MARK: - classification
 
-    /// The first failure of a cycle is the one the panel reports. Later ones in the same cycle are
-    /// consequences of it — a missing `gh` fails all three reads — and the panel has one area.
-    private func record(_ error: any Error) {
-        guard failure == nil, let classified = Self.failure(for: error) else { return }
-        failure = classified
-    }
-
-    /// A `ToolError` as a panel state.
+    /// A `ToolError` as a panel state, worded for the tool that produced it.
     ///
     /// The stderr tail is an operand here and never a result: it decides whether this is the
-    /// logged-out case and is then dropped, so no byte `gh` printed can reach a rendered string
+    /// logged-out case and is then dropped, so no byte a tool printed can reach a rendered string
     /// (§6.3, §11). The same classification lives in C7.6's `PullRequestURLResolver` and cannot be
     /// imported across panel targets; the duplication is filed rather than worked around
     /// (Design §8).
-    static func failure(for error: any Error) -> Failure? {
-        guard let error = error as? ToolError else { return .unavailable }
+    ///
+    /// `tool` is the caller's — which read this was — and is used only for the errors that name no
+    /// tool of their own, exactly as `RepositoryError`'s parameter is. Where the error carries one,
+    /// the error's is authoritative.
+    static func failure(for error: any Error, tool: Tool) -> Failure? {
+        guard let error = error as? ToolError else { return .unavailable(tool: tool) }
         switch error {
         // A cancelled read is one the panel asked to stop, not a failure the user is owed a row
         // about.
@@ -273,16 +345,21 @@ public final class GitHubModel: PanelTabSession {
             return .notARepository
         case .binaryNotFound(let tool):
             return .toolMissing(tool)
-        case .timedOut:
-            return .timedOut
-        case .commandFailed(_, let exitCode, let stderrTail):
-            return mentionsAuthentication(stderrTail) ? .notAuthenticated
-                                                      : .commandFailed(exitCode: exitCode)
+        case .timedOut(let tool, _):
+            return .timedOut(tool: tool)
+        case .commandFailed(let tool, let exitCode, let stderrTail):
+            // **`gh` only.** `git` prints "authentication failed" for a credential helper, a
+            // private remote and an expired key, and `gh auth login` fixes none of them; G3's
+            // clause is that the panel does not offer one remedy for every failure.
+            return tool == .gh && mentionsAuthentication(stderrTail)
+                 ? .notAuthenticated
+                 : .commandFailed(tool: tool, exitCode: exitCode)
         case .decodeFailed:
-            return .unreadable
-        case .spawnFailed, .outputLimitExceeded, .pathOutsideRepository,
-             .unreadableWorkingTreeEntry:
-            return .unavailable
+            return .unreadable(tool: tool)
+        case .spawnFailed(let tool, _), .outputLimitExceeded(let tool, _):
+            return .unavailable(tool: tool)
+        case .pathOutsideRepository, .unreadableWorkingTreeEntry:
+            return .unavailable(tool: tool)
         }
     }
 
