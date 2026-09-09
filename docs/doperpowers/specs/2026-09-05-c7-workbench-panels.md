@@ -605,11 +605,38 @@ pane, C4 owns the transition.
   (required): item 25. G3 (required): a `.diff` link with each `DiffRef.Base` opens the
   right pair in the diff editor. G4 (required): open files and cursor positions persist
   per channel under W6 and restore on relaunch.
+  **Outcome 2026-09-09:** G1–G4 met headless — the session asserted on its emitted `EditorCommand`
+  sequence over a recording editor seam (open at the link's line; atomic save carrying the mode;
+  a clean rewrite refreshes and restores the cursor; a dirty rewrite raises the conflict, *Reload*
+  and *Keep mine* each proved; the panel's own save neither refreshes nor conflicts); the viewer
+  decision a pure function over a generated corpus with bytes vetoing a false extension; every
+  `DiffRef.Base` over real repositories plus added, deleted, renamed, root, binary and gitlink;
+  `panel.files.…` round-tripped against a real store. 185 `FilesPanelTests`; the App floor
+  fifteen bundles green with the suite added to the scheme. Two review rounds of its own (22, 20)
+  closed by four waves, then the merge review: one round (15 confirmed, 6 P1 — five of them one
+  class, the user's unsaved text lost through a stale surface, an un-awaited stash, an
+  uncorrelated reply, a timed-out stash or a reset baseline; the sixth a link delivered to the
+  wrong channel's session) closed by two waves that first stated the buffer invariant (the
+  surface that reported dirty owns the text; one stash per buffer; every reply correlated; a
+  presentation replaces a buffer only on a captured stash; dirty is relative to the disk
+  baseline) and resolved the session by channel through a `FilesTabHost`; a second round (13, 4 P1 —
+  three more edit-loss races in the same machinery) was answered by rebuilding the session's
+  buffer and presentation state machine (one `BufferState` per file mutated only through a
+  validated `apply`; the generation claimed before any await; requests keyed by surface,
+  generation and path and retired on release, reload, detach or supersession; capture before any
+  replacement, the diff path included; presentations coalesced by construction) with no existing
+  test weakened, and by Save following the key window; a third round closed the review under the
+  hard stop after four data-safety fixes (a lossily decoded file is read-only rather than written
+  back corrupted; an ownership change retires the previous owner's write and captures advance the
+  revision; Save writes from the record when the holder is gone; a buffer lifetime nonce); residue
+  logged (241–244, 336–345, 361–374). Human legs: the Read-row click and Monaco at the line, a
+  live `claude` edit refreshing the pane, the conflict banner, each viewer, the side-by-side
+  diff, relaunch restore, the tree chrome.
 - **Edges:** blocked-by: C7.2, C5.G4; blocks: C7.7 (diff views), recomposition.
 - **Contracts:** W4, W5, W6, X7.
 - **Design inheritance:** §9.1 (advisory), the Design's tree and viewer recommendations.
 - **Required:** required.
-- **Status:** not-dispatched, blocked-by C7.2, C5.G4. Branch `child/c7-files-panel`.
+- **Status:** **merged** 2026-09-09 at `517899d` from `child/c7-files-panel` `210d8eb` (56 commits).
 
 ### C7.6: Browser panel — shared tabs, quick-open, persistence, routes — brief
 
@@ -634,7 +661,9 @@ pane, C4 owns the transition.
 
 - **Purpose:** The Source Control tab: the graph on a SwiftUI `Canvas` from
   `SourceControlCore`'s lane assignment with branch and tag labels and the working tree as
-  row zero; commit detail with changed files and Monaco diffs; working-tree diffs against
+  row zero; commit detail with changed files and Monaco diffs (shown by emitting a `.diff` link
+  that the Files tab's target opens — C7.7 never imports `FilesPanel`; ruled 2026-09-09 at C7.5's
+  merge); working-tree diffs against
   `HEAD`; the `.commit` target on `LinkRouter`; and the GitHub tab with pull requests for
   the branch, checks and issues from `gh`, a PR opening in the Browser tab.
 - **Acceptance:** G1 (required): item 27 in the built app, including the working-tree row
@@ -740,7 +769,7 @@ parent's decision); any write under `<configHome>` (X9); IDE registration.
 | C7.2 Editor core | `2026-09-07-c7.2-editor-core.md`; plan `plans/2026-09-07-c7.2-editor-core.md`; Outcomes in the child spec | **merged** 2026-09-08 at `a47788a` from `child/c7-editor-core` `a6fb302` (37 commits); G1 73 → 110 package tests, G2 route 1 promoted (cold load median 556 ms at the gate, 677 ms re-measured after the waves), G3 offline-proven; bundle 13,083,139 bytes / 111 files / 2.90 MB compressed; tracker 97–107 (97, 98 closed on the branch); its own review (astra high, four fixed) then three whole-diff panel rounds at merge and three fix waves (routing epochs and host ownership, bridge visible mode and navigation fence, harness evidence by attribution); human still to witness "no visible jank" |
 | C7.3 Source Control core | ledger `ledgers/2026-09-07-c7.3-scm-core.md`; Outcomes in the ledger | **merged** 2026-09-08 at `aa5df80` from `child/c7-scm-core` `20cdbc1` (41 commits); G1–G3 met, G3 live; 128 (package 128, 0 skipped) tests; tracker 112–126 (115 closed on the branch by `--decorate=full`; 125 is a `main` corrective on C2's `ProcessRunner`); six review rounds, the last two one pinned class (tracker 123, owner C7.7) |
 | C7.4 Terminal panel | plan on `child/c7-terminal-panel` | blocked-by C7.1, C4, C5.G4 |
-| C7.5 Files panel | plan on `child/c7-files-panel` | blocked-by C7.2, C5.G4 |
+| C7.5 Files panel | `2026-09-09-c7.5-files-panel.md`; plan `plans/2026-09-09-c7.5-files-panel.md`; Outcomes in the child spec | **merged** 2026-09-09 at `517899d` from `child/c7-files-panel` `210d8eb` (56 commits); G1–G4 met headless, human legs outstanding; 185 tests; tracker 232–246; W1 row and W6 amended at its gate; X7 gap on the link's channel recorded (240) |
 | C7.6 Browser panel | ledger on `child/c7-browser-panel` | blocked-by C7.2, C4, C5.G4 |
 | C7.7 Source Control panel | plan on `child/c7-scm-panel` | blocked-by C7.3, C7.5, C7.6, C5.G4 |
 
@@ -954,3 +983,10 @@ retrospect.
   per-read latency bound was dropped as gate evidence because it cannot fail on this hardware; the
   gate rests on coalescing and the bounded buffer, both mutation-checked. Host delivery is not the
   flood's cost (tracker 86). Merge review: two panel rounds (4, then 5 confirmed) closed by two waves — child identity proved before signals, adapter backlog with backpressure to the read loop and an attachment gate, resizes on their own lane, a 1 MiB ingress cap, a ring of chunks, the S1 harness evaluating before teardown with the attach leg re-run (four clean exits at ~515 ms from the byte; the control's only end was teardown's SIGHUP).
+- 2026-09-09 reconciliation of C7.5 (merge `517899d` from `child/c7-files-panel` `210d8eb`,
+  56 commits). Its two `[parent-impact]`s were applied at its gate (W1 row, W6 keys). Four
+  Parent revisions applied: Cmd+S in §8.7; C7.7 shows a diff by emitting a `.diff` link; §9.1's
+  watcher covers open files with the tree refreshing on expansion and on demand; X7's
+  `LinkRouterCapability.open` should carry the originating channel (recorded on the parent with the
+  in-fence mitigation and tracker 240 as the corrective). Found on the way: `ToolRunning` has no
+  stdin, so the gitignore batch is not `--stdin -z` (234); `project.yml` needed the suite added. 
