@@ -59,9 +59,38 @@ final class AgentNodeActions {
     /// per-node *Move to background* and the tree's *Background all*.
     private(set) var backgroundingDisabled = false
 
-    /// Runs whose mirror row the engine has said is stale — `{backgrounded: false}`. The affordance
-    /// goes for that run alone, because that is the whole of what the reply said.
-    private(set) var staleBackgrounding: Set<AgentRunID> = []
+    /// Runs whose mirror row the engine has said is stale — `{backgrounded: false}` — each against
+    /// **the `tool_use_id` that reply was about**. The affordance goes for that run alone, because
+    /// that is the whole of what the reply said.
+    ///
+    /// **Against what the row was when the engine contradicted it, so the reading expires.** What
+    /// `{backgrounded: false}` says is that *this* row is stale — not that the run can never be
+    /// backgrounded. Held against the run alone it never came back: one reply took *Move to
+    /// background* away for the life of the panel, including from a run the engine has since
+    /// re-engaged and the registry is currently offering, with nothing on screen to say why.
+    ///
+    /// So the reading is held against the row, and a row the engine has moved on from supersedes
+    /// it. Two things move: the run starting again — a fresh `task_started`, which is what
+    /// re-engagement *is* — and the `tool_use` block being replaced. Either supersedes; neither
+    /// changing does not, because a second press on the row the engine has already called stale is
+    /// exactly the press this exists to withhold.
+    ///
+    /// Epoch-scoping the session-wide refusal stays filed as tracker 179; this is the half that
+    /// costs a dictionary.
+    private(set) var staleBackgrounding: [AgentRunID: StaleRow] = [:]
+
+    /// The registry row a `{backgrounded: false}` was about, as the two facts on a node's content
+    /// that move when the engine re-engages the run or names another block. A payload-free value:
+    /// a count and an id that is already on the node, and nothing derived from either is reported.
+    struct StaleRow: Hashable, Sendable {
+        let toolUseID: String?
+        let startedCount: Int
+
+        init(_ content: AgentNodeContent) {
+            toolUseID = content.backgroundToolUseID
+            startedCount = content.startedCount
+        }
+    }
 
     /// A request is on the wire. The actions disable on it, so two clicks send once.
     private(set) var inFlight = false
@@ -96,8 +125,8 @@ final class AgentNodeActions {
     /// `tool_use_id` to name. What this object adds is the three facts the mirror cannot know — a
     /// request already in flight, a session that refused, and a row the engine has called stale.
     func offersMoveToBackground(_ content: AgentNodeContent) -> Bool {
-        guard !backgroundingDisabled, !inFlight, !staleBackgrounding.contains(content.id) else { return false }
-        return content.backgroundToolUseID != nil
+        guard !backgroundingDisabled, !inFlight, content.backgroundToolUseID != nil else { return false }
+        return staleBackgrounding[content.id] != StaleRow(content)
     }
 
     // MARK: - The two control requests
@@ -138,7 +167,7 @@ final class AgentNodeActions {
             // derived read is dropped so the next body takes whatever the timeline now says, and
             // nothing reports success.
             lastBackgrounding = .stale
-            staleBackgrounding.insert(content.id)
+            staleBackgrounding[content.id] = StaleRow(content)
             refresh()
         } catch {
             lastBackgrounding = .refused

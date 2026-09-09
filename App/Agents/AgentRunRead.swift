@@ -134,6 +134,12 @@ struct AgentRunRead: Hashable, Sendable {
         /// already settled on: a run appearing, finishing, being moved to the background or losing
         /// its tool-use id changes it, and a heartbeat does not. Reusing that value rather than
         /// writing a second one is what keeps the two hosts' answers from drifting apart.
+        ///
+        /// **What it cannot see is one id being replaced by another**, since the value carries
+        /// whether a run is eligible and not which block names it. Nothing publishes that state on
+        /// its own — a re-engaged run is a fresh `task_started` and moves the instant beside it —
+        /// so it is a gap in the key rather than a wrong answer, and it is tracker 178 — closing it
+        /// means widening a value another host owns.
         let eligibility: TaskCardEligibility
 
         init(_ timeline: ChannelTimeline) {

@@ -139,6 +139,43 @@ final class AgentNodeActionTests: XCTestCase {
                        "\(actions.staleBackgrounding.count) run(s) were marked stale by a reply that moved one")
     }
 
+    /// **A stale row is a reading about one row of the registry, and it expires when the engine
+    /// moves on from that row.**
+    ///
+    /// `{backgrounded: false}` says the registry row the panel read is stale, and the affordance goes
+    /// for that run. Held against the run alone it never came back: a re-engaged run — a new
+    /// `tool_use` block, a fresh mirror row the engine is currently willing to move — was refused the
+    /// action for the life of the panel, and nothing on screen said why.
+    ///
+    /// The discriminating clause is the first: the action is gone straight after the reply, so what
+    /// the clauses below measure is the reading expiring rather than a panel that never held one.
+    func testAStaleRowExpiresWhenTheEngineReEngagesTheRun() async throws {
+        let rig = try Rig(mirror: Rig.runningAgent())
+        await rig.lifecycle.stageReply(.success(.object(["backgrounded": .bool(false)])))
+        rig.model.select(Rig.runID)
+
+        try press("Move to Background", on: Rig.runID, in: rig)
+        await rig.settle(sends: 1)
+        XCTAssertNil(ViewTree.button("Move to Background", in: try Self.actionBody(of: Rig.runID, in: rig)),
+                     "the action stayed on the very row the engine called stale")
+
+        // The engine re-engages the run: the mirror names it again, under a new block.
+        // The engine re-engages the run: a second `task_started` for the same id, which is the
+        // re-engagement `nested-depth-2`'s README says a host must expect. **The same `tool_use`
+        // block**, because that is the case tracker 178 records as the one the corpus produces — an
+        // expiry that needed a new id would never fire on the runs this actually happens to.
+        rig.published.timeline.agents = Rig.reEngagedTree()
+
+        XCTAssertNotNil(ViewTree.button("Move to Background", in: try Self.actionBody(of: Rig.runID, in: rig)),
+                        "a re-engaged run the mirror is offering is still refused backgrounding")
+        try press("Move to Background", on: Rig.runID, in: rig)
+        await rig.settle(sends: 2)
+        let sent = await rig.lifecycle.sent
+        XCTAssertEqual(sent.count, 2, "the second press sent \(sent.count) control request(s) in total, not 2")
+        XCTAssertTrue(sent.last == AnyControlRequest(BackgroundTasks(toolUseID: Rig.toolUseID)),
+                      "the second press named a block other than the one the mirror holds")
+    }
+
     // MARK: - The two confirms (child spec D9 and D14)
 
     /// **G3, and the clause the whole confirm exists for: declining performs nothing.**
@@ -511,6 +548,9 @@ final class AgentNodeActionTests: XCTestCase {
 
         static let runID: AgentRunID = "task_invented_agent_01"
         static let toolUseID = "toolu_invented0001"
+        /// The block a re-engagement of the same run is named by. A second `tool_use`, because that
+        /// is what a re-engaged run gets, and the id is what the engine matches the request against.
+        static let secondToolUseID = "toolu_invented0002"
 
         let lifecycle: ActionDouble
         let links: RecordingLinkRouter
@@ -564,11 +604,12 @@ final class AgentNodeActionTests: XCTestCase {
         /// One running, foreground agent run — the shape §8.4 makes *Move to background* available
         /// for — folded from a `task_started` rather than assembled, so what the panel reads is what
         /// the fold would have produced.
-        static func runningAgent() -> RegistryMirror {
+        static func runningAgent(toolUseID: String = Rig.toolUseID,
+                                 at instant: Date = InventedAgents.epoch) -> RegistryMirror {
             var mirror = RegistryMirror()
             let started = InventedAgents.taskStarted(taskID: runID, toolUseID: toolUseID,
                                                      agentType: "an-invented-agent", depth: 1)
-            mirror.apply(.taskStarted(started), at: InventedAgents.epoch, epoch: .first)
+            mirror.apply(.taskStarted(started), at: instant, epoch: .first)
             return mirror
         }
 
@@ -581,6 +622,16 @@ final class AgentNodeActionTests: XCTestCase {
         }
 
         /// The same run, finished: `task_notification` is what C3 folds a run's end from.
+        /// The same run, started a second time — one node whose `startedCount` moved, which is what
+        /// C3 folds a re-engagement into.
+        static func reEngagedTree() -> AgentRunTree {
+            var tree = runningTree()
+            tree.apply(taskStarted: InventedAgents.taskStarted(taskID: runID, toolUseID: toolUseID,
+                                                               agentType: "an-invented-agent", depth: 1),
+                       at: InventedAgents.epoch.addingTimeInterval(60))
+            return tree
+        }
+
         static func completedTree() -> AgentRunTree {
             var tree = runningTree()
             tree.apply(taskNotification: InventedAgents.taskNotification(taskID: runID, status: "completed"),
