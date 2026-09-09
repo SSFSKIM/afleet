@@ -832,6 +832,17 @@ parent's decision); any write under `<configHome>` (X9); IDE registration.
 | C7.6 Browser panel | ledger `2026-09-09-c7.6-browser-panel.md`; Outcomes in the ledger | **merged** 2026-09-09 at `6f8a8ec` from `child/c7-browser-panel` `c62124c` (46 commits); G1 structural + human leg, G2 met (click half conditional on C6.1), G3 met, G4 Debug met; 187 tests; tracker 247–255; X7 amended (pop-out declination; `PanelSurface` on `makeView`/`view`) |
 | C7.7 Source Control panel | `2026-09-09-c7.7-scm-panel.md`; plan `plans/2026-09-09-c7.7-scm-panel.md`; Outcomes in the child spec | **merged** 2026-09-09 at `3ab455f` from `child/c7-scm-panel` `300cac4` (27 commits); 196 tests; W1 row and W4 amended (no editor import); freshness by FSEvents |
 
+**Lineage check (2026-09-09, at recomposition).** Each leaf's parent-pin against this document's
+final revision: C7.1, C7.2 and C7.3 pinned `b775842` — every later revision they did not see (W1 rows,
+X7's amendments, W7's command lines, the `.diff`-link ruling) was applied at or after their merges and
+none touched their own contracts; incorporated. C7.4 pinned `a37fa8e` — X7's `run(_:for:)` and
+`PaneRunning.run(_:in:)` are its own `[parent-impact]`, applied at its merge; the `PanelSurface` amendment
+it took in its merge-prep; incorporated. C7.5 pinned `9757171` — its W1 row and W6 amendments applied at
+its gate; 240's link-channel gap it named closed by the recomposition's corrective; incorporated. C7.6
+pinned `f52777a` — the pop-out declination and `PanelSurface` are its own amendments; incorporated. C7.7
+pinned `1cc7629` — the W1 row and W4 amendments applied at its merge; incorporated. No child's pin
+predates a binding decision it executed against differently; no corrective child is owed for lineage.
+
 Spike outcomes (S1, S3), the exit-or-stop finding, the worker-loading finding and the
 measured bundle size are recorded in the Revision Notes and summarised on the leaf's row
 when it lands.
