@@ -557,7 +557,8 @@ final class AgentRelayTests: XCTestCase {
         let relay = AgentRelayRegistry()
         let key = ChannelKey(configHome: RelayWire.configHome, session: RelayWire.session)
         let box = RaiseBox()
-        var actions: AgentNodeActions? = AgentNodeActions(lifecycle: lifecycle, channel: key, relay: relay,
+        var actions: AgentNodeActions? = AgentNodeActions(lifecycle: lifecycle, reaching: { lifecycle },
+                                                          channel: key, relay: relay,
                                                           raiseSignal: { _, signal in await box.record(signal) })
         weak var evicted = actions
         await actions?.sendMessage(RelayWire.message, to: SendRig.content)
@@ -580,6 +581,52 @@ final class AgentRelayTests: XCTestCase {
         XCTAssertTrue(prompts.last?.text == AgentNodeActions.prompt(relaying: RelayWire.message,
                                                                     to: SendRig.content),
                       "the retry sent something other than the relay the record descended from")
+    }
+
+    /// **G4, the other half: *Retry* sends through the workspace the app holds *now*.**
+    ///
+    /// The record and the *Retry* it offers are app-scoped and outlive the panel session — which is
+    /// what the test above asserts — and that is only right while the resend also **follows** the
+    /// app. *Check again* runs the launch again and attaches a new workspace with a new fleet; a
+    /// resend that captured the fleet of the session that made it sends every retry into the
+    /// workspace the app has replaced, while the timeline the arm is derived from is the new one.
+    /// The message goes to a process nobody is looking at and the record stays *Not delivered*.
+    ///
+    /// Driven at the registry the tab reaches through, because that is where `attach` replaces the
+    /// fleet; the two fleets are told apart by what each was sent and never by printing either (§11).
+    func testRetryAfterCheckAgainSendsThroughTheWorkspaceTheAppNowHolds() async throws {
+        let replaced = PromptDouble()
+        let current = PromptDouble()
+        let timelines = ChannelTimelineRegistry()
+        timelines.lifecycle = replaced
+        let relay = AgentRelayRegistry()
+        let host = PanelHostModel()
+        try host.register(AgentsTab(timelines: { _ in nil }, selection: AgentSelectionStore(),
+                                    lifecycle: { [timelines] in timelines.lifecycle }, relay: relay))
+        let context = PanelFixtures.context(PanelFixtures.key(3))
+        let session = try XCTUnwrap(host.session(for: .agents, context: context) as? AgentsModel,
+                                    "the tab made something other than its own session")
+
+        await session.actions?.sendMessage(RelayWire.message, to: SendRig.content)
+        XCTAssertEqual(relay.records(in: context.key).count, 1,
+                       "the send opened \(relay.records(in: context.key).count) relay record(s), not 1")
+        let record = relay.records(in: context.key)[0]
+
+        // *Check again*: the launch reaches a new workspace and `attach` replaces the fleet.
+        timelines.lifecycle = current
+
+        relay.retry(record.id)
+
+        let opened = await Self.settle { relay.records(in: context.key).count == 2 }
+        XCTAssertTrue(opened, "Retry after the workspace was replaced opened "
+                      + "\(relay.records(in: context.key).count) record(s), not 2")
+        let toTheReplaced = await replaced.prompts.count
+        let toTheCurrent = await current.prompts.count
+        XCTAssertEqual(toTheReplaced, 1,
+                       "the workspace the app replaced was sent \(toTheReplaced) prompt(s); it took the "
+                       + "original send and must take nothing after it")
+        XCTAssertEqual(toTheCurrent, 1,
+                       "the workspace the app now holds was sent \(toTheCurrent) prompt(s) by the retry, not 1")
     }
 
     // MARK: - §11
@@ -1018,7 +1065,8 @@ final class SendRig {
 
     init() {
         let box = RaiseBox()
-        actions = AgentNodeActions(lifecycle: lifecycle, channel: key, relay: relay,
+        actions = AgentNodeActions(lifecycle: lifecycle, reaching: { [lifecycle] in lifecycle },
+                                   channel: key, relay: relay,
                                    raiseSignal: { _, signal in await box.record(signal) })
         let published = self.published
         model = AgentsModel(channel: key, timelines: { [published] _ in published.timeline },

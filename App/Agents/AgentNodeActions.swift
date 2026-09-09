@@ -117,11 +117,25 @@ final class AgentNodeActions {
     /// exactly as `ComposerModel.post(_:)` makes them one.
     private let raiseSignal: (ChannelKey, HostSignal) async -> Void
 
-    init(lifecycle: any LifecycleAPI, channel: ChannelKey,
+    /// How the **send** finds the fleet: read at the moment of the press, not captured.
+    ///
+    /// Every other action here dies with the panel session that made it — the host drops the
+    /// session when the channel's panel goes, and *Check again* releases every model built over the
+    /// old workspace — so `lifecycle` above, the fleet this session was built over, is the right
+    /// thing for them. The send is the one action that outlives it: the record and its *Retry* are
+    /// app-scoped because the row that draws them is on the channel column, and a resend that
+    /// captured this session's fleet keeps sending into the workspace *Check again* replaced, while
+    /// the timeline its arm is derived from is the new one. `AgentsTab.LifecycleReach` — the app's
+    /// one `ChannelTimelineRegistry`, whose `attach` replaces the fleet — is what this reads.
+    private let fleet: AgentsTab.LifecycleReach
+
+    init(lifecycle: any LifecycleAPI, reaching fleet: @escaping AgentsTab.LifecycleReach,
+         channel: ChannelKey,
          links: (any LinkRouterCapability)? = nil, pasteboard: NSPasteboard = .general,
          relay: AgentRelayRegistry? = nil,
          raiseSignal: @escaping (ChannelKey, HostSignal) async -> Void = { _, _ in }) {
         self.lifecycle = lifecycle
+        self.fleet = fleet
         self.channel = channel
         self.links = links
         self.pasteboard = pasteboard
@@ -369,7 +383,7 @@ final class AgentNodeActions {
     /// The send's app-scoped half, as one value: the fleet, the channel and the fold's raise. All
     /// three outlive this object, which is what lets a *Retry* run after the panel is gone.
     private var send: AgentRelaySend {
-        AgentRelaySend(lifecycle: lifecycle, channel: channel, raiseSignal: raiseSignal)
+        AgentRelaySend(fleet: fleet, channel: channel, raiseSignal: raiseSignal)
     }
 
     /// The send itself, **held by nothing that a panel host can evict**.
@@ -387,9 +401,15 @@ final class AgentNodeActions {
     static func relay(_ message: String, to content: AgentNodeContent, through send: AgentRelaySend,
                       recordingIn relay: AgentRelayRegistry, retryOf: AgentRelayRecord.ID? = nil,
                       reporting report: @escaping @MainActor (RowBanner?) -> Void) async -> Bool {
+        guard let lifecycle = send.fleet() else {
+            // No workspace to send into — a launch that has not reached one, or one being replaced.
+            // Nothing is recorded and nothing is claimed to have been sent.
+            report(RowBanner(LifecycleError.notOwned))
+            return false
+        }
         do {
-            let minted = try await send.lifecycle.sendPrompt(UserInput(text: prompt(relaying: message, to: content)),
-                                                             on: send.channel)
+            let minted = try await lifecycle.sendPrompt(UserInput(text: prompt(relaying: message, to: content)),
+                                                        on: send.channel)
             await send.raiseSignal(send.channel, .promptSent(uuid: minted.uuidString.lowercased(), at: Date()))
             report(nil)
             relay.open(promptUUID: minted.uuidString.lowercased(),
@@ -450,7 +470,9 @@ final class AgentNodeActions {
 /// place it is built.
 @MainActor
 struct AgentRelaySend {
-    let lifecycle: any LifecycleAPI
+    /// The fleet, **resolved at the moment of the send** and never captured: a *Retry* pressed after
+    /// *Check again* belongs to the workspace the app holds now.
+    let fleet: AgentsTab.LifecycleReach
     let channel: ChannelKey
     let raiseSignal: (ChannelKey, HostSignal) async -> Void
 }
