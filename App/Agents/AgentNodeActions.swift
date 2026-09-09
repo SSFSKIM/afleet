@@ -101,12 +101,32 @@ final class AgentNodeActions {
 
     private(set) var lastBackgrounding: BackgroundOutcome?
 
+    /// Where a *Send message* is recorded (item 51, contract Y8). App-scoped and handed in: the row
+    /// that draws the delivery state is on the **main timeline**, which outlives this panel session,
+    /// so a registry of this object's own would hold a state nothing on the channel column could
+    /// read. Nil for a panel built before a launch reached a workspace, and *Send message* is then
+    /// absent for the same reason every other action is.
+    private let relay: AgentRelayRegistry?
+
+    /// How the `HostSignal.promptSent` raise that is inseparable from a send reaches the channel's
+    /// fold — `ChannelFold.raise`, this channel's own.
+    ///
+    /// A send that skipped the raise would leave the turn it caused reducing as `.unprompted`: the
+    /// fold would disagree with the engine about who asked for it, and this leaf's own `noCall` arm
+    /// reads `TurnAttribution.prompted` to know the turn closed. So the two are one function here,
+    /// exactly as `ComposerModel.post(_:)` makes them one.
+    private let raiseSignal: (ChannelKey, HostSignal) async -> Void
+
     init(lifecycle: any LifecycleAPI, channel: ChannelKey,
-         links: (any LinkRouterCapability)? = nil, pasteboard: NSPasteboard = .general) {
+         links: (any LinkRouterCapability)? = nil, pasteboard: NSPasteboard = .general,
+         relay: AgentRelayRegistry? = nil,
+         raiseSignal: @escaping (ChannelKey, HostSignal) async -> Void = { _, _ in }) {
         self.lifecycle = lifecycle
         self.channel = channel
         self.links = links
         self.pasteboard = pasteboard
+        self.relay = relay
+        self.raiseSignal = raiseSignal
     }
 
     // MARK: - What a node offers
@@ -313,6 +333,84 @@ final class AgentNodeActions {
         pasteboard.clearContents()
         pasteboard.setString(content.id, forType: .string)
     }
+
+    // MARK: - Send message (item 51)
+
+    /// *Send message* exists wherever there is somewhere to record what became of it. It is offered
+    /// for a completed run as readily as for a running one — resuming a completed agent is the whole
+    /// of what item 51's own scenario does, and the engine's refusal to resume one is an arm this
+    /// leaf draws rather than a case it withholds the affordance for.
+    func offersSendMessage(_ content: AgentNodeContent) -> Bool { relay != nil && !inFlight }
+
+    /// Asks the main agent to relay `text` to this run, and records that it asked.
+    ///
+    /// **The send is X5 and nothing else** (contract Y5): `sendPrompt(UserInput, on:)` followed by
+    /// the `HostSignal.promptSent` raise that is inseparable from it, which is `ComposerModel.post`'s
+    /// pattern — the raise **after** the call succeeds, never before, so a refused send leaves the
+    /// fold holding no prompt the engine was never given.
+    ///
+    /// **Nothing here concludes anything about delivery.** The record opens `.pending` and the state
+    /// is derived from the frames afterwards; a send that reported success on the call returning is
+    /// exactly the silent non-delivery item 51 exists to prevent.
+    ///
+    /// `retryOf` is the record this send is retrying, and it is *lineage* rather than a mutation: the
+    /// failed record keeps its state and its place, and this one records what it descended from.
+    @discardableResult
+    func sendMessage(_ text: String, to content: AgentNodeContent,
+                     retryOf: AgentRelayRecord.ID? = nil) async -> Bool {
+        let message = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let relay, !message.isEmpty, !inFlight else { return false }
+        inFlight = true
+        defer { inFlight = false }
+        do {
+            let minted = try await lifecycle.sendPrompt(UserInput(text: Self.prompt(relaying: message, to: content)),
+                                                        on: channel)
+            await raiseSignal(channel, .promptSent(uuid: minted.uuidString.lowercased(), at: Date()))
+            banner = nil
+            relay.open(promptUUID: minted.uuidString.lowercased(),
+                       target: content.id,
+                       textDigest: AgentRelayDigest.of(message),
+                       in: channel,
+                       retryOf: retryOf,
+                       // *Retry* re-sends by this same path. The text lives in this capture and
+                       // nowhere a report can reach (§11); the record keeps a digest.
+                       resend: { [weak self] previous in
+                           await self?.sendMessage(message, to: content, retryOf: previous)
+                       })
+            return true
+        } catch let error as LifecycleError {
+            // afleet's own refusal rather than the engine's, worded where C5 already words it.
+            banner = RowBanner(error)
+            return false
+        } catch {
+            banner = TaskCardModel.banner(for: error)
+            return false
+        }
+    }
+
+    /// The prompt afleet composes — an **ordinary main-session user message**, because that is the
+    /// only path there is: no host-initiated resume or messaging control exists (parity §18.25), so
+    /// the main agent's own `SendMessage` tool is the relay and asking for it is asking the model.
+    ///
+    /// It names the run by the id the engine minted, because without agent teams an agent is
+    /// addressable by nothing else (parity §18.26), and it names the type and description so the
+    /// sentence reads as a request about a run the user can see rather than about an opaque id.
+    ///
+    /// **It does not impersonate anything** (§7.8): it is the user's own message, in the user's own
+    /// turn, saying what the user asked for.
+    static func prompt(relaying message: String, to content: AgentNodeContent) -> String {
+        let named = [content.agentType, content.description.isEmpty ? nil : "“\(content.description)”"]
+            .compactMap { $0 }
+            .joined(separator: ", ")
+        let subject = named.isEmpty ? "the agent with id \(content.id)"
+                                    : "the agent with id \(content.id) (\(named))"
+        return """
+        Use your SendMessage tool to send the message below to \(subject). \
+        Send the message exactly as written, and add nothing to it.
+
+        \(message)
+        """
+    }
 }
 
 /// The actions on the open node, drawn (gate G3).
@@ -331,8 +429,26 @@ struct AgentNodeActionBar: View {
     /// Where this run's transcript is, as C3 composes it. Nil for a run whose tree does not hold one,
     /// and the affordance is then absent rather than pointing at a path nobody answered for.
     var transcriptURL: URL?
+    /// What became of the messages already relayed to this run (item 51). Drawn on the node as well
+    /// as on the main timeline's row, because the node is where the user acted; the row is where
+    /// contract Y8 makes sure they meet it without opening this tab at all.
+    var relays: [AgentRelayReading] = []
+
+    @State private var composing = false
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            buttons
+            ForEach(Array(relays.enumerated()), id: \.offset) { _, reading in
+                AgentRelayNote(reading: reading)
+            }
+        }
+        .sheet(isPresented: $composing) {
+            SendMessageSheet(content: content, actions: actions, dismiss: { composing = false })
+        }
+    }
+
+    @ViewBuilder private var buttons: some View {
         HStack(spacing: 8) {
             if actions.offersStop(content) {
                 Button("Stop") { Task { await actions.stop(content) } }
@@ -344,12 +460,13 @@ struct AgentNodeActionBar: View {
                 Button("Open Transcript File") { actions.openTranscript(at: transcriptURL) }
             }
             Button("Copy Agent ID") { actions.copyAgentID(content) }
-            // *Send message* is Task 7's: the relay carries a delivery state concluded from the
-            // agent's own frames, and an affordance that sent a prompt with no state behind it would
-            // report success the moment the call returned — which is the conclusion item 51 exists to
-            // refuse. The affordance is drawn and inert until that machine lands.
-            Button("Send Message…") {}
-                .disabled(true)
+            // *Send message*, with a delivery state behind it. Absent — rather than drawn and inert
+            // — where there is nowhere to record what became of it: an affordance that sent a prompt
+            // and concluded success the moment the call returned is exactly the silent
+            // non-delivery item 51 exists to refuse.
+            if actions.offersSendMessage(content) {
+                Button("Send Message…") { composing = true }
+            }
         }
         .font(.caption)
     }

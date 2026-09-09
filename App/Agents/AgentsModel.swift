@@ -82,13 +82,20 @@ final class AgentsModel: PanelTabSession {
     /// of its own and hosts no card of its own.
     @ObservationIgnored let answering: DecisionAnswering?
 
+    /// Every *Send message* the app has made, app-scoped (item 51, contract Y8). The pane reads it
+    /// to draw a node's relays; the main timeline's row reads the same one through the render
+    /// context, which is what keeps the two surfaces from disagreeing about one delivery.
+    @ObservationIgnored let relay: AgentRelayRegistry?
+
     init(channel: ChannelKey, timelines: @escaping TimelineReach, store: AgentSelectionStore,
-         actions: AgentNodeActions? = nil, answering: DecisionAnswering? = nil) {
+         actions: AgentNodeActions? = nil, answering: DecisionAnswering? = nil,
+         relay: AgentRelayRegistry? = nil) {
         self.channel = channel
         self.timelines = timelines
         self.store = store
         self.actions = actions
         self.answering = answering
+        self.relay = relay
         // §8.4's `{backgrounded: false}` arm: the engine has said the registry row the panel read is
         // stale, and a reply is not a publish — the cache's key cannot see it. Dropping the held read
         // is the whole of "refresh" for a derivation, and wiring it here is what stops the next body
@@ -105,6 +112,17 @@ final class AgentsModel: PanelTabSession {
     /// **Nothing opens it** — the url goes to the channel's link router as a `WorkspaceLink.file`
     /// and the target is the Files panel's.
     func transcriptURL(of run: AgentRunID) -> URL? { timelines(channel)?.agents?.transcriptURL(of: run) }
+
+    /// What became of the messages relayed to one run (item 51), oldest first.
+    ///
+    /// Derived from the same published timeline the tree is, so a node's reading and the main
+    /// timeline row's reading of the same send are one derivation over one snapshot rather than two
+    /// answers that can differ.
+    func relayReadings(of run: AgentRunID) -> [AgentRelayReading] {
+        guard let relay else { return [] }
+        let timeline = timelines(channel) ?? ChannelTimeline()
+        return relay.records(of: run, in: channel).map { relay.reading(of: $0, in: channel, of: timeline) }
+    }
 
     /// The requests the engine is waiting on for one run (child spec D6, item 52). A filter over
     /// C3's overlay by `DecisionItem.agentID`, which the reducer sets from the request payload.

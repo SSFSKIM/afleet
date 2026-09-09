@@ -152,6 +152,15 @@ final class AppModel: FilesTabHost, SourceControlTabHost {
     /// store per surface would drop exactly those navigations.
     let agentSelection = AgentSelectionStore()
 
+    /// Every *Send message* the app has relayed to an agent, and what became of each (item 51,
+    /// contract Y8).
+    ///
+    /// **One instance, app-scoped**, for `agentSelection`'s reason and one more: the surface that
+    /// draws a relay's delivery state is the **main timeline's** user-message row, not the Agents
+    /// tab, so the record has to outlive the panel session that made it. A registry per surface
+    /// would leave the row that must show the *Retry* with nothing to read.
+    let agentRelay = AgentRelayRegistry()
+
     /// Activity, the badges and the notification router (spec §5, §6). Nil until a launch reaches a
     /// workspace, and rebuilt by each one — *Check again* is the same call as the first launch, and
     /// a second Activity following the first fleet's channels would notify twice.
@@ -590,7 +599,12 @@ final class AppModel: FilesTabHost, SourceControlTabHost {
                                        // card answered here and in Activity cannot both reach the
                                        // wire. Two closures over the one registry, never a second.
                                        fold: ChannelFold(timelines: timelines),
-                                       reservations: decisions)
+                                       reservations: decisions,
+                                       // Contract Y8: the app's one relay registry, written by a
+                                       // node's *Send message* here and read by the main
+                                       // timeline's row through `agentNavigation` below. Two
+                                       // registries would be two answers about one delivery.
+                                       relay: agentRelay)
                 do {
                     try panels.register(agents)
                 } catch {
@@ -602,7 +616,15 @@ final class AppModel: FilesTabHost, SourceControlTabHost {
                 // host builds it — the shell and the host through closures, never references.
                 agentNavigation = AgentNavigator(selection: agentSelection,
                                                  focusChannel: { [shell] key in shell.select(key.session) },
-                                                 selectTab: { [panels] in panels.select(.agents) })
+                                                 selectTab: { [panels] in panels.select(.agents) },
+                                                 // Contract Y8's other half: the timeline's one
+                                                 // seam to this leaf answers a row's "what became
+                                                 // of the message I sent", derived from the
+                                                 // channel's own published fold.
+                                                 relay: agentRelay,
+                                                 timelines: { [timelines] key in
+                                                     timelines.model(for: key).timeline
+                                                 })
                 // Its `/agents` command target (child spec D15, tracker 207), registered **with the
                 // tab** and awaited — a session is built lazily for rendering, so a link raised
                 // before anyone opened the tab must still resolve. It cannot go beside the

@@ -31,6 +31,10 @@ struct AgentNodeRow: View {
     /// (item 52). Empty for a node nothing is waiting on, and for a pane with no answering object.
     var decisions: AgentNodeDecisions?
 
+    /// What became of the messages already relayed to this run (item 51). Empty for a run nothing
+    /// was ever sent to, which is every run until the user sends one.
+    var relays: [AgentRelayReading] = []
+
     /// Whether this row's branch can be opened, and whether it is.
     enum Disclosure: Hashable, Sendable { case leaf, expanded, collapsed }
 
@@ -66,7 +70,8 @@ struct AgentNodeRow: View {
                     Text(activity).foregroundStyle(.secondary).lineLimit(1)
                 }
                 if isSelected, let actions {
-                    AgentNodeActionBar(content: content, actions: actions, transcriptURL: transcriptURL)
+                    AgentNodeActionBar(content: content, actions: actions, transcriptURL: transcriptURL,
+                                       relays: relays)
                 }
                 // Drawn on **every** node the engine is waiting on and not only the open one: the
                 // badge beside the title says a run is blocked, and a card the user has to open a

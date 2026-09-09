@@ -150,7 +150,8 @@ struct AgentOutline: View {
                      select: { model.select(row.id) },
                      actions: model.actions,
                      transcriptURL: model.transcriptURL(of: row.id),
-                     decisions: decisions(of: row, in: model))
+                     decisions: decisions(of: row, in: model),
+                     relays: model.relayReadings(of: row.id))
     }
 
     /// The node's waiting cards, or nil when there are none to draw.

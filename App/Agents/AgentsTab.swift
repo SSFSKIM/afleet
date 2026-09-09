@@ -56,16 +56,23 @@ final class AgentsTab: PanelTab {
     /// second would come back `decisionGone` — an error about afleet's bookkeeping dressed as an
     /// error about the engine.
     private let reservations: DecisionReservations
+    /// Every *Send message* the app has made (item 51, contract Y8). App-scoped for the reason the
+    /// selection store is: the row that draws a relay's delivery state is on the **main timeline**,
+    /// which is not this tab and does not go away when this tab does — so a registry owned by a
+    /// panel session would hold a state the channel column could never read.
+    private let relay: AgentRelayRegistry
 
     init(timelines: @escaping AgentsModel.TimelineReach, selection: AgentSelectionStore,
          lifecycle: @escaping LifecycleReach = { nil }, pasteboard: NSPasteboard = .general,
-         fold: ChannelFold = ChannelFold(), reservations: DecisionReservations = DecisionReservations()) {
+         fold: ChannelFold = ChannelFold(), reservations: DecisionReservations = DecisionReservations(),
+         relay: AgentRelayRegistry = AgentRelayRegistry()) {
         self.timelines = timelines
         self.selection = selection
         self.lifecycle = lifecycle
         self.pasteboard = pasteboard
         self.fold = fold
         self.reservations = reservations
+        self.relay = relay
     }
 
     /// Available for every channel (child spec D10). A channel with no runs and a channel whose
@@ -81,9 +88,15 @@ final class AgentsTab: PanelTab {
         return AgentsModel(channel: context.key, timelines: timelines, store: selection,
                            actions: fleet.map {
                                AgentNodeActions(lifecycle: $0, channel: context.key, links: context.links,
-                                                pasteboard: pasteboard)
+                                                pasteboard: pasteboard, relay: relay,
+                                                // The `HostSignal.promptSent` raise that is
+                                                // inseparable from a send, on this channel's own
+                                                // fold — the same two closures the answering object
+                                                // reaches the fold by, and never a second registry.
+                                                raiseSignal: { [fold] key, signal in await fold.raise(key, signal) })
                            },
-                           answering: fleet.map(makeAnswering))
+                           answering: fleet.map(makeAnswering),
+                           relay: relay)
     }
 
     func makeView(session: any PanelTabSession, context: ChannelContext,
