@@ -4151,6 +4151,26 @@ needs more. Nothing above is renumbered.
      above this corrective. Owner: whoever rules on a publish-time seam for app-scoped derivations.
      Raised by the recomposition corrective's review round.
 
+     **Closed 2026-09-11 — `corrective/c6-relay-conclusion` (commit `7472041`).** The seam is the
+     publish path: `AgentRelayRegistry.observe(_:in:)` runs the reading's own one-pass `advance` and
+     stores whatever settled, answering nothing, and `ChannelTimelineModel.publish()` calls it
+     beside `retraction.observe` — the model folds and publishes for a channel nobody is drawing,
+     which is the only place a conclusion nothing asked for can be taken. It returns before the pass
+     for a channel with no records and for one whose every record has settled, so the derivation
+     runs only while a channel holds a relay in flight; the registry reaches the model at
+     construction, from the app's one `AppModel.agentRelay` through `ChannelTimelineRegistry.relay`.
+     Y8 is unchanged: no item, no persisted store, and no change to what a row or a node draws while
+     the evidence is present.
+
+     **And this entry understated the harm.** The bound it relied on is a *younger record's* prompt
+     echo, so it holds only where the app made a second relay on that channel. A later turn's
+     `SendMessage` that belongs to no record — the model relaying on its own, a relay made from the
+     user's terminal — is bounded by nothing once the turn boundary is gone, and the older record
+     settles on it: the row then reads *Relayed* about a message the model never sent, and offers no
+     *Retry*. A wrong answer in the reassuring direction, not a missing sentence.
+     `testAnUnreadConclusionIsNotOverwrittenByALaterTurnsCall` is that arm. What is left of the cost
+     shape is 451.
+
 436. **The relay derivation is O(records × items) per body evaluation.** `reading(of:)` calls
      `outcomes(in:of:)`, which advances every record of the channel over the whole timeline, and the
      message row calls it once per relayed message drawn. It was one pass before this corrective and
@@ -4235,3 +4255,20 @@ needs more. Nothing above is renumbered.
      the three new regressions. Green: all 18 `EditAndRewindTests` passed, with the actual
      `** TEST SUCCEEDED **` verdict read from the captured log. Evidence:
      `.build/corrective-logs/428-{red,green}.log`; fixture integrity/signature verification passed.
+
+## From corrective/c6-relay-conclusion, 2026-09-11 (numbered from 451)
+
+451. **A relay that never settles re-derives on every publish for the life of the channel.**
+     `observe(_:in:)`'s gate keys on every record holding a settlement, and `.pending` and
+     `.relayed` are not terminal arms — so a record whose turn cannot close (the process was killed
+     mid-turn, the `SendMessage` result never came back) keeps one pass over the channel's whole
+     timeline in every publish that channel makes, at up to thirty hertz, for as long as the app
+     runs. It is the shape 436 files for the reading, moved onto the publish path, and it is bounded
+     the same two ways: the channel has to be actively folding for a publish to happen at all, and
+     the pass is over the items the fold holds. The memo the ruling offered as an alternative gate —
+     the item count and overlay identity against the last observed pair — buys nothing here,
+     because a publish happens *because* the fold changed, so it would skip almost no pass a
+     streaming channel makes and would cost a comparison on every one of them. Closing it is either
+     a rule for abandoning a record whose turn cannot close, which is a behavioural decision about
+     what the row then says, or 436's cache per (channel, timeline identity), which would serve both
+     entries. Owner: whoever takes 436. Raised by this corrective's own reading of its cost gate.
