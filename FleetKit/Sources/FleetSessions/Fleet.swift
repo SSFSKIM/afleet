@@ -216,12 +216,23 @@ public actor Fleet: LifecycleAPI {
     public func register(_ key: ChannelKey, cwd: URL, recent: Bool) async {
         seeds[key] = Seed(cwd: cwd, isRecent: recent)
         let supervisor = supervisor(for: key)
-        if await supervisor.transcriptObserved(), let launch = launches[key] {
-            var promoted = launch
-            promoted.session = .resume(key.session, fork: false)
-            promoted.worktree = nil
-            launches[key] = promoted
-        }
+        // **Read the fleet's own copy of the launch line before crossing into the supervisor**, and
+        // ask nothing when it does not say `.new`.
+        //
+        // This is the launch path: `ChannelRegistrar.register` is a serial loop over every listed
+        // row — roughly three thousand on a real config home — and it runs before the sidebar's
+        // first paint. An unconditional round trip into an actor that `build` has just handed a
+        // detached `holdersChanged` would put three thousand of them there, on the path this
+        // codebase has already measured twice (`FleetBrowserModel.startUpdates`,
+        // `ClaudeProjects.order`). Nothing is lost: only `create` writes `.new`, and the two copies
+        // are promoted together below, so `launches[key].session == .new` is exactly the condition
+        // under which the supervisor can still be holding it.
+        guard case .new? = launches[key]?.session, await supervisor.transcriptObserved(),
+              let launch = launches[key] else { return }
+        var promoted = launch
+        promoted.session = .resume(key.session, fork: false)
+        promoted.worktree = nil
+        launches[key] = promoted
     }
 
     /// Register and open in one call: the facade's own entry point, with the recency supplied by the caller.

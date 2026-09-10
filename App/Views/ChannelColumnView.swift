@@ -68,17 +68,11 @@ private struct ChannelTimelineColumn: View {
             ChannelHeaderView(header: model.header)
             ChannelHeaderActionsSlot(key: row.key, row: row, composers: composers)
             Divider()
-            if let failure = model.failure {
-                PlaceholderColumn(title: "This channel could not be read", detail: failure)
-            } else if model.awaitsTranscript {
-                // §8.2's *New channel*: created, selected, and with no transcript because the
-                // engine writes none until the first record. Its own branch rather than the
-                // "Opening…" one, which would say the app is reading a file that does not exist.
-                PlaceholderColumn(title: "This channel is new",
-                                  detail: "Send a message to start it. Its transcript is written then.")
-            } else if model.rows.isEmpty {
-                PlaceholderColumn(title: model.hasOpened ? "Nothing in this transcript yet" : "Opening…",
-                                  detail: "This channel's history is read from its transcript on disk.")
+            if let placeholder = ChannelColumnPlaceholder.choose(failure: model.failure,
+                                                                  awaitsTranscript: model.awaitsTranscript,
+                                                                  isEmpty: model.rows.isEmpty,
+                                                                  hasOpened: model.hasOpened) {
+                PlaceholderColumn(title: placeholder.title, detail: placeholder.detail)
             } else {
                 // Every row is resolved through contract Y1's registry — the slot draws whichever
                 // builder owns the item's kind. C6.1 has claimed eleven of the thirteen; `decision`
@@ -100,6 +94,39 @@ private struct ChannelTimelineColumn: View {
             model.adopt(header)
         }
         .task(id: row.key) { await model.open(row) }
+    }
+}
+
+/// Which of the column's placeholders is drawn, or none because the timeline has rows.
+///
+/// **A function over four values rather than a chain of `else if` inside a private view.** The
+/// branches are a decision — a created channel with no transcript is not the same condition as one
+/// whose transcript could not be read, and saying "Opening…" for the first would claim the app is
+/// reading a file that does not exist — and a decision inside `ChannelTimelineColumn` is reachable
+/// only by rendering the whole column, which `SidebarView.body`'s own fate shows is not something a
+/// test can do here. Named at the file's top level so the one place that chooses is the one place a
+/// test asserts.
+enum ChannelColumnPlaceholder {
+
+    struct Choice: Hashable, Sendable {
+        var title: String
+        var detail: String
+    }
+
+    /// The order is the precedence and it is not arbitrary: a failure is the strongest statement
+    /// the model can make, a created channel is the next, and "nothing yet" is what is left.
+    static func choose(failure: String?, awaitsTranscript: Bool, isEmpty: Bool,
+                       hasOpened: Bool) -> Choice? {
+        if let failure { return Choice(title: "This channel could not be read", detail: failure) }
+        if awaitsTranscript {
+            // §8.2's *New channel*: created, selected, and with no transcript because the engine
+            // writes none until the first record (bundle `SPEC/35-session-persistence.md` §35.6.3).
+            return Choice(title: "This channel is new",
+                          detail: "Send a message to start it. Its transcript is written then.")
+        }
+        guard isEmpty else { return nil }
+        return Choice(title: hasOpened ? "Nothing in this transcript yet" : "Opening…",
+                      detail: "This channel's history is read from its transcript on disk.")
     }
 }
 

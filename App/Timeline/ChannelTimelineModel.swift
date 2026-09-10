@@ -402,9 +402,16 @@ final class ChannelTimelineModel {
     func open(_ row: ChannelRow) async {
         adopt(ChannelHeader(row: row))
         isCreatedChannel = row.decidingRule == FleetBrowserModel.creationRule
+        // Awaiting a non-throwing task is not itself cancellable, so a cancelled view cannot leave
+        // a second caller here — see `openIngestion()`.
+        await openIngestion()
+    }
+
+    /// The one entrant to `performOpen`, shared by the column's `open(_:)` and the index delta that
+    /// first lists a created channel. A second caller waits for the first rather than starting a
+    /// second ingestion.
+    private func openIngestion() async {
         if let openingTask {
-            // A second caller waits for the first rather than starting a second ingestion. Awaiting
-            // a non-throwing task is not itself cancellable, so this is safe from a cancelled view.
             await openingTask.value
             return
         }
@@ -530,8 +537,12 @@ final class ChannelTimelineModel {
         // exactly this, and this is the trigger it needed.
         if awaitsTranscript, ingestion == nil {
             awaitsTranscript = false
-            guard let workspace, let lifecycle else { return }
-            await performOpen(workspace: workspace, lifecycle: lifecycle)
+            // Through `open`'s own stored task and never `performOpen` directly. `hasOpened` is set
+            // only *after* the index lookup suspends, so a `.task(id:)` re-run landing inside that
+            // window would start a second read: both would assign `ingestion`, `effectsTask` and
+            // `changesTask` without cancelling the first, leaving a live tap and a change-feed
+            // subscription orphaned behind this model. `openIngestion()` is the one entrant.
+            await openIngestion()
             return
         }
         // `ingestion != nil` rather than a binding: since the rebind moved into

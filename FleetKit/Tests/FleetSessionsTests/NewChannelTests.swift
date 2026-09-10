@@ -275,20 +275,33 @@ final class NewChannelTests: XCTestCase {
                        "a resumed channel asked the CLI for a second worktree")
     }
 
-    /// The transition is one-way and idempotent: two registrations do not undo it, and a registration
-    /// for a channel that never held `.new` changes nothing.
-    func testTheTransitionIsIdempotentAndDoesNotReopenOnASecondRegistration() async throws {
+    /// The transition answers **once**, and that return value is what the facade acts on.
+    ///
+    /// `Fleet.register` rewrites its own copy of the launch line only when the supervisor says it
+    /// did something, and the gate that keeps the registration loop off a cross-actor round trip
+    /// reads that copy. A `transcriptObserved()` that answered true every time would make every one
+    /// of roughly three thousand registrations rewrite a line that is already right; one that
+    /// answered true after the *frame* evidence had already moved the template would say a
+    /// transition happened that did not.
+    func testTheTransitionAnswersOnceAndIsIdempotent() async throws {
         let harness = try Harness()
         defer { Task { await harness.tearDown() } }
 
         let key = await harness.fleet.create(ChannelCreation(cwd: harness.cwd))
-        await harness.fleet.register(key, cwd: harness.cwd, recent: true)
+        let found = await harness.fleet.channel(key)
+        let supervisor = try XCTUnwrap(found, "the created channel has no supervisor")
+
+        let first = await supervisor.transcriptObserved()
+        let second = await supervisor.transcriptObserved()
+        XCTAssertTrue(first, "the first evidence did not move the launch line")
+        XCTAssertFalse(second, "the transition reported itself a second time")
+
+        // And a registration arriving after the frame evidence changes nothing it can see.
         await harness.fleet.register(key, cwd: harness.cwd, recent: true)
         _ = try await harness.fleet.perform(.open, on: key)
-
         let argv = try Self.argv(of: try XCTUnwrap(harness.launches.all.first))
-        XCTAssertFalse(argv.contains("--session-id"), "a second registration put --session-id back")
-        XCTAssertTrue(argv.contains("--resume"), "a second registration lost the resume")
+        XCTAssertFalse(argv.contains("--session-id"), "a later registration put --session-id back")
+        XCTAssertTrue(argv.contains("--resume"), "a later registration lost the resume")
     }
 
     /// A quiescent restart before the first turn keeps `--session-id`, and one after it keeps

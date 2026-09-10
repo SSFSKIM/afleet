@@ -326,7 +326,11 @@ final class NewChannelTests: XCTestCase {
         // evaluated outside a window takes the test host down, which is why the header is a view of
         // its own and why `SidebarView` names it in exactly one place.
         let header = ProjectSectionHeader(section: section, shell: shell)
-        let button = try XCTUnwrap(ViewTree.button("New channel in \(section.title)", in: header.body),
+        // `labelledButton` rather than `button`: the item's label is a `Label` under `.iconOnly`, so
+        // the header draws a plus and carries the name for VoiceOver and the help tag rather than
+        // spelling the whole sentence out in a sidebar header.
+        let button = try XCTUnwrap(ViewTree.labelledButton(ProjectSectionHeader.itemLabel(section),
+                                                           in: header.body),
                                    "no project section header carried a New channel item")
         XCTAssertTrue(ViewTree.press(button), "the New channel item carried no action")
         XCTAssertTrue(shell.newChannelRequest?.root == section.root,
@@ -351,11 +355,38 @@ final class NewChannelTests: XCTestCase {
         XCTAssertNil(model.failure, "a created channel reported a read failure")
         XCTAssertFalse(model.hasOpened, "a channel with no transcript reported an ingestion")
 
-        // The column's own branch, so the placeholder says the channel is new rather than that the
-        // app is reading a file that does not exist.
-        let column = ChannelColumnView(app: rig.app, shell: rig.shell, workspace: rig.workspace)
-        _ = column.body
-        XCTAssertTrue(model.awaitsTranscript, "drawing the column cleared the wait")
+        // The column's own branch, which is the whole point of the flag: the placeholder has to say
+        // the channel is new rather than that the app is reading a file that does not exist.
+        let drawn = ChannelColumnPlaceholder.choose(failure: model.failure,
+                                                    awaitsTranscript: model.awaitsTranscript,
+                                                    isEmpty: model.rows.isEmpty,
+                                                    hasOpened: model.hasOpened)
+        XCTAssertTrue(drawn?.title == "This channel is new",
+                      "the column drew no new-channel placeholder for a created channel")
+    }
+
+    /// The placeholder precedence, all four arms, so the branch above is a decision and not a
+    /// coincidence: a failure outranks the wait, the wait outranks "nothing yet", and a channel with
+    /// rows draws no placeholder at all.
+    func testThePlaceholderPrecedenceIsFailureThenNewThenEmpty() async throws {
+        let failed = ChannelColumnPlaceholder.choose(failure: "an invented shape", awaitsTranscript: true,
+                                                     isEmpty: true, hasOpened: false)
+        XCTAssertTrue(failed?.title == "This channel could not be read",
+                      "a read failure did not outrank the new-channel wait")
+        let waiting = ChannelColumnPlaceholder.choose(failure: nil, awaitsTranscript: true,
+                                                      isEmpty: true, hasOpened: false)
+        XCTAssertTrue(waiting?.title == "This channel is new",
+                      "a created channel did not draw the new-channel placeholder")
+        let opening = ChannelColumnPlaceholder.choose(failure: nil, awaitsTranscript: false,
+                                                      isEmpty: true, hasOpened: false)
+        XCTAssertTrue(opening?.title == "Opening…", "an unopened empty channel did not draw Opening…")
+        let empty = ChannelColumnPlaceholder.choose(failure: nil, awaitsTranscript: false,
+                                                    isEmpty: true, hasOpened: true)
+        XCTAssertTrue(empty?.title == "Nothing in this transcript yet",
+                      "an opened empty transcript did not say so")
+        XCTAssertNil(ChannelColumnPlaceholder.choose(failure: nil, awaitsTranscript: false,
+                                                     isEmpty: false, hasOpened: true),
+                     "a channel with rows drew a placeholder over them")
     }
 
     /// A listed row whose transcript has gone still reports the failure: the negative half, without

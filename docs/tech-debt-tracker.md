@@ -2138,12 +2138,24 @@ the gap between 141 and 157 is C6.1's and C6.2's reservations and is expected. (
      gates; two more in `ConsentAndTrustTests` for item 47's trust flip. Floor: 2,535 executed, 30
      skipped, 0 failures. Evidence under `.build/corrective-logs/`.
 
-     **What remains, and it is not implementation.** Persisting a created-but-unsent channel across
-     an app relaunch is a product decision nobody has taken; the pending map is in memory only and
-     `FleetBrowserModel.pending` names where it would hook in. The live witnesses are still owed:
-     item 3's AI title against a real engine and item 47's real terminal dialog both need an account
-     that permits prompted turns (entry 163), and items 4, 5, 41 and 52 need the same account with
-     the isolation setup this entry unblocks.
+     **What remains.** Item 3's own path is complete. **Item 47's is not, and the blocker is entry
+     314, not this entry.** The flip is wired — `PrecommitModel.reread` requests `perform(.open)`
+     when an evaluation that was `.untrusted` reads `.ready` — but the only caller that can put an
+     evaluation in that state is *Review trust in terminal*, which goes through
+     `ChannelSupervisor.openInTerminal` → `handOff`, and `handOff` refuses any channel whose origin
+     is not `.owned(.ready)` or `.owned(.dormant)`. An untrusted channel never spawns, so its origin
+     is `.archived` and the handoff throws `notOwned` before a pane can open. That is entry 314
+     exactly, filed 2026-09-09 and owned by C6.3 with C7.4; the closure it needs is *with no process
+     to hand over, open a pane on the project's directory directly*. Until then item 47's second half
+     cannot fire in the running app whatever this entry did, and the App-side test passes only
+     because a `LifecycleAPI` double has no such gate. Raised by this corrective's review round.
+
+     Also outstanding, and neither is implementation: persisting a created-but-unsent channel across
+     an app relaunch is a product decision nobody has taken (the pending map is in memory only and
+     `FleetBrowserModel.pending` names where it would hook in); and the live witnesses are still
+     owed — item 3's AI title against a real engine needs an account that permits prompted turns
+     (entry 163), and items 4, 5, 41 and 52 need the same account with the isolation setup this entry
+     unblocks.
 
 163. **`claude auth status` is not a sufficient live-gate precondition, and `ScratchLiveGate` treats
      it as one.** The scratch home reports `loggedIn: true` with an `oauth_token` on `firstParty`,
@@ -4303,9 +4315,13 @@ needs more. Nothing above is renumbered.
      only the supervisor, so from then on the fleet's copy can still say `.new` for a channel whose
      every spawn resumes. Inert today, because nothing reads `session` off it, and left that way
      rather than plumbing a callback from the supervisor back into the facade for a field with no
-     reader. Closer: have `preconditions(for:)` ask the supervisor for the line it would actually
-     launch (which would also pick up a `/cd`'s runtime cwd, arguably more correct than the seed's),
-     or drop `session` from the fleet's record. Owner: C4.
+     reader. Its one live consequence is a wasted round trip: `register` gates its cross-actor ask on
+     `launches[key].session == .new`, so a drifted copy makes one registration pay an await that
+     answers `false`. The reverse — the fleet's copy resumed while the supervisor still holds `.new`
+     — cannot happen, because only `create` writes `.new` and only `register` promotes the copy.
+     Closer: have `preconditions(for:)` ask the supervisor for the line it would actually launch
+     (which would also pick up a `/cd`'s runtime cwd, arguably more correct than the seed's), or drop
+     `session` from the fleet's record. Owner: C4.
 
 446. **Forking a created channel before its first turn asks the engine for a session with no
      transcript.** `ChannelSupervisor.fork` composes `.resume(source, fork: true)` from
@@ -4318,4 +4334,16 @@ needs more. Nothing above is renumbered.
      selectable with no transcript. Closer: refuse `fork` while the template holds `.new`, with the
      header's affordance disabled and a sentence saying to send first; and release a sibling whose
      spawn never reached ready. Owner: C4 for the refusal, C6.2 for the affordance.
+
+447. **The created-channel discriminator is an unenforced string coupling.**
+     `ChannelTimelineModel` tells a created channel from one whose transcript has gone by comparing
+     the row's `decidingRule` against `FleetBrowserModel.creationRule`, the literal `"new-channel"`.
+     No `ListingPolicy` rule is named that today (`own-sdk-cli`, `sidechain`, `continued-in`,
+     `teammate`, `default`), and the discriminator has to be *some* statement carried on the row —
+     the fleet cannot answer the question, because `events(of:)` returns a stream for any registered
+     channel and a transcript deleted between listing and opening is a registered channel too
+     (entry 66). A rule added later with that name would silently make a lost transcript render as
+     "This channel is new". Closer: a typed `decidingRule`, or an assertion on `ListingPolicy.rules`
+     that no rule takes the creation's name. Owner: C5's successor on the row. Raised by this
+     corrective's review round.
 

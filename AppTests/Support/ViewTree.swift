@@ -41,14 +41,33 @@ enum ViewTree {
         return found
     }
 
+    /// The first `Button` of **any** label type whose reflected strings carry `label`, or nil.
+    ///
+    /// `button(_:in:)` below names `Button<Text>`, which a caller cannot do for a button labelled
+    /// with a `Label` — its generic parameter is the label view's type. The descent is by type name,
+    /// the same tactic `scrollViewContent(in:)` uses, and the value it returns is pressed by
+    /// `press(_ button: Any)`, which reads the stored action and does not need the concrete type.
+    static func labelledButton(_ label: String, in value: Any) -> Any? {
+        if String(describing: type(of: value)).hasPrefix("Button<"),
+           values(of: String.self, in: value).contains(label) {
+            return value
+        }
+        for child in Mirror(reflecting: value).children {
+            if let found = labelledButton(label, in: child.value) { return found }
+        }
+        return nil
+    }
+
     static func button(_ label: String, in body: Any) -> Button<Text>? {
         values(of: Button<Text>.self, in: body).first {
             values(of: String.self, in: $0).contains(label)
         }
     }
 
+    /// The same press over a button whose concrete type the caller cannot name. It reads the stored
+    /// action, which is where a `Button`'s action lives whatever its label is.
     @MainActor
-    static func press(_ button: Button<Text>) -> Bool {
+    static func press(_ button: Any) -> Bool {
         guard let action = Mirror(reflecting: button).descendant("action", "closure") else { return false }
         // Swift 6's dynamic cast from Any rejects this isolated closure. Open the existential
         // and require matching isolation/signature and size before recovering the callable value.

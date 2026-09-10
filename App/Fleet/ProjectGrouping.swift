@@ -240,12 +240,21 @@ final class PathMemo {
     init() {}
 
     /// The canonical project root of a working directory: up to the first `.git`, else the directory.
+    ///
+    /// **A directory that does not exist yet is answered and not remembered.** The cache is
+    /// deliberately never invalidated because a project root moving under a running app is rare —
+    /// but a *worktree creation* names `<repo>/.claude/worktrees/<name>` before the CLI has made it,
+    /// and `RealPath.string` falls back to the path as given, so the upward walk finds the
+    /// repository's own `.git` and answers the repository. Remembering that would group the
+    /// checkout's channel into the repository's own rows for the life of the process, once the
+    /// checkout finally exists — which is the opposite of §8.2's worktree sub-grouping, on every
+    /// isolated creation. The answer is still returned, so the row is placed; only the memo waits.
     func root(of cwd: URL) -> String {
         let key = cwd.path
         if let known = rootOfCWD[key] { return known }
         probeCount += 1
         let resolved = Self.native(CanonicalPath.string(ProjectRoot.canonical(for: cwd).root))
-        rootOfCWD[key] = resolved
+        if FileManager.default.fileExists(atPath: key) { rootOfCWD[key] = resolved }
         return resolved
     }
 
@@ -267,11 +276,14 @@ final class PathMemo {
     }
 
     /// The repository a root belongs to: itself, or the main checkout when the root is a worktree.
+    ///
+    /// Not remembered for a root that does not exist, for `root(of:)`'s reason: a worktree's `.git`
+    /// is the file that identifies it, and a checkout the CLI has not made yet has none.
     func repository(of root: String) -> String {
         if let known = repositoryOfRoot[root] { return known }
         probeCount += 1
         let resolved = Self.native(WorktreeLink.mainRepository(of: root) ?? root)
-        repositoryOfRoot[root] = resolved
+        if FileManager.default.fileExists(atPath: root) { repositoryOfRoot[root] = resolved }
         return resolved
     }
 

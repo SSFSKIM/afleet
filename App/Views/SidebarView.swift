@@ -217,13 +217,16 @@ struct ProjectSectionHeader: View {
             Spacer(minLength: 4)
             // A button rather than a context menu: the header is the affordance §8.2 names, and a
             // menu on a `List` section header is not reliably reachable.
-            // A `Label` with the icon-only style rather than a bare `Image`: the item shows as the
-            // plus §8.2 asks for and still carries its name, so VoiceOver reads which project it is
-            // for and the menu bar's own *New Channel…* is not the only named way in.
-            Button(Self.itemLabel(section)) {
+            // A `Label` under `.iconOnly` rather than a bare `Image`: the item *draws* the plus a
+            // section header has room for, and still carries its name, so VoiceOver and the help
+            // tag both say which project it is for. `Button(_ title:)` would have drawn the whole
+            // sentence in the header, which is what an earlier version of this line did.
+            Button {
                 shell.presentNewChannel(root: section.root)
+            } label: {
+                Label(Self.itemLabel(section), systemImage: "plus")
+                    .labelStyle(.iconOnly)
             }
-            .labelStyle(.titleAndIcon)
             .buttonStyle(.borderless)
             .font(.caption2)
             .help(Self.itemLabel(section))
