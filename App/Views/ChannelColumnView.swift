@@ -70,6 +70,12 @@ private struct ChannelTimelineColumn: View {
             Divider()
             if let failure = model.failure {
                 PlaceholderColumn(title: "This channel could not be read", detail: failure)
+            } else if model.awaitsTranscript {
+                // §8.2's *New channel*: created, selected, and with no transcript because the
+                // engine writes none until the first record. Its own branch rather than the
+                // "Opening…" one, which would say the app is reading a file that does not exist.
+                PlaceholderColumn(title: "This channel is new",
+                                  detail: "Send a message to start it. Its transcript is written then.")
             } else if model.rows.isEmpty {
                 PlaceholderColumn(title: model.hasOpened ? "Nothing in this transcript yet" : "Opening…",
                                   detail: "This channel's history is read from its transcript on disk.")

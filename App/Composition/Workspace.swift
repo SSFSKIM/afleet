@@ -38,7 +38,9 @@ struct Workspace: Sendable {
 /// restating the member. The seam's purpose is unchanged — `register` is still absent from
 /// `LifecycleAPI`, so a `LifecycleAPI` double still cannot record a registration — and the
 /// refinement is what lets `Workspace.fleet` be handed to `ChannelRegistrar` without a cast.
-protocol AppFleet: LifecycleAPI, ChannelRegistering {
+/// `ChannelCreating` joins it for the same reason: `Fleet.create` is `Fleet`'s own and §8.2's *New
+/// channel* is the composition root's call, so it is a seam here rather than a widening of X5.
+protocol AppFleet: LifecycleAPI, ChannelRegistering, ChannelCreating {
     func start() async
     func shutdown() async
 }

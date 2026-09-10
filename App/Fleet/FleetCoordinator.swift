@@ -20,6 +20,10 @@ final class FleetCoordinator: WorkspaceCoordinating {
     let model: FleetBrowserModel
 
     private let registrar: any ChannelRegistering
+    /// §8.2's *New channel*. Separate from `registrar` for the reason `registrar` is separate from
+    /// the lifecycle: creation is `Fleet`'s own API, and a test that proves the sheet minted exactly
+    /// one channel has to record it somewhere neither a `LifecycleAPI` nor a registrar double can.
+    private let creator: (any ChannelCreating)?
     private let index: any IndexAccess
     private let configHome: URL
     /// Where `.claude.json` really is. Carried separately from `configHome` because the two are
@@ -96,6 +100,7 @@ final class FleetCoordinator: WorkspaceCoordinating {
         self.init(configHome: home,
                   globalConfig: workspace.configHome.globalConfig,
                   registrar: workspace.fleet,
+                  creator: workspace.fleet,
                   index: workspace.index,
                   model: FleetBrowserModel(lifecycle: workspace.fleet, configHome: home, now: now),
                   store: workspace.store,
@@ -111,6 +116,7 @@ final class FleetCoordinator: WorkspaceCoordinating {
     init(configHome: URL,
          globalConfig: URL? = nil,
          registrar: any ChannelRegistering,
+         creator: (any ChannelCreating)? = nil,
          index: any IndexAccess,
          model: FleetBrowserModel,
          store: (any StateStore)? = nil,
@@ -127,6 +133,7 @@ final class FleetCoordinator: WorkspaceCoordinating {
         // resolved location.
         self.globalConfig = globalConfig ?? ConfigHome(root: configHome, source: .environment).globalConfig
         self.registrar = registrar
+        self.creator = creator
         self.index = index
         self.model = model
         self.store = store
@@ -219,6 +226,27 @@ final class FleetCoordinator: WorkspaceCoordinating {
         panels?.releaseChannel(key)
         timelines?.release(key)
         composers?.release(key)
+    }
+
+    // MARK: - Creation
+
+    /// §8.2's *New channel*: one `Fleet.create`, then the row that makes the channel visible.
+    ///
+    /// The two belong together and are one call for that reason. `Fleet.create` files a seed and a
+    /// supervisor and answers a key; the index has never heard of it and will not until the first
+    /// turn writes a transcript, so a caller that only created would hand the window a session the
+    /// sidebar cannot draw and the column cannot mount. Nothing is registered — the seed is already
+    /// the creation's own, and `register`ing over it would tell the fleet a channel it just made
+    /// exists.
+    ///
+    /// The pending row's directory is the request's `expectedCWD`, so a `-w` creation lands under
+    /// its repository from the first paint rather than moving section when the engine reports the
+    /// checkout it made.
+    func createChannel(_ request: ChannelCreation) async -> ChannelKey? {
+        guard let creator else { return nil }
+        let key = await creator.create(request)
+        model.addPending(key, name: request.name, cwd: request.expectedCWD)
+        return key
     }
 
     // MARK: - Registration

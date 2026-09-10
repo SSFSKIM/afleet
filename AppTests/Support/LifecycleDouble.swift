@@ -252,6 +252,37 @@ final class EventSink: @unchecked Sendable {
     }
 }
 
+/// Records every `Fleet.create(_:)` the app makes, and answers each with a key of its own.
+///
+/// This double exists for `RegistrarDouble`'s reason: `create` is not on `LifecycleAPI`, so a
+/// lifecycle double cannot see a creation at all, and "*New channel* minted exactly one channel,
+/// with the request the sheet described" is not a claim any other seam could carry. It mints real
+/// `SessionID`s so a caller can select the key it was handed, and remembers each request so a test
+/// can assert on the isolation flag and the worktree name without reading a launch line.
+actor CreatorDouble: ChannelCreating {
+
+    private(set) var requests: [ChannelCreation] = []
+    private(set) var keys: [ChannelKey] = []
+    private let configHome: URL
+    /// The ids handed out, in order. Empty means a fresh `SessionID` per call.
+    private var scripted: [SessionID]
+
+    init(configHome: URL, minting: [SessionID] = []) {
+        self.configHome = configHome
+        self.scripted = minting
+    }
+
+    func create(_ request: ChannelCreation) async -> ChannelKey {
+        requests.append(request)
+        let session = scripted.isEmpty ? SessionID() : scripted.removeFirst()
+        let key = ChannelKey(configHome: configHome, session: session)
+        keys.append(key)
+        return key
+    }
+
+    var count: Int { requests.count }
+}
+
 /// An `AppFleet` for the composition root, whose `updates` the test can push through. Used where the
 /// launch needs a fleet and the *registration* is recorded somewhere else.
 actor FleetDouble: AppFleet {
@@ -272,6 +303,7 @@ actor FleetDouble: AppFleet {
     func start() async { started = true }
     func shutdown() async { continuation.finish(); jobContinuation.finish() }
     func register(_ key: ChannelKey, cwd: URL, recent: Bool) async { registrations.append(key) }
+    func create(_ request: ChannelCreation) async -> ChannelKey { unreachable("create") }
     nonisolated func emit(_ state: ChannelState) { continuation.yield(state) }
 
     func state(of key: ChannelKey) async -> ChannelState? { nil }

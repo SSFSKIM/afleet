@@ -32,6 +32,15 @@ struct SidebarView: View {
             if let session = focus.session { browser.select(session) }
         }
         .task { await browser.refreshBackground() }
+        // §8.2's *New channel*, presented here and not in `RootView`, which Task 5 closed: this is
+        // the view that is on screen for the whole workspace route, and the one whose section
+        // headers raise the other entry point. Both entries write `ShellModel.newChannelRequest`,
+        // so the global item in the app's command group has somewhere to put a press that has no
+        // view to reach.
+        .sheet(item: Binding(get: { shell.newChannelRequest },
+                             set: { if $0 == nil { shell.dismissNewChannel() } })) { request in
+            NewChannelSheet(request: request) { shell.dismissNewChannel() }
+        }
     }
 
     // MARK: - Projects
@@ -67,6 +76,19 @@ struct SidebarView: View {
             HStack(spacing: 4) {
                 if section.isPinned { Image(systemName: "pin.fill").font(.caption2) }
                 Text(section.title)
+                Spacer(minLength: 4)
+                // §8.2: *New channel* from a section header, pre-filled with the section's own
+                // root. A button rather than a context menu, because the header is the affordance
+                // the spec names and a menu on a `List` section header is not reliably reachable.
+                Button {
+                    shell.presentNewChannel(root: section.root)
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.caption2)
+                        .accessibilityLabel(Text("New channel in \(section.title)"))
+                }
+                .buttonStyle(.borderless)
+                .help("New channel…")
             }
         }
     }

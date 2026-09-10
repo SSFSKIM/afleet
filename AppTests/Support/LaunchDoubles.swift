@@ -48,6 +48,7 @@ actor StubFleet: AppFleet {
 
     func start() async { started = true }
     func register(_ key: ChannelKey, cwd: URL, recent: Bool) async { registrations.append(key) }
+    func create(_ request: ChannelCreation) async -> ChannelKey { unreachable("create") }
     func shutdown() async { continuation.finish(); jobContinuation.finish() }
 
     func state(of key: ChannelKey) async -> ChannelState? { nil }

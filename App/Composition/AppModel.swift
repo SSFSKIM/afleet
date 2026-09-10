@@ -283,6 +283,32 @@ final class AppModel: FilesTabHost, SourceControlTabHost {
         }
     }
 
+    /// The *New channel* sheet's model, over the workspace the last launch reached (§8.2, §14
+    /// item 3).
+    ///
+    /// **The Developer setting is read here, from the store, at the moment the sheet is opened.**
+    /// Settings writes `isolatedSettingsForNewChannels` into that document as the toggle moves, so
+    /// a value captured at launch would be the value the app started with rather than the one the
+    /// user has since chosen — and this setting decides whether the channel's own launch line
+    /// carries `--setting-sources ""`, which no later restart of that channel can be talked out of
+    /// without a quiescent restart.
+    ///
+    /// Nil when no launch has reached a workspace, which is the same condition that leaves the
+    /// sidebar showing a progress view.
+    func makeNewChannelModel(root: URL?) async -> NewChannelModel? {
+        guard let workspace = route.workspace, let browser,
+              let coordinator = coordinator as? FleetCoordinator else { return nil }
+        let settings = await AfleetSettingsStore.read(from: workspace.store)
+        return NewChannelModel(root: root,
+                               isolatedSettings: settings.developer.isolatedSettingsForNewChannels,
+                               browser: browser,
+                               lifecycle: workspace.fleet,
+                               shell: shell,
+                               create: { [weak coordinator] request in
+                                   await coordinator?.createChannel(request) ?? nil
+                               })
+    }
+
     /// Registers the Browser's `.url` and `.pullRequest` targets on the app's one link registry
     /// (Q4, D41), once for the life of the process.
     func registerBrowserLinkTargets() async {

@@ -321,8 +321,35 @@ final class PrecommitModel {
     /// `evaluate` publishes under: an answer's re-read landing after the selection moved would
     /// replace the new channel's verdict with the old channel's.
     private func reread(_ evaluation: Evaluation) async {
+        let wasUntrusted = isHistoryOnly
         let verdict = await lifecycle.preconditions(for: evaluation.channel)
         guard isCurrent(evaluation) else { return }
         precondition = verdict
+        // §14 item 47's second half: the trust dialog was accepted in the pane this model handed
+        // over, and the channel spawns owned. Nothing else would spawn it — trust is granted
+        // outside afleet, no state afleet holds changed when it was, and the channel is
+        // history-only precisely because the user has not been able to send.
+        //
+        // **Scoped to the flip, on this evaluation's own channel.** Not a general auto-spawn on a
+        // `.ready` verdict: `evaluate` reads one for every selection and every return to the
+        // front, and spawning on each of those would open a process in every channel the user
+        // clicks past. The condition is that *this* evaluation was untrusted a moment ago and is
+        // ready now, which happens once per accepted dialog.
+        guard wasUntrusted, verdict == .ready else { return }
+        await spawnAfterTrust(evaluation)
+    }
+
+    /// The owned spawn a trust flip earns, under the same generation fence every other action here
+    /// takes: a `perform` whose answer lands after the selection moved belongs to a channel the
+    /// user has left, and its refusal is not the new context's news.
+    private func spawnAfterTrust(_ evaluation: Evaluation) async {
+        do {
+            _ = try await lifecycle.perform(.open, on: evaluation.channel)
+        } catch let error as LifecycleError {
+            raise(RowBanner(error), for: evaluation)
+        } catch {
+            raise(RowBanner(text: "The channel did not open after trust was granted: \(type(of: error))."),
+                  for: evaluation)
+        }
     }
 }

@@ -84,6 +84,25 @@ final class ShellModel {
     /// Cmd+K's sheet.
     var isSwitcherPresented = false
 
+    /// The *New channel…* sheet, or nil when none is up (§8.2, §14 item 3).
+    ///
+    /// It lives here for the reason `pendingPanelIndex` does: the global entry is a `Button` inside
+    /// the scene's `commands`, which is outside every view body and cannot reach `@State`. The
+    /// sidebar presents it, because that is the view that is on screen for the whole of the
+    /// workspace route and the one whose section headers raise the other entry point.
+    private(set) var newChannelRequest: NewChannelRequest?
+    private var newChannelSequence = 0
+
+    /// Raises the sheet over `root`, or over the global entry's directory chooser when `root` is
+    /// nil. A second press while one is up replaces it rather than being dropped: the user has
+    /// clicked a different project's header, and that is the sheet they mean.
+    func presentNewChannel(root: URL?) {
+        newChannelSequence += 1
+        newChannelRequest = NewChannelRequest(id: newChannelSequence, root: root)
+    }
+
+    func dismissNewChannel() { newChannelRequest = nil }
+
     /// Where the keyboard is pointed, for the one question two children disagreed about: whether
     /// the composer's Escape and Shift+Tab are the composer's *right now* (spec §8.5, tracker 350).
     ///

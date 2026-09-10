@@ -131,6 +131,33 @@ final class FleetBrowserModel {
         var rule: String
     }
 
+    /// Channels the fleet has minted and the index cannot see yet (§8.2's *New channel*, §14 item 3).
+    ///
+    /// **A fourth, deliberately small side of the join, not a fourth kind of row.** A created
+    /// channel has a supervisor, a working directory and a key, and no transcript at all — the
+    /// engine writes none at startup (bundle `SPEC/35-session-persistence.md` §35.6.3), so
+    /// `IndexEntry` cannot exist for it until the first turn. Without a row here the channel the
+    /// user just made has nowhere to be seen and nothing to type into.
+    ///
+    /// It holds only what the request said, because that is all anybody knows yet. The moment the
+    /// index lists the id, `rebuild()` drops the entry and the indexed row takes its place — one
+    /// row throughout, and never two.
+    ///
+    /// **In memory only.** Persisting a created-but-unsent channel across a relaunch is a product
+    /// decision that has not been taken; it would hook in here, beside `AfleetSelectionState`,
+    /// which is the other thing about the window that survives a launch.
+    private var pending: [SessionID: Pending] = [:]
+
+    /// One created channel, as the request described it.
+    private struct Pending {
+        var key: ChannelKey
+        /// The session name the user typed, or nil for the *New channel* placeholder title.
+        var name: String?
+        /// The request's directory, or the worktree path a `-w` creation will run in.
+        var cwd: URL
+        var createdAt: Date
+    }
+
     init(lifecycle: any LifecycleAPI,
          configHome: URL,
          grouping: ProjectGrouping = ProjectGrouping(),
@@ -147,6 +174,55 @@ final class FleetBrowserModel {
     var allRows: [ChannelRow] { sections.flatMap(\.allRows) + archived }
 
     func row(_ id: SessionID) -> ChannelRow? { allRows.first { $0.id == id } }
+
+    // MARK: - Created channels
+
+    /// Draws a row for a channel the fleet has just minted, so the window has something to select
+    /// and the column has something to mount (§8.2, §14 item 3).
+    ///
+    /// `cwd` is the directory the channel will run in — for a worktree creation the checkout the
+    /// CLI is about to make — so the row lands under its repository from the first paint rather
+    /// than moving section once the transcript appears.
+    func addPending(_ key: ChannelKey, name: String?, cwd: URL) {
+        guard listed[key.session] == nil else { return }
+        pending[key.session] = Pending(key: key, name: name, cwd: cwd, createdAt: now())
+        rebuild()
+    }
+
+    /// The placeholder title a created channel carries until the engine has an AI title of its own.
+    /// The engine mints that title and C3 indexes it (`TitlePrecedence.aiTitle`); nothing here asks
+    /// for one.
+    static let newChannelTitle = "New channel"
+
+    /// The name `ChannelRow.decidingRule` carries for a created channel: no `ListingPolicy` rule
+    /// listed it, because there is no entry for a rule to have read.
+    static let creationRule = "new-channel"
+
+    private func pendingRow(_ entry: Pending) -> ChannelRow {
+        ChannelRow(key: entry.key,
+                   title: entry.name.flatMap { $0.isEmpty ? nil : $0 } ?? Self.newChannelTitle,
+                   // The user's own name when they typed one, and the placeholder otherwise. Never
+                   // `.aiTitle`: the engine mints that after the first turn and C3 indexes it, and
+                   // this row exists precisely because no turn has happened.
+                   titleSource: entry.name?.isEmpty == false ? .customTitle : .fallback,
+                   // Empty, and honestly so: a preview is the transcript's first line and there is
+                   // no transcript. The row shows presence instead once the channel has a process.
+                   preview: "",
+                   cwd: entry.cwd,
+                   gitBranch: nil,
+                   agentName: nil,
+                   mtime: entry.createdAt,
+                   isRecent: true,
+                   mode: .ownedCandidate,
+                   decidingRule: Self.creationRule,
+                   // **Not `isProvisional`.** That flag means *painted from the persisted snapshot
+                   // and not yet replaced by the fresh build*, and the sidebar italicises it to say
+                   // so. A created channel is the opposite kind of uncertainty — it is the newest
+                   // thing the fleet knows about — and overloading the flag would draw it as stale.
+                   isProvisional: false,
+                   state: states[entry.key.session],
+                   banner: banners[entry.key.session])
+    }
 
     // MARK: - The index feed
 
@@ -177,7 +253,10 @@ final class FleetBrowserModel {
         // A session that left the index has no row, so its live half, its banner and the selection
         // pointing at it go with it; keeping any of them would leave the sidebar holding a reference
         // to a channel it can no longer draw.
-        let known = Set(listed.keys)
+        // A pending channel is drawn by this model and by nothing in the snapshot, so it counts as
+        // known: filtering on `listed` alone dropped the created channel's live half, its banner
+        // and the selection pointing at it on the next index build.
+        let known = Set(listed.keys).union(pending.keys)
         states = states.filter { known.contains($0.key) }
         banners = banners.filter { known.contains($0.key) }
         if let selected, !known.contains(selected) { self.selected = nil }
@@ -294,7 +373,7 @@ final class FleetBrowserModel {
         stateObserver?(state)
         let id = state.key.session
         states[id] = state
-        guard listed[id] != nil else { return }
+        guard listed[id] != nil || pending[id] != nil else { return }
         dirty.insert(id)
     }
 
@@ -605,6 +684,16 @@ final class FleetBrowserModel {
         let moment = now()
         var live: [ChannelRow] = []
         var old: [ChannelRow] = []
+        // The index has caught up with these: the entry it now holds is a better row than the
+        // request was, and keeping both would draw the channel twice.
+        pending = pending.filter { listed[$0.key] == nil }
+        for entry in pending.values {
+            let row = pendingRow(entry)
+            // A created channel is `isRecent` and has a directory, so `isArchived` is false and this
+            // is the section arm. Kept as a branch rather than an append, because a row that
+            // *reported* itself archived and was filed live is the one shape `reindex` cannot fix.
+            if row.isArchived { old.append(row) } else { live.append(row) }
+        }
         for (id, entry) in listed {
             var row = ChannelRegistrar.row(for: entry.entry, configHome: configHome, mode: entry.mode,
                                            rule: entry.rule, now: moment,

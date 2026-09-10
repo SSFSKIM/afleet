@@ -193,6 +193,18 @@ final class ChannelTimelineModel {
     /// Why the transcript could not be read, as a shape and never a path (§11).
     private(set) var failure: String?
 
+    /// True for a channel the fleet has minted and whose transcript does not exist yet (§8.2's
+    /// *New channel*, §14 item 3).
+    ///
+    /// **Not a failure, and that distinction is the whole of it.** The engine creates no transcript
+    /// at startup — `sessionFile` is null until the first `user`, `assistant` or `system` record is
+    /// written (bundle `SPEC/35-session-persistence.md` §35.6.3) — so a channel created and not yet
+    /// sent to has no file for the index to hold, and reporting "no transcript in the index" would
+    /// tell the user something is broken about a channel that is simply new. The column draws its
+    /// own placeholder for it and the composer is enabled: a send is what makes the transcript
+    /// exist.
+    private(set) var awaitsTranscript = false
+
     /// The transcript the ingestion is reading, as the index spelled it. Held so a relocation is a
     /// comparison rather than a call: the coordinator hands the entry's path on every update to a
     /// channel, and only a path that actually moved is worth rebinding.
@@ -404,12 +416,28 @@ final class ChannelTimelineModel {
     /// not by this flag.
     private func performOpen(workspace: Workspace, lifecycle: any LifecycleAPI) async {
         guard let entry = await workspace.index.entry(key.session) else {
-            failure = "this channel has no transcript in the index"
+            // A created channel, or a transcript that has gone. The two are told apart by whether
+            // the fleet owns a supervisor for the key: `events(of:)` answers a stream for any
+            // *registered* channel and nil for one the fleet was never told about (X5), and a
+            // channel `Fleet.create` minted is registered by construction. So a live stream with
+            // no index entry is a channel whose first record has not been written yet, and a nil
+            // stream with no index entry is a row whose file is missing.
+            //
+            // The subscription is taken and dropped rather than held: this model's one consumer of
+            // the channel's events is the ingestion, which cannot exist without a file, and the
+            // header's readbacks take their own. What is wanted here is the *answer*.
+            if await lifecycle.events(of: key) != nil {
+                awaitsTranscript = true
+                failure = nil
+            } else {
+                failure = "this channel has no transcript in the index"
+            }
             return
         }
         // The other half of tracker 66: a retry that found the entry has to clear the failure the
         // attempt before it recorded, or the channel keeps reporting a condition that is over.
         failure = nil
+        awaitsTranscript = false
         hasOpened = true
         // Every `await` below is a point where `close()` can run — the registry releases a channel
         // that left the index, and the model it releases must not go on to build what the release
@@ -490,6 +518,18 @@ final class ChannelTimelineModel {
     /// holds, so without this the channel would keep reading a file that is no longer there and a
     /// channel with no live tap would go quietly stale.
     func transcriptMoved(to path: URL) async {
+        // **The created channel's first transcript arrives here, and this is what reopens it.**
+        // `FleetCoordinator.indexChanged` forwards every added and updated entry's path to this
+        // registry, so the delta that first lists a created channel reaches this method — and the
+        // column's `.task(id:)` will not run again for a channel that stayed selected, which is
+        // the case *New channel* is always in. Tracker 66's retry left `hasOpened` false for
+        // exactly this, and this is the trigger it needed.
+        if awaitsTranscript, ingestion == nil {
+            awaitsTranscript = false
+            guard let workspace, let lifecycle else { return }
+            await performOpen(workspace: workspace, lifecycle: lifecycle)
+            return
+        }
         // `ingestion != nil` rather than a binding: since the rebind moved into
         // `signal(.relocated:)` nothing here needs the actor itself, and a bound-but-unused value
         // is a compiler warning, which the floor does not allow. The condition still matters — a
