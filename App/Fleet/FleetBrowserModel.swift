@@ -192,11 +192,11 @@ final class FleetBrowserModel {
     /// The placeholder title a created channel carries until the engine has an AI title of its own.
     /// The engine mints that title and C3 indexes it (`TitlePrecedence.aiTitle`); nothing here asks
     /// for one.
-    static let newChannelTitle = "New channel"
+    nonisolated static let newChannelTitle = "New channel"
 
     /// The name `ChannelRow.decidingRule` carries for a created channel: no `ListingPolicy` rule
     /// listed it, because there is no entry for a rule to have read.
-    static let creationRule = "new-channel"
+    nonisolated static let creationRule = "new-channel"
 
     private func pendingRow(_ entry: Pending) -> ChannelRow {
         ChannelRow(key: entry.key,

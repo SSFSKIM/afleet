@@ -205,6 +205,18 @@ final class ChannelTimelineModel {
     /// exist.
     private(set) var awaitsTranscript = false
 
+    /// Whether the row the column last handed this model is a **created** channel's — the one
+    /// `FleetBrowserModel` drew from a creation request rather than from an index entry.
+    ///
+    /// This is what tells a channel with no transcript *yet* from a channel whose transcript has
+    /// gone, and the fleet cannot answer it: `events(of:)` returns a stream for any registered
+    /// channel, and tracker 66's case — a transcript deleted between listing and opening — is a
+    /// registered channel too. The row is the surface's own statement about which kind of channel
+    /// this is, and a created one says so in `decidingRule` because no `ListingPolicy` rule listed
+    /// it. Read from the row rather than stored by whoever created the channel, so a model built
+    /// for a channel the index has since caught up with is not still calling it new.
+    @ObservationIgnored private var isCreatedChannel = false
+
     /// The transcript the ingestion is reading, as the index spelled it. Held so a relocation is a
     /// comparison rather than a call: the coordinator hands the entry's path on every update to a
     /// channel, and only a path that actually moved is worth rebinding.
@@ -389,6 +401,7 @@ final class ChannelTimelineModel {
     /// which the registry owns, ends it.
     func open(_ row: ChannelRow) async {
         adopt(ChannelHeader(row: row))
+        isCreatedChannel = row.decidingRule == FleetBrowserModel.creationRule
         if let openingTask {
             // A second caller waits for the first rather than starting a second ingestion. Awaiting
             // a non-throwing task is not itself cancellable, so this is safe from a cancelled view.
@@ -416,17 +429,8 @@ final class ChannelTimelineModel {
     /// not by this flag.
     private func performOpen(workspace: Workspace, lifecycle: any LifecycleAPI) async {
         guard let entry = await workspace.index.entry(key.session) else {
-            // A created channel, or a transcript that has gone. The two are told apart by whether
-            // the fleet owns a supervisor for the key: `events(of:)` answers a stream for any
-            // *registered* channel and nil for one the fleet was never told about (X5), and a
-            // channel `Fleet.create` minted is registered by construction. So a live stream with
-            // no index entry is a channel whose first record has not been written yet, and a nil
-            // stream with no index entry is a row whose file is missing.
-            //
-            // The subscription is taken and dropped rather than held: this model's one consumer of
-            // the channel's events is the ingestion, which cannot exist without a file, and the
-            // header's readbacks take their own. What is wanted here is the *answer*.
-            if await lifecycle.events(of: key) != nil {
+            // A created channel, or a transcript that has gone — and the row says which.
+            if isCreatedChannel {
                 awaitsTranscript = true
                 failure = nil
             } else {

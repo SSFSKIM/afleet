@@ -343,7 +343,6 @@ final class NewChannelTests: XCTestCase {
     /// index" for the first would tell the user something is broken about a channel that is new.
     func testACreatedChannelAwaitsItsTranscriptRatherThanReportingAFailure() async throws {
         let rig = try await TimelineRig()
-        await rig.lifecycle.openEvents(of: rig.created)
 
         let model = rig.registry.model(for: rig.created)
         await model.open(rig.row)
@@ -359,15 +358,22 @@ final class NewChannelTests: XCTestCase {
         XCTAssertTrue(model.awaitsTranscript, "drawing the column cleared the wait")
     }
 
-    /// A row whose transcript really is gone still reports the failure: the negative half, without
+    /// A listed row whose transcript has gone still reports the failure: the negative half, without
     /// which the clause above would pass for both.
-    func testAChannelTheFleetNeverHeardOfStillReportsTheMissingTranscript() async throws {
+    ///
+    /// The two cases cannot be told apart by asking the fleet — `events(of:)` answers a stream for
+    /// **any** registered channel, and tracker 66's case is a registered channel whose file was
+    /// deleted between listing and opening. What separates them is the row: a created channel's
+    /// carries the creation rule because no `ListingPolicy` rule listed it. That is not a
+    /// hypothetical: an earlier version of this branch asked the fleet, and
+    /// `ChannelTimelineSeamTests.testAMissingIndexEntryIsRetried` caught it.
+    func testAListedRowWhoseTranscriptIsGoneStillReportsTheMissingTranscript() async throws {
         let rig = try await TimelineRig()
 
         let model = rig.registry.model(for: rig.created)
-        await model.open(rig.row)
+        await model.open(rig.listedRow)
 
-        XCTAssertFalse(model.awaitsTranscript, "an unregistered channel was treated as newly created")
+        XCTAssertFalse(model.awaitsTranscript, "a listed row was treated as a newly created channel")
         XCTAssertNotNil(model.failure, "a missing transcript reported no failure")
     }
 
@@ -376,7 +382,6 @@ final class NewChannelTests: XCTestCase {
     /// the channel and does not run again for a channel that stayed selected.
     func testTheIndexDeltaOpensTheCreatedChannelWithoutASelectionChange() async throws {
         let rig = try await TimelineRig()
-        await rig.lifecycle.openEvents(of: rig.created)
         let model = rig.registry.model(for: rig.created)
         await model.open(rig.row)
         XCTAssertTrue(model.awaitsTranscript, "the created channel was not waiting")
@@ -442,11 +447,18 @@ final class NewChannelTests: XCTestCase {
         let app: AppModel
         let shell: ShellModel
 
-        var row: ChannelRow {
+        /// The row `FleetBrowserModel` draws for a created channel: its `decidingRule` names the
+        /// creation, because no listing rule listed it.
+        var row: ChannelRow { row(rule: FleetBrowserModel.creationRule) }
+
+        /// The row a *listed* channel gets, whose transcript has since gone.
+        var listedRow: ChannelRow { row(rule: "invented-listing-rule") }
+
+        private func row(rule: String) -> ChannelRow {
             ChannelRow(key: created, title: FleetBrowserModel.newChannelTitle, titleSource: .fallback,
                        preview: "", cwd: NewChannelTests.project, gitBranch: nil, agentName: nil,
                        mtime: Date(), isRecent: true, mode: .ownedCandidate,
-                       decidingRule: FleetBrowserModel.creationRule, isProvisional: false)
+                       decidingRule: rule, isProvisional: false)
         }
 
         init() async throws {
