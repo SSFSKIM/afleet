@@ -51,6 +51,11 @@ public actor Fleet: LifecycleAPI {
     /// The census a `/logout` built, held between the sheet and the user's answer.
     private var logoutPlan: LogoutPlan.Census?
 
+    /// How a new channel's `SessionID` is minted. Production is `SessionID()`; a test pins it so the id afleet
+    /// "chose" is the one a committed fixture's `auth_status.session_id` carries, which is what makes "the launch
+    /// line names the key's id and the file that appears is `<key>.jsonl`" one assertion rather than two.
+    private let newSessionID: @Sendable () -> SessionID
+
     private let updatesContinuation: AsyncStream<ChannelState>.Continuation
     /// Every supervisor's transitions, merged. A supervisor built later joins the same stream.
     public nonisolated let updates: AsyncStream<ChannelState>
@@ -78,8 +83,10 @@ public actor Fleet: LifecycleAPI {
                 diagnosticsDirectory: URL, clock: any Clock<Duration> = ContinuousClock(),
                 factory: ProcessFactory? = nil,
                 capture: @escaping @Sendable () -> RawCapture? = { nil },
-                runner: any DirectoryProcessRunner = FoundationDirectoryRunner()) {
+                runner: any DirectoryProcessRunner = FoundationDirectoryRunner(),
+                newSessionID: @escaping @Sendable () -> SessionID = { SessionID() }) {
         self.configHome = configHome
+        self.newSessionID = newSessionID
         self.environment = environment
         self.binary = binary
         self.store = store
@@ -199,16 +206,60 @@ public actor Fleet: LifecycleAPI {
 
     /// Tells the fleet a channel exists, where it runs and whether C3's index calls it recently active. It spawns
     /// nothing: `perform(.open)` does that, and it reads the recency recorded here.
-    public func register(_ key: ChannelKey, cwd: URL, recent: Bool) {
+    ///
+    /// **It is also the index's half of the `.new` transition.** A key the index lists is a key whose transcript
+    /// exists — `TranscriptIndex` builds its entries by reading files — so a registration for a channel whose
+    /// supervisor still holds `.new(id)` is evidence that `<projects>/<slug>/<id>.jsonl` is on disk, and
+    /// `--session-id` would from then on be refused with *Session ID <id> is already in use.* (2.1.263
+    /// `cli.pretty.js:294952`). The supervisor's own frame evidence is the other half; either is sufficient and
+    /// both are idempotent.
+    public func register(_ key: ChannelKey, cwd: URL, recent: Bool) async {
         seeds[key] = Seed(cwd: cwd, isRecent: recent)
-        _ = supervisor(for: key)
+        let supervisor = supervisor(for: key)
+        if await supervisor.transcriptObserved(), let launch = launches[key] {
+            var promoted = launch
+            promoted.session = .resume(key.session, fork: false)
+            promoted.worktree = nil
+            launches[key] = promoted
+        }
     }
 
     /// Register and open in one call: the facade's own entry point, with the recency supplied by the caller.
     @discardableResult
     public func open(_ key: ChannelKey, cwd: URL, recent: Bool) async throws -> ChannelState {
-        register(key, cwd: cwd, recent: recent)
+        await register(key, cwd: cwd, recent: recent)
         return try await perform(.open, on: key)
+    }
+
+    // MARK: - Creation
+
+    /// *New channel* (parent §8.2, §14 item 3): mint a `SessionID`, file a seed, build the supervisor with
+    /// `LaunchConfiguration(session: .new(id), ...)`, and answer the key.
+    ///
+    /// **It spawns nothing**, exactly as `register` spawns nothing: the surface selects the channel it was handed
+    /// and then asks for `perform(.open)` or a send, each of which goes through the ownership check and the §6.11
+    /// and §6.12 preconditions like any other spawn. A verb that spawned here would put a child into an untrusted
+    /// project before the trust banner could be drawn.
+    ///
+    /// The new channel is `isRecent` by construction: it was made a moment ago, so `perform(.open)` takes §7.4's
+    /// eager row and a send takes the resume row. Its launch line carries `--session-id <id>` until there is
+    /// evidence the transcript exists (`register` above, and the supervisor's first `transcript_mirror`), and
+    /// `--resume <id>` from then on.
+    @discardableResult
+    public func create(_ request: ChannelCreation) -> ChannelKey {
+        let key = ChannelKey(configHome: configHome.root, session: newSessionID())
+        seeds[key] = Seed(cwd: request.cwd, isRecent: true)
+        let launch = LaunchConfiguration(binary: binary, cwd: request.cwd, session: .new(key.session),
+                                         model: request.model, permissionMode: request.permissionMode,
+                                         agent: request.agent, effort: request.effort, name: request.name,
+                                         worktree: request.worktree,
+                                         // §6.12's *Isolated settings*: `[]` renders `--setting-sources ""`, and
+                                         // nil leaves the CLI's own default. `--strict-mcp-config` is not decided
+                                         // here — `SpawnPreconditions.evaluate` adds it exactly when the project
+                                         // declares `.mcp.json` servers, and it is the one place that reads them.
+                                         settingSources: request.isolatedSettings ? [] : nil)
+        _ = build(key: key, launch: launch, isRecent: true)
+        return key
     }
 
     /// The supervisor for a key, built on first use. A key with no seed runs in the config home and is not recent,

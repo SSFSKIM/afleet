@@ -243,6 +243,40 @@ public actor ChannelSupervisor {
     /// The record a restart relaunches from.
     public func runtimeState() -> SessionRuntimeState { runtime }
 
+    // MARK: - The `.new` to `.resume` transition (parent §6.1, §14 item 3)
+
+    /// Whether this channel's launch line still names `--session-id`. Read by the invariant's own tests and by
+    /// nothing in production, which asks through `transcriptObserved()` instead.
+    public func holdsNewSession() -> Bool {
+        if case .new = launchTemplate.session { return true }
+        return false
+    }
+
+    /// The transcript exists, so every later launch of this channel resumes it.
+    ///
+    /// `--session-id <id>` is **refused** once `<projects>/<projectKey>/<id>.jsonl` exists — *Session ID <id> is
+    /// already in use.*, 2.1.263 `cli.pretty.js:294952`, whose predicate at `:799909` is a `stat` of that file —
+    /// and `--resume <id>` needs the file to exist. So the flag has to change exactly once, at the moment the file
+    /// appears, which is the rule the engine's own background respawn applies (`:362837`: resume when the found
+    /// transcript `hasMessages`, else `--session-id`).
+    ///
+    /// The worktree goes with it. `-w <name>` is restart-required and "creates a new channel" (§7.4's table): the
+    /// CLI has already made the checkout and the transcript already lives under its slug, so passing `-w` again
+    /// would ask for a second one. The resumed launch's directory needs no computing — `system/init.cwd` moved
+    /// `runtime.cwd` to the worktree when the child announced it, and `composedFromRuntime()` launches from there.
+    ///
+    /// Answers whether it did anything, so the facade can promote its own copy of the launch line — the one
+    /// `preconditions(for:)` reads — under the same decision rather than under a second guess at it. Idempotent:
+    /// the two pieces of evidence, this channel's frames and the index's registration, arrive in either order and
+    /// often both.
+    @discardableResult
+    func transcriptObserved() -> Bool {
+        guard case .new(let id) = launchTemplate.session else { return false }
+        launchTemplate.session = .resume(id, fork: false)
+        launchTemplate.worktree = nil
+        return true
+    }
+
     /// Everything `CommandRouter.route` reads off a channel, in one hop: the engine's own report of what it offers
     /// and what the channel is currently running. Nothing here is derived; each value is the newest one the engine
     /// sent, kept where it arrived.
@@ -1662,6 +1696,19 @@ public actor ChannelSupervisor {
                 turnRunning = true
                 pushEligibility()
                 publish()
+            case .transcriptMirror(let mirror):
+                // The first evidence a created channel's transcript exists, and the earliest the engine offers:
+                // `--session-mirror` emits `transcript_mirror {filePath, entries}` with the JSONL records the CLI
+                // *just wrote* (§6.1, *Parity F-20*), so the file named is on disk. In `Fixtures/plain-two-turn` —
+                // recorded as a fresh `--session-id` launch — the first one arrives at frame 17, ahead of the
+                // `user` echo at 19 and the turn's `result` at 36, which is why the mirror is the chosen evidence
+                // and not the `result`.
+                //
+                // Matched on the file's own name, because a mirror can also name a subagent's sidechain file and
+                // that one says nothing about this channel's transcript.
+                if mirror.filePath.hasSuffix("/\(key.session.description).jsonl") {
+                    transcriptObserved()
+                }
             case .system(.initialize(let initFrame)):
                 state.apiKeySource = initFrame.apiKeySource
                 lastSystemInit = initFrame.fields
