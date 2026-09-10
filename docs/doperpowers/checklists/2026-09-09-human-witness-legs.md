@@ -391,5 +391,5 @@ malformed-answer rendering and unknown requests. That is not end-to-end evidence
 leg here: `send-message-delivery` still awaits human review/signature and non-skipping replay;
 New channel, trust entry and the isolation consumer remain implementation-blocked. C6
 acceptance remains open under the composite Outcomes' closure conditions. Tracker 397/428
-fixes merged with verification at `b2f1607`; these code checks do not check any human-witness box; tracker 435 still lacks relay-conclusion
-persistence across rebuild without observation. No boxes are checked by this correction.
+fixes merged with verification at `b2f1607`; these code checks do not check any human-witness box; tracker 435 is closed at `749246b` (relay conclusions
+taken at publish and at release), which likewise checks no human-witness box. No boxes are checked by this correction.

@@ -696,7 +696,7 @@ This review and its test floor do not demonstrate every inherited acceptance ite
 | `nested-depth-2` | C6.4's G1 in three arms over the corrected clause: the join alone when the sidecar is withheld, the sidecar first when present with the join's agreeing answer retained, a disagreeing source drawn rather than hidden; one node per repeated `task_started`. A parent whose sidecar is read after its child's now lists the child (`ec054f6`). |
 | The differential invariant | Held by both readers: no reducer was added by any leaf; every drawn item is a `TimelineItem` or a C3 overlay entry, and the relay's records are annotations on the user row, never items. |
 | X9 | No new direct write anywhere under `App/` from the four leaves; `AppFileWrites` still observes the seam; the config-home witnesses of C6.2, C6.3 and C6.4's zero-turn gates read zero unattributed changes. The prompted scenarios were never exercised on this account, so their witness is the checklist's. |
-| The seams (Y2–Y8) | Y2's one component in four hosts; Y3's `.thread` handover and `.agents` registration both in `performLaunch` with no double registration across restart; Y4 through the installed navigator and one selection store; Y5's every action behind X5; Y7's one reservation set and the fold's signal on every row; Y8's reading on the row (its rendered placement is 398). C6.4's seam review found writers and readers, but did not prove relay conclusions persist without an observation before rebuild (tracker 435 remains open). The seams the readers broke were behind the product path, not between leaves: a callback as the only writer of the retraction registry (`91e0902`), a *Retry* capturing a workspace that *Check again* replaces and a relay reading its turn boundary from wire-only frames a rebuild does not carry (`ec054f6`), process exit retiring decisions but not agent nodes, and a scroll anchor that could be evicted (`ec054f6`). |
+| The seams (Y2–Y8) | Y2's one component in four hosts; Y3's `.thread` handover and `.agents` registration both in `performLaunch` with no double registration across restart; Y4 through the installed navigator and one selection store; Y5's every action behind X5; Y7's one reservation set and the fold's signal on every row; Y8's reading on the row (its rendered placement is 398). C6.4's seam review found writers and readers, but did not prove relay conclusions persist without an observation before rebuild; closed 2026-09-11 at `749246b` (tracker 435): the registry observes every channel publish and the release of a channel model, beside the retraction observer, so a conclusion reached with nothing drawing it is the one a later reading gives. The seams the readers broke were behind the product path, not between leaves: a callback as the only writer of the retraction registry (`91e0902`), a *Retry* capturing a workspace that *Check again* replaces and a relay reading its turn boundary from wire-only frames a rebuild does not carry (`ec054f6`), process exit retiring decisions but not agent nodes, and a scroll anchor that could be evicted (`ec054f6`). |
 
 **What the recomposition found that no leaf could.** Every corrective was a clause that held at the
 component and not on the product path: a value with a test that supplied it by hand and no caller; a
@@ -714,8 +714,8 @@ not complete acceptance coverage; the checklist now also names items 3, 47 and 4
 implementation blockers from policy-blocked live evidence. Tracker 162 remains a cross-owner C6
 acceptance prerequisite, not an exclusion. Fixes for 397 (readbacks after drain/reopen) and 428
 (rewind's main-stream UUID) are **merged and verified** at `b2f1607`: focused regressions failed
-first, then passed; the independent review was clean. The tested executable tree matches the merge. Tracker 435 still
-lacks relay-conclusion persistence across rebuild without observation; 427 still lacks production
+first, then passed; the independent review was clean. The tested executable tree matches the merge. Tracker 435 is **closed** at `749246b` (relay conclusions taken at publish and at release; three review
+rounds, the last clean; floor 2,516 executed, 30 skipped, 0 failed; residue filed as 451 and 452); 427 still lacks production
 item-builder performance coverage. Other corrective entries (436–441), leaf debt and the deferred
 Codex review route remain recorded with their owners.
 
@@ -723,8 +723,8 @@ Codex review route remain recorded with their owners.
 integrated tree by the CLI or fixtures exactly as specified. This includes shell/lifecycle delivery
 of tracker 162 and C6 verification of item 3's afleet-selected UUID, new transcript and first-turn
 AI title, item 47's new-channel trust entry through owned spawn, and the isolated-settings spawn
-consumer used by permission legs. Acceptance-affecting gaps must be resolved and verified, including
-435's unobserved-rebuild relay conclusion. The 397/428 fixes have merged with verification; they
+consumer used by permission legs. Acceptance-affecting gaps must be resolved and verified; 435's
+unobserved-rebuild relay conclusion is resolved at `749246b`. The 397/428 fixes have merged with verification; they
 do not establish the remaining requirements. The required human/live legs must then actually be witnessed on an account that permits
 them, including item 43's malformed-answer denial and continued channel, with the X9 witness;
 `send-message-delivery` must be human-reviewed and signed, verified, and its replay test execute
@@ -804,3 +804,13 @@ leaf executed against differently without a corrective now on `main`.
   total, 2,476 passed, 30 skipped, zero failures across 19 bundles; 281 Python tests passed; import
   and wiring checks clean. The merge's executable tree matches the tested branch. Acceptance stays
   open for the prerequisites above; no live witness or fixture signature was added.
+- 2026-09-11 corrective `749246b` closes tracker 435: `AgentRelayRegistry.observe` runs the same
+  one-pass derivation on every `ChannelTimelineModel.publish()` and on the model's release, beside
+  the retraction observer, gated O(1) on unsettled records, so a relay conclusion reached while
+  nothing drew it survives a rebuild without turn summaries. Two delivery-scan bounds were added in
+  review: a settled *Not delivered* yields only to a frame before a competing younger same-text send,
+  and an unsettled record yields to a retry descendant or to a later turn's send; within one open
+  turn the first forwarded frame stays the older send's (C6.4's rule). Three review rounds on Opus,
+  the last clean; residue filed as 451 and 452. Floor 2,516 executed, 30 skipped, zero failures
+  across 19 bundles; the merge's tree matches the reviewed branch. Acceptance stays open for
+  tracker 162, the live witnesses and the fixture signature.
