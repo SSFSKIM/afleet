@@ -4155,10 +4155,19 @@ needs more. Nothing above is renumbered.
      publish path: `AgentRelayRegistry.observe(_:in:)` runs the reading's own one-pass `advance` and
      stores whatever settled, answering nothing, and `ChannelTimelineModel.publish()` calls it
      beside `retraction.observe` — the model folds and publishes for a channel nobody is drawing,
-     which is the only place a conclusion nothing asked for can be taken. It returns before the pass
-     for a channel with no records and for one whose every record has settled, so the derivation
-     runs only while a channel holds a relay in flight; the registry reaches the model at
-     construction, from the app's one `AppModel.agentRelay` through `ChannelTimelineRegistry.relay`.
+     which is where a conclusion nothing asked for is taken. It returns before the pass for a
+     channel with no records and for one whose every record has settled, so the derivation runs only
+     while a channel holds a relay in flight; the registry reaches the model at construction, from
+     the app's one `AppModel.agentRelay` through `ChannelTimelineRegistry.relay`.
+
+     **`ChannelTimelineModel.close()` is the second place, and it is load-bearing.** The release
+     cancels the publish path, so a conclusion the fold took after the last publish — inside the
+     coalescer's trailing window, or on the hop before the effects loop resumed — would have had
+     nowhere to be read, and the release is *Check again*, which brings the channel back with no
+     turn boundary in it. So `close()` hands the registry the ingestion's final timeline before
+     tearing it down, unconditionally: whether a publish was *armed* is a different question from
+     whether the fold holds something no publish carried, and the registry's own gate is what makes
+     the unconditional call free.
      Y8 is unchanged: no item, no persisted store, and no change to what a row or a node draws while
      the evidence is present.
 
@@ -4270,7 +4279,9 @@ needs more. Nothing above is renumbered.
      the same run — O(records) — and each competing send it finds costs an O(items) `firstIndex` for
      that send's prompt echo, plus one more for the older record's turn close. So the cost that
      rides each publish is O(settled records × items) for the overtakes, plus O(records²) filtering,
-     plus O(items) per competing send, plus the one pass for the record still in flight — and it
+     plus O(items) per competing send, plus — for each record still in flight — the `contested`
+     computation that has been there since `47b2eb8`, which is an `items.firstIndex` for the prompt
+     echo of **every** younger record, so O(younger records × items) rather than one pass, and it
      grows with the channel's whole relay history rather than with what is unresolved. The
      competing-send terms are nil-cheap in the ordinary case: the filter finds nothing unless one
      text was relayed to one run twice, and no scan is taken when it does not. It is 436's shape
@@ -4284,3 +4295,31 @@ needs more. Nothing above is renumbered.
      identity) — which is the one closer that serves both entries, because it removes the repeated
      pass for the reading and for the publish alike. Owner: whoever takes 436. Raised by this
      corrective's own reading of its cost gate, sharpened by its review round.
+
+## From corrective/c6-relay-conclusion's review rounds, 2026-09-11 (numbered from 452)
+
+452. **The unsettled delivery bound is a live-timeline bound: a rebuild loses it.**
+     `supersedingSend`'s second arm — a competing send is a whole turn later — reads this record's
+     turn close out of the overlay, and §7.3 puts the turn summary there and in no transcript
+     record. So on a timeline rebuilt from the files, *Check again*'s, that arm answers nothing, and
+     an unsettled older record can once again take a later same-text send's forwarded frame: the
+     window is the gap between that frame arriving and the younger send's own `tool_result`, because
+     until the result lands the younger record's call is only `.running` and it has not claimed the
+     frame. The retry-lineage arm is unaffected — a record's `retryOf` is the app's own bookkeeping
+     and no timeline carries it — so the case that survives a rebuild is an *independent* re-send of
+     one text to one run. Two things narrow it to residue: a record that concluded before the
+     rebuild is claimed settled-first and never re-derived at all, and the publish and release
+     observations now take those conclusions whether or not anything drew the channel, which is what
+     this corrective is. What is left is an older record that never concluded, on a channel that
+     relayed one text to one run twice without a *Retry*, read inside one tool call's window after a
+     rebuild. Closing it means a turn boundary the transcript carries, which is C3's fold and not
+     this leaf's to invent, or attributing a frame by the call it followed rather than by the prompt
+     echo — which needs the `tool_use` id on the forwarded frame, and the engine writes none. Owner:
+     whoever takes the relay next, with 435's successor.
+
+     **And one line beside it.** `advance(_:in:settled:)` builds the retry-lineage map with
+     `Dictionary(uniqueKeysWithValues:)`, which traps on a duplicate record id. It is unreachable
+     today: every caller passes `records(in:)`, whose ids are minted per `open` and never repeated.
+     A caller that ever hands it a concatenation of two channels' records, or the same record twice,
+     would take the app down rather than mis-read a state — `uniquingKeysWith:` is the one-word
+     change if that day comes.

@@ -188,6 +188,15 @@ enum AgentRelayMachine {
     ///
     /// The turn close is read only where a competing send exists at all, so the ordinary channel —
     /// which has never relayed one text twice — pays a filter over the records and no scan.
+    ///
+    /// **The frame in the gap belongs to neither send, and reads as the older one's failure.** A
+    /// genuinely late delivery of the older message that lands after the younger send's prompt echo
+    /// but before the younger send's own call is bounded away from the older record and is not yet
+    /// the younger record's either, so the older row reads *Relayed*, or *Not delivered* with
+    /// *Retry*, about a message that had in fact arrived. Which send such a frame belongs to is
+    /// undecidable from the timeline, and this is the unreassuring direction of it: item 51 exists
+    /// to end silent success, so a delivery reported late — or offered a retry the user may decline
+    /// — is the arm to be wrong on. Accepted deliberately.
     private static func supersedingSend(of record: AgentRelayRecord,
                                         among younger: ArraySlice<AgentRelayRecord>,
                                         in items: [TimelineItem],
@@ -496,12 +505,14 @@ enum AgentRelayMachine {
     /// assistant message of the run is the agent *replying*, and a reply quoting the message back is
     /// not the message arriving.
     ///
-    /// `contested` is the first index a **younger send of the same text to the same run** could
-    /// have produced a frame at — its own prompt echo, from `competingSend(with:among:in:)`. Both
-    /// callers pass it and compute it the same way: the settled overtake and the unsettled scan both
-    /// reach a retry's frame before the retry does. Nil where the channel holds no competing send,
-    /// which is every relay that was never re-sent, and the scan then runs to the end of the items
-    /// as it always has.
+    /// `contested` is an index this record's delivery cannot lie at or after: the prompt echo of a
+    /// younger send whose claim on a frame beats this record's. **The two callers compute it
+    /// differently**, because their records are in different positions — the settled overtake passes
+    /// `competingSend(with:among:in:)`, which is any younger send of the same text to the same run,
+    /// and the unsettled scan passes `supersedingSend(of:among:in:retries:)`, which is the narrower
+    /// set. The inline note in `advance(_:in:settled:)`'s unsettled loop says why they differ, and
+    /// both helpers carry the reasoning. Nil where no such send exists, which is every relay that
+    /// was never re-sent, and the scan then runs to the end of the items as it always has.
     private static func delivery(of record: AgentRelayRecord, in items: [TimelineItem],
                                  after relay: Int, claiming claimed: Set<String>,
                                  before contested: Int? = nil) -> String? {
