@@ -268,7 +268,11 @@ final class AgentRelayTests: XCTestCase {
         wire.result()
         wire.publish()
 
-        // A later turn of the same channel, which relays something else to the same run.
+        // A later turn of the same channel: an ordinary prompt — **no relay record of this app's**
+        // — in which the model relays something else to the same run. That is what leaves the older
+        // record's scan unbounded once the boundary is gone: the bound the machine has is a younger
+        // *record's* own prompt echo, and there is no younger record here.
+        wire.echo(promptUUID: RelayWire.secondPromptUUID)
         wire.sendMessageCall(to: RelayWire.target, id: RelayWire.secondSendCall,
                              message: RelayWire.secondMessage)
         wire.sendMessageResult(id: RelayWire.secondSendCall, success: true)
