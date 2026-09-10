@@ -509,6 +509,7 @@ final class AgentRelayRegistry {
     /// delivery stays correlated one-to-one.
     func outcomes(in channel: ChannelKey, of timeline: ChannelTimeline) -> [AgentRelayRecord.ID: AgentRelayMachine.Outcome] {
         let records = records(in: channel)
+        derivations += 1
         let outcomes = AgentRelayMachine.advance(records, in: timeline, settled: settlements)
         for record in records {
             guard let outcome = outcomes[record.id], outcome.isSettled else { continue }
@@ -516,6 +517,41 @@ final class AgentRelayRegistry {
         }
         return outcomes
     }
+
+    /// The same pass, run because the channel **published** rather than because a surface asked, so
+    /// that whatever settled is stored whether or not anything drew it.
+    ///
+    /// **Why the publish and not the ask.** A settlement is memory, and memory written only when a
+    /// row or a node asks is memory a channel nobody is looking at never gets. The evidence a *Not
+    /// delivered* is read from includes the turn's `result`, which is wire-only (§7.3): a relay
+    /// whose turn closed while the reader was on another channel has nothing stored when *Check
+    /// again* rebuilds the timeline from the files, and the record then reads *Pending* for good —
+    /// or, worse, scans on past its own vanished turn boundary and takes a later turn's
+    /// `SendMessage` call as its own. The timeline model keeps folding and keeps publishing for a
+    /// channel that is not in view, which is exactly the case a reading cannot cover.
+    ///
+    /// **It answers nothing and draws nothing** (contract Y8): no item, no persisted store, and no
+    /// change to what a row or a node shows while the evidence is still there. The only difference
+    /// is that a conclusion reached with nobody looking is the conclusion a later reading gives.
+    ///
+    /// **The cost gate.** It returns before the pass for a channel with no records and for one whose
+    /// every record has already settled, so the derivation runs only while a channel holds a relay
+    /// still in flight — few, and for the length of a turn. Nothing else is compared: a publish
+    /// happens *because* the fold changed, so a memo of the timeline's item count would skip almost
+    /// no pass a streaming channel makes and would cost a comparison on every one of them. What is
+    /// left of the shape is tracker 451.
+    func observe(_ timeline: ChannelTimeline, in channel: ChannelKey) {
+        guard records(in: channel).contains(where: { settlements[$0.id] == nil }) else { return }
+        _ = outcomes(in: channel, of: timeline)
+    }
+
+    /// How many times the derivation has run: a reading, or a publish that passed the gate above.
+    ///
+    /// Counted for the reason `RetractionRegistry.decodes` is — the gate is invisible from the
+    /// state, because the derivation is idempotent and a pass that was skipped changes nothing a
+    /// surface can see, so the only way to assert it is the number of passes. `@ObservationIgnored`
+    /// for `settlements`' reason: it is bookkeeping about work already done and nothing draws it.
+    @ObservationIgnored private(set) var derivations = 0
 
     /// What the row for one sent message draws (contract Y8), or nil where this prompt sent no relay
     /// — which is every ordinary message in every channel, and is why the row draws nothing by

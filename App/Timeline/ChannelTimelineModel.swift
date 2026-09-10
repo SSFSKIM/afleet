@@ -230,14 +230,23 @@ final class ChannelTimelineModel {
     /// The ingestion's own lifetime, owned here and not by whatever called `open`. See `open`.
     @ObservationIgnored private var openingTask: Task<Void, Never>?
 
+    /// The app's one relay registry, handed in at construction, and nil for a model a test built
+    /// without one — which then behaves exactly as it did before this seam existed.
+    ///
+    /// **Handed in rather than reached for.** The registry is app-scoped and there is one of it
+    /// (`AppModel.agentRelay`); a model that looked it up through a shared instance would be a
+    /// second way to reach the one object, and contract Y8's whole point is that there is one.
+    @ObservationIgnored private let relay: AgentRelayRegistry?
+
     /// `lifecycle` is the events seam. Production passes `workspace.fleet`, which is an `AppFleet`
     /// and therefore a `LifecycleAPI`; a test passes a `LifecycleAPI` double, which is the only way
     /// the `events(of:)` call log the tap-contract test asserts on can exist.
     init(key: ChannelKey, workspace: Workspace?, lifecycle: (any LifecycleAPI)? = nil,
-         changeFeed: ChangeFeedSubscribing? = nil) {
+         changeFeed: ChangeFeedSubscribing? = nil, relay: AgentRelayRegistry? = nil) {
         self.key = key
         self.workspace = workspace
         self.lifecycle = lifecycle ?? workspace?.fleet
+        self.relay = relay
         if let changeFeed {
             subscribeToChanges = changeFeed
         } else {
@@ -565,6 +574,14 @@ final class ChannelTimelineModel {
         // nobody presses that: a registry fed only where a card answers never hears about it, and
         // the messages the refusal took back stay on screen for the life of the channel.
         retraction.observe(next.overlay, in: key)
+        // Contract Y8's derivation, hooked here for `retraction`'s reason and one more of its own: a
+        // relay's conclusion is read partly from evidence a rebuild does not carry (§7.3 puts the
+        // turn's `result` in the ephemeral overlay), so a conclusion nothing asked for while this
+        // channel was off screen is a conclusion *Check again* destroys. This model keeps folding
+        // and keeps publishing for a channel nobody is drawing, which is the only place that
+        // conclusion can be taken. Nil in a test that built no registry, and a no-op for every
+        // channel that has relayed nothing — see `AgentRelayRegistry.observe(_:in:)`.
+        relay?.observe(next, in: key)
         fanout.yield(next)
     }
 

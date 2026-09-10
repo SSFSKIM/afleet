@@ -349,6 +349,39 @@ final class ChannelTimelineModelTests: XCTestCase {
                        "the settled dialog's message survived the read")
     }
 
+    // MARK: - Contract Y8's derivation, from the same publish (tracker 435)
+
+    /// The channel's publish advances the relay registry, for a channel no surface is drawing.
+    ///
+    /// The registry's conclusions were written only where a row or a node asked for a reading, and
+    /// the evidence one of item 51's arms is read from is wire-only (§7.3's turn boundary), so a
+    /// relay whose turn closed while the reader was elsewhere had nothing stored when *Check again*
+    /// rebuilt the timeline from the files. `AgentRelayTests` holds the conclusions themselves; what
+    /// this asserts is the seam — that the derivation is reached from the model's own publish and
+    /// from the registry the composition root installed, with nothing rendered at all.
+    ///
+    /// The count is the only observable: the derivation is idempotent and its gate returns before
+    /// the pass for a channel that has relayed nothing, so a publish that reached it is a pass.
+    func testThePublishAdvancesTheRelayRegistryWithNothingDrawn() async throws {
+        let rig = try await Rig(fixtures: ["plain-two-turn"])
+        let key = rig.keys[0]
+        let relay = AgentRelayRegistry()
+        rig.registry.relay = relay
+        // One record, so the registry's cost gate has something in flight to advance. Its prompt is
+        // invented and this channel never echoed it, which is enough: what is asserted is that the
+        // publish ran the derivation, not what the derivation concluded.
+        relay.open(promptUUID: "eeeeeee1-1111-4111-8111-eeeeeeeeeee1", target: "task_invented_wiring01",
+                   textDigest: AgentRelayDigest.of("an invented errand"), in: key, resend: { _, _ in })
+
+        let model = rig.registry.model(for: key)
+        await model.open(rig.row(0, origin: .archived))
+
+        let advanced = await Self.settle(until: { relay.derivations > 0 })
+        XCTAssertTrue(advanced,
+                      "\(model.items.count) item(s) published and the derivation ran "
+                      + "\(relay.derivations) time(s), so no publish reached the registry")
+    }
+
     /// A `refusal_fallback_prompt` naming the uuids it takes back: the recorded request with its
     /// `retractedMessageUuids` replaced and re-keyed, so everything but the list under test is the
     /// engine's and every identifier this suite states is invented (§11).
