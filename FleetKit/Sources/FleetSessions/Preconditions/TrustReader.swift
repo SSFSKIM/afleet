@@ -39,17 +39,29 @@ enum RealPath {
 
 /// The canonical root of a channel: the real path of its directory walked up to the first entry containing `.git`
 /// (a file or a directory — a worktree's `.git` is a file), else the real path itself (parent §6.12, spec
-/// *Preconditions*).
+/// *Preconditions*) — and for a **linked worktree**, the common repository root that entry points at.
 public enum ProjectRoot {
     /// The root every trust and consent decision is keyed on, and the git root when there is one. They are the same
     /// directory whenever a `.git` was found; `gitRoot` is nil exactly when the walk found none.
+    ///
+    /// **A linked worktree resolves to the repository that owns it, because that is the directory the engine keys
+    /// on.** The engine's own resolver follows the checkout's `gitdir:` and `commondir` and answers the common
+    /// repository root under the guards `WorktreeLayout.commonRepositoryRoot(ofWorktreeAt:)` transcribes (bundle
+    /// `SPEC/03-settings-and-configuration.md` §15.2). Stopping at the checkout instead — which this did until
+    /// 2026-09-11 — keys trust on a path no `projects` entry in the global config document names, so **every** `-w`
+    /// channel's spawn is refused `untrusted` on a repository the user trusted long ago. §8.2 promotes *New
+    /// isolated session*, so that is not a corner: it is the ordinary second spawn of a worktree channel.
+    ///
+    /// A checkout whose guards do not hold keeps the checkout root, which is the safe direction: a `.git` file that
+    /// merely looks like a worktree link cannot move the trust key somewhere the engine never reads.
     public static func canonical(for cwd: URL) -> (root: URL, gitRoot: URL?) {
         let resolved = RealPath.string(cwd)
         var probe = resolved
         let fm = FileManager.default
         while true {
             if fm.fileExists(atPath: probe + "/.git") {
-                let root = URL(filePath: probe)
+                let found = URL(filePath: probe, directoryHint: .isDirectory)
+                let root = WorktreeLayout.commonRepositoryRoot(ofWorktreeAt: found) ?? URL(filePath: probe)
                 return (root, root)
             }
             guard let slash = probe.lastIndex(of: "/"), slash != probe.startIndex else { break }

@@ -49,6 +49,9 @@ final class NewChannelTests: XCTestCase {
         let cwd: URL
         /// Every launch the factory was asked to build a process for, in spawn order.
         let launches = LaunchLog()
+        /// The scripted handles the factory built, in spawn order, so a test can push a frame into the
+        /// process the channel is actually running.
+        let handles = HandleLog()
         private let files: ScriptedHolderFiles
         private let store: FileStateStore
         private let storeDirectory: URL
@@ -91,6 +94,7 @@ final class NewChannelTests: XCTestCase {
                 environment.variables["FAKE_CLAUDE_CWD"] = cwd.path(percentEncoded: false)
             }
             let log = launches
+            let handleLog = handles
             let childEnvironment = environment
             let configHome = home.configHome
             let wireSink = FileDiagnostics(directory: diagnosticsDirectory)
@@ -101,8 +105,10 @@ final class NewChannelTests: XCTestCase {
                           factory: { epoch, launch in
                               log.append(launch)
                               guard liveFirstSpawn, epoch.rawValue == 1 else {
-                                  return ScriptedProcessHandle(epoch: epoch, session: session,
-                                                               pid: 600_000 + Int32(epoch.rawValue))
+                                  let handle = ScriptedProcessHandle(epoch: epoch, session: session,
+                                                                     pid: 600_000 + Int32(epoch.rawValue))
+                                  handleLog.append(handle)
+                                  return handle
                               }
                               let capturing = CapturingDiagnostics(forwardingTo: wireSink)
                               let process = ClaudeProcess(epoch: epoch, launch: launch,
@@ -164,6 +170,34 @@ final class NewChannelTests: XCTestCase {
         }
     }
 
+    // MARK: - Invented frames
+
+    /// A `system/init` naming `cwd`, built by hand.
+    ///
+    /// Every value is invented — no engine byte reaches this file (§11) — and the one field the tests read is
+    /// `cwd`, which is the engine's report of where the child actually started. That report is the whole of the
+    /// worktree relocation: `-w <name>` makes the CLI create the checkout during startup, so the first `system/init`
+    /// of such a launch already names it.
+    static func systemInit(cwd: String, session: SessionID) -> Frame {
+        let object: [String: Any] = [
+            "type": "system", "subtype": "init", "cwd": cwd, "session_id": session.description,
+            "tools": [], "mcp_servers": [], "model": "invented-model", "permissionMode": "default",
+            "slash_commands": [], "apiKeySource": "none", "claude_code_version": "0.0.0",
+            "output_style": "invented", "skills": [], "plugins": [],
+            "uuid": "00000000-0000-4000-8000-0000000000f1",
+        ]
+        return FrameDecoder.decode(line: try! JSONSerialization.data(withJSONObject: object))
+    }
+
+    /// A `transcript_mirror` naming `file`, with or without records in it.
+    static func mirror(file: URL, entries: Int) -> Frame {
+        let object: [String: Any] = [
+            "type": "transcript_mirror", "filePath": file.path(percentEncoded: false),
+            "entries": (0..<entries).map { ["type": "invented-record", "index": $0] },
+        ]
+        return FrameDecoder.decode(line: try! JSONSerialization.data(withJSONObject: object))
+    }
+
     /// The launches a factory was asked for. A class because a `ProcessFactory` is a synchronous,
     /// non-isolated closure and cannot reach an actor.
     private final class LaunchLog: @unchecked Sendable {   // `lock` serialises the one field
@@ -171,6 +205,15 @@ final class NewChannelTests: XCTestCase {
         private var entries: [LaunchConfiguration] = []
         func append(_ launch: LaunchConfiguration) { lock.lock(); entries.append(launch); lock.unlock() }
         var all: [LaunchConfiguration] { lock.lock(); defer { lock.unlock() }; return entries }
+        var count: Int { lock.lock(); defer { lock.unlock() }; return entries.count }
+    }
+
+    /// The scripted handles a factory built, for the same reason and with the same shape.
+    private final class HandleLog: @unchecked Sendable {   // `lock` serialises the one field
+        private let lock = NSLock()
+        private var entries: [ScriptedProcessHandle] = []
+        func append(_ handle: ScriptedProcessHandle) { lock.lock(); entries.append(handle); lock.unlock() }
+        var all: [ScriptedProcessHandle] { lock.lock(); defer { lock.unlock() }; return entries }
         var count: Int { lock.lock(); defer { lock.unlock() }; return entries.count }
     }
 
@@ -246,15 +289,102 @@ final class NewChannelTests: XCTestCase {
                       "the worktree name did not reach the launch line")
     }
 
+    /// **The worktree flag and the session flag move on different evidence, because the two facts are
+    /// different ages.**
+    ///
+    /// `-w <name>` makes the CLI create the checkout during startup, so from the first `system/init`
+    /// the worktree exists and that frame's `cwd` is it — while the transcript still does not exist
+    /// until the first record. Every respawn in the gap between them is a real one: the thirty-minute
+    /// reap's resume, a crash respawn, a restart-required change, a quit and return inside one app
+    /// run. Each of those used to pass `-w <name>` again, from *inside* the checkout, asking the CLI
+    /// for a second worktree under the first (§7.4's table: `--worktree` is restart-required and
+    /// "creates a new channel").
+    func testTheWorktreeFlagIsClearedByTheHandshakeAndNotByTheTranscript() async throws {
+        let harness = try Harness()
+        defer { Task { await harness.tearDown() } }
+
+        let checkout = harness.cwd.appending(path: ".claude/worktrees/invented-worktree",
+                                             directoryHint: .isDirectory)
+        // The CLI would make this during startup; here the test does, and trusts it, because the
+        // subject is which flag the respawn carries and not which directory the engine keys on —
+        // that is `WorktreeTrustTests`'.
+        try FileManager.default.createDirectory(at: checkout, withIntermediateDirectories: true)
+        try harness.home.trust(root: checkout)
+        let key = await harness.fleet.create(ChannelCreation(cwd: harness.cwd,
+                                                             worktree: .named("invented-worktree")))
+        _ = try await harness.fleet.perform(.open, on: key)
+        let built = await harness.fleet.channel(key)
+        let supervisor = try XCTUnwrap(built)
+
+        // The engine reports where it started: the checkout it just made.
+        await supervisor.handle(event: .frame(Self.systemInit(cwd: checkout.path(percentEncoded: false),
+                                                              session: key.session),
+                                              ProcessEpoch.first))
+        let stillNew = await supervisor.holdsNewSession()
+        let worktreeGone = await supervisor.holdsWorktree()
+        XCTAssertTrue(stillNew, "the handshake moved the session flag, which only a transcript may do")
+        XCTAssertFalse(worktreeGone, "the handshake left the launch line asking for a second checkout")
+
+        // A respawn before any record. A restart-required change is the case a user is most likely to
+        // reach here — it is the one thing the header offers on a channel that has not been sent to.
+        try await harness.waitFor("the created channel came up") { [fleet = harness.fleet] in
+            await fleet.state(of: key)?.origin == .owned(.ready)
+        }
+        _ = try? await harness.fleet.perform(.quiescentRestart(RestartRequest(promptSuggestions: true)), on: key)
+        try await harness.waitFor("the respawn built a process") { [launches = harness.launches] in
+            launches.count >= 2
+        }
+        let respawn = try XCTUnwrap(harness.launches.all.dropFirst().first)
+        let beforeRecord = try Self.argv(of: respawn)
+        XCTAssertTrue(Self.value(of: "--session-id", in: beforeRecord) == key.session.description,
+                      "a respawn before the first record did not pass --session-id")
+        XCTAssertFalse(beforeRecord.contains("-w"),
+                       "a respawn from inside the checkout asked the CLI for a second worktree")
+        XCTAssertTrue(respawn.cwd.path(percentEncoded: false) == checkout.path(percentEncoded: false),
+                      "the respawn did not launch from the checkout the engine reported")
+
+        // Now the transcript. Only the session flag is left to move.
+        let transcript = harness.home.url.appending(path: "projects/invented/\(key.session).jsonl")
+        await supervisor.handle(event: .frame(Self.mirror(file: transcript, entries: 1),
+                                              ProcessEpoch(rawValue: 2)))
+        let movedNow = await supervisor.holdsNewSession()
+        XCTAssertFalse(movedNow, "the transcript's own evidence did not move the session flag")
+    }
+
+    /// A mirror carrying **no records** does not move the session flag.
+    ///
+    /// The frame's promise is the records the CLI just wrote; one carrying none has written none, so
+    /// the file may still not exist and `--resume` would be refused outright.
+    func testAMirrorWithNoRecordsDoesNotMoveTheSessionFlag() async throws {
+        let harness = try Harness()
+        defer { Task { await harness.tearDown() } }
+
+        let key = await harness.fleet.create(ChannelCreation(cwd: harness.cwd))
+        _ = try await harness.fleet.perform(.open, on: key)
+        let built = await harness.fleet.channel(key)
+        let supervisor = try XCTUnwrap(built)
+        let transcript = harness.home.url.appending(path: "projects/invented/\(key.session).jsonl")
+
+        await supervisor.handle(event: .frame(Self.mirror(file: transcript, entries: 0),
+                                              ProcessEpoch.first))
+        let afterEmpty = await supervisor.holdsNewSession()
+        XCTAssertTrue(afterEmpty, "an empty mirror moved the launch line to --resume")
+
+        await supervisor.handle(event: .frame(Self.mirror(file: transcript, entries: 1),
+                                              ProcessEpoch.first))
+        let afterRecords = await supervisor.holdsNewSession()
+        XCTAssertFalse(afterRecords, "a mirror carrying records did not move the launch line")
+    }
+
     // MARK: - The transition, by the index's evidence
 
     /// Directive 3(b): a `register` for a key whose supervisor still holds `.new` is the index
     /// saying the transcript exists, so every later spawn resumes it.
     ///
-    /// The `-w` clause is in the same test on purpose. `--worktree` is restart-required and "creates
-    /// a new channel" (§7.4's table): a resumed launch that passed it again would ask the CLI for a
-    /// second checkout, so the two flags have to move together or not at all.
-    func testARegistrationPromotesTheLaunchLineToResumeAndDropsTheWorktree() async throws {
+    /// The worktree is **not** this evidence's to clear — see
+    /// `testTheWorktreeFlagIsClearedByTheHandshakeAndNotByTheTranscript`, which is where that flag
+    /// lives, because the checkout exists a whole handshake before the transcript does.
+    func testARegistrationPromotesTheLaunchLineToResume() async throws {
         let harness = try Harness()
         defer { Task { await harness.tearDown() } }
 
@@ -271,8 +401,10 @@ final class NewChannelTests: XCTestCase {
                       "the spawn after the index listed the channel did not resume its own session")
         XCTAssertFalse(argv.contains("--session-id"),
                        "a spawn after the transcript exists still passed --session-id, which the engine refuses")
-        XCTAssertFalse(argv.contains("-w"),
-                       "a resumed channel asked the CLI for a second worktree")
+        // The checkout is still asked for, because no handshake has reported one: an indexed
+        // transcript says nothing about whether the CLI has made the worktree.
+        let stillAsks = await harness.fleet.channel(key)?.holdsWorktree()
+        XCTAssertTrue(stillAsks == true, "the index's evidence cleared a flag only a handshake may clear")
     }
 
     /// The transition answers **once**, and that return value is what the facade acts on.

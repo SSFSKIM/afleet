@@ -246,10 +246,32 @@ public actor ChannelSupervisor {
     // MARK: - The `.new` to `.resume` transition (parent §6.1, §14 item 3)
 
     /// Whether this channel's launch line still names `--session-id`. Read by the invariant's own tests and by
-    /// nothing in production, which asks through `transcriptObserved()` instead.
-    public func holdsNewSession() -> Bool {
+    /// nothing in production, which asks through `transcriptObserved()` instead — so it is internal, like that one,
+    /// rather than part of the package's surface.
+    func holdsNewSession() -> Bool {
         if case .new = launchTemplate.session { return true }
         return false
+    }
+
+    /// Whether this channel's launch line still asks the CLI to make a worktree. The invariant's own tests read it.
+    func holdsWorktree() -> Bool { launchTemplate.worktree != nil }
+
+    /// The checkout exists, so no later launch of this channel asks for one.
+    ///
+    /// **Separate from the session flag, and moved by different evidence, because the two facts are different
+    /// ages.** `-w <name>` makes the CLI create the checkout during *startup*, before the handshake — so from the
+    /// first `system/init` the worktree is there and its path is what the engine reports as the cwd, while the
+    /// transcript still does not exist until the first record. Clearing the flag only with the session flag left
+    /// every respawn in between — the thirty-minute reap's resume, a crash respawn, a restart-required change, a
+    /// quit and return inside one app run — passing `-w <name>` again, from *inside* the checkout, asking the CLI
+    /// for a second worktree under the first (§7.4's table: `--worktree` is restart-required and "creates a new
+    /// channel").
+    ///
+    /// Nothing has to be computed. `RuntimeStateUpdater` already takes `runtime.cwd` from `system/init.cwd`, which
+    /// is the checkout, and `composedFromRuntime()` launches from there.
+    private func worktreeRelocationObserved() {
+        guard launchTemplate.worktree != nil else { return }
+        launchTemplate.worktree = nil
     }
 
     /// The transcript exists, so every later launch of this channel resumes it.
@@ -260,10 +282,9 @@ public actor ChannelSupervisor {
     /// appears, which is the rule the engine's own background respawn applies (`:362837`: resume when the found
     /// transcript `hasMessages`, else `--session-id`).
     ///
-    /// The worktree goes with it. `-w <name>` is restart-required and "creates a new channel" (§7.4's table): the
-    /// CLI has already made the checkout and the transcript already lives under its slug, so passing `-w` again
-    /// would ask for a second one. The resumed launch's directory needs no computing — `system/init.cwd` moved
-    /// `runtime.cwd` to the worktree when the child announced it, and `composedFromRuntime()` launches from there.
+    /// **The worktree is not cleared here** — `worktreeRelocationObserved()` owns it, and it fires a whole
+    /// handshake earlier. The checkout exists before the transcript does, so the two flags cannot share one
+    /// trigger without leaving every respawn in between asking for a second checkout.
     ///
     /// Answers whether it did anything, so the facade can promote its own copy of the launch line — the one
     /// `preconditions(for:)` reads — under the same decision rather than under a second guess at it. Idempotent:
@@ -273,7 +294,6 @@ public actor ChannelSupervisor {
     func transcriptObserved() -> Bool {
         guard case .new(let id) = launchTemplate.session else { return false }
         launchTemplate.session = .resume(id, fork: false)
-        launchTemplate.worktree = nil
         return true
     }
 
@@ -1704,7 +1724,7 @@ public actor ChannelSupervisor {
                 turnRunning = true
                 pushEligibility()
                 publish()
-            case .transcriptMirror(let mirror):
+            case .transcriptMirror(let mirror) where !mirror.entries.isEmpty:
                 // The first evidence a created channel's transcript exists, and the earliest the engine offers:
                 // `--session-mirror` emits `transcript_mirror {filePath, entries}` with the JSONL records the CLI
                 // *just wrote* (§6.1, *Parity F-20*), so the file named is on disk. In `Fixtures/plain-two-turn` —
@@ -1714,12 +1734,18 @@ public actor ChannelSupervisor {
                 //
                 // Matched on the file's own name, because a mirror can also name a subagent's sidechain file and
                 // that one says nothing about this channel's transcript.
+                // **And on a non-empty `entries`**, which is the case guard above. The frame's promise is the
+                // records the CLI *just wrote*; one carrying none has written none, so a file may still not exist
+                // and `--resume` would be refused.
                 if mirror.filePath.hasSuffix("/\(key.session.description).jsonl") {
                     transcriptObserved()
                 }
             case .system(.initialize(let initFrame)):
                 state.apiKeySource = initFrame.apiKeySource
                 lastSystemInit = initFrame.fields
+                // The checkout the launch line asked for exists by now, and this frame's `cwd` — already adopted
+                // into `runtime` by `RuntimeStateUpdater` above — is where it is.
+                worktreeRelocationObserved()
                 publish()
             default:
                 break

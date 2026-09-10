@@ -321,33 +321,17 @@ final class PathMemo {
 
 }
 
-/// A git worktree's link back to the repository that owns it.
+/// A git worktree's link back to the repository that owns it, for **grouping**.
 ///
-/// A worktree's `.git` is a *file* holding `gitdir: <repo>/.git/worktrees/<name>`, where an ordinary
-/// checkout's is a directory. That one difference is the whole detection: no `git` process is run,
-/// nothing is written, and a `.git` that is neither shape simply is not a worktree.
-///
-/// **The `gitdir` may be relative, and it is relative to the worktree.** `git worktree add` writes a
-/// relative path whenever the repository is configured for one, so this is an ordinary checkout
-/// rather than an exotic one; resolving it as though it were relative to the process names a
-/// directory that depends on where the app was launched from and is usually nowhere. The worktree
-/// then groups under a repository that does not exist, apart from the real one.
+/// The parsing is `WorktreeLayout`'s, in FleetSessions, so the sidebar and the trust reader cannot
+/// drift about what a `gitdir:` line means or about resolving a relative one against the worktree.
+/// What is different here is the *question*: grouping wants the repository a user knows a checkout
+/// by, so it takes the tolerant answer and asks none of the engine's trust guards. A checkout whose
+/// repository has moved still draws under the repository it was made from; keying a trust read that
+/// way would be a defect, which is why `ProjectRoot.canonical` takes the guarded answer instead.
 enum WorktreeLink {
     static func mainRepository(of root: String) -> String? {
-        let dotGit = root + "/.git"
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: dotGit, isDirectory: &isDirectory),
-              !isDirectory.boolValue,
-              let data = FileManager.default.contents(atPath: dotGit),
-              let text = String(data: data, encoding: .utf8)
-        else { return nil }
-        let marker = "gitdir:"
-        guard let line = text.split(separator: "\n").first(where: { $0.hasPrefix(marker) }) else { return nil }
-        let gitDir = line.dropFirst(marker.count).trimmingCharacters(in: .whitespaces)
-        guard let separator = gitDir.range(of: "/.git/worktrees/") else { return nil }
-        let repository = String(gitDir[gitDir.startIndex..<separator.lowerBound])
-        guard !repository.isEmpty else { return nil }
-        let base = URL(fileURLWithPath: root, isDirectory: true)
-        return CanonicalPath.string(URL(fileURLWithPath: repository, isDirectory: true, relativeTo: base))
+        WorktreeLayout.repositoryByPathShape(ofWorktreeAt: URL(filePath: root, directoryHint: .isDirectory))
+            .map { $0.path(percentEncoded: false) }
     }
 }
