@@ -150,7 +150,21 @@ actor LifecycleDouble: LifecycleAPI {
 
     func finishEvents(of key: ChannelKey) { sink.finish(key) }
 
-    func preconditions(for key: ChannelKey) async -> SpawnPrecondition { unreachable("preconditions") }
+    /// The verdicts `preconditions(for:)` answers, in order; the last one staged repeats once the
+    /// queue drains, so a re-read after an action answers whatever the test said the fleet would
+    /// then say. Nothing staged still traps: a surface that read a precondition it was never given
+    /// one for is asserting against the double.
+    private var verdicts: [SpawnPrecondition] = []
+    private(set) var preconditionReads = 0
+
+    func stagePrecondition(_ verdicts: SpawnPrecondition...) { self.verdicts += verdicts }
+
+    func preconditions(for key: ChannelKey) async -> SpawnPrecondition {
+        preconditionReads += 1
+        guard let next = verdicts.first else { unreachable("preconditions") }
+        if verdicts.count > 1 { verdicts.removeFirst() }
+        return next
+    }
     func route(_ text: String, on key: ChannelKey) async -> Routed { unreachable("route") }
     func engineReports(of key: ChannelKey) async -> EngineReports? { unreachable("engineReports") }
     func resolveSetting(_ name: String, to value: JSONValue, on key: ChannelKey) async throws {

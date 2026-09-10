@@ -393,6 +393,59 @@ final class ConsentAndTrustTests: XCTestCase {
         XCTAssertTrue(model.isHistoryOnly, "the refused handoff left the channel out of history-only")
     }
 
+    // MARK: - Item 47's second half: the trust flip spawns
+
+    /// §14 item 47, end to end on this side: the dialog was accepted in the pane the banner handed
+    /// over, the re-read finds `.ready`, and the channel spawns **owned**.
+    ///
+    /// Nothing else would spawn it. Trust is granted outside afleet, no state afleet holds changes
+    /// when it is, and the channel is history-only precisely because the user cannot send — so a
+    /// re-read that only cleared the banner would leave a trusted project sitting behind an empty
+    /// column until the selection moved.
+    func testTrustGrantedInTheTerminalSpawnsTheChannelExactlyOnce() async throws {
+        let panels = ConsentPanelHost()
+        let (lifecycle, model) = await evaluated([.untrusted(root: Self.project), .ready], panels: panels)
+        let spawns = SpawnCounter()
+        await lifecycle.setSpawn(spawns.factory)
+
+        XCTAssertTrue(model.isHistoryOnly, "an untrusted project was not opened history-only")
+        let actionsBefore = await lifecycle.actions.count
+        XCTAssertEqual(actionsBefore, 0, "the untrusted channel acted before trust was granted")
+        XCTAssertEqual(spawns.count, 0, "the untrusted channel built a process")
+
+        let banner = TrustBanner(isAnswering: model.isAnswering) { model.reviewTrustInTerminal() }
+        try press("Review trust in terminal", in: banner.body)
+        await model.whenIdle()
+
+        XCTAssertFalse(model.isHistoryOnly, "the channel stayed history-only after trust was granted")
+        let opens = await lifecycle.actions.filter { if case .open = $0.action { return true }; return false }
+        XCTAssertEqual(opens.count, 1, "the trust flip issued \(opens.count) open(s), not one")
+        XCTAssertTrue(opens.first?.key == Self.channel,
+                      "the spawn named a channel other than the evaluation's own")
+        XCTAssertEqual(spawns.count, 1, "the trust flip did not reach a process")
+        XCTAssertNil(model.banner, "a successful spawn after trust raised a banner")
+    }
+
+    /// The negative half, and the one that makes the clause above discriminating: a `.ready` verdict
+    /// arriving on a channel that was **not** untrusted spawns nothing.
+    ///
+    /// `evaluate` runs on every selection and on every return to the front, so a spawn hung on
+    /// `.ready` alone would open a process in every channel the user clicks past — which is the
+    /// general auto-spawn item 47 does not ask for and §6.11's two preconditions exist to keep out.
+    func testAConsentAcceptanceThatBecomesReadyDoesNotSpawn() async throws {
+        let (lifecycle, model) = await evaluated([.consentNeeded(project: Self.project, servers: Self.servers),
+                                                  .ready])
+        let request = try XCTUnwrap(model.consentRequest, "the consent verdict raised no sheet")
+
+        model.accept(request)
+        await model.whenIdle()
+
+        let accepted = await lifecycle.accepted.count
+        XCTAssertTrue(accepted == 1, "the acceptance did not reach the fleet")
+        let opens = await lifecycle.actions.filter { if case .open = $0.action { return true }; return false }
+        XCTAssertEqual(opens.count, 0, "a consent acceptance that cleared the verdict spawned a process")
+    }
+
     // MARK: - G4a: what an acceptance actually grants
 
     /// The sheet says **how long an acceptance lasts**, because it outlives the sheet.
