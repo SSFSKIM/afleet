@@ -16,6 +16,10 @@ public enum FleetDiagnosticEvent: Sendable {
     case declineWrite(outcome: String, servers: Int)
     case paneRequest(id: UUID, purpose: String, session: String?)
     case staleExit(id: UUID, purpose: String)
+    /// A pane request this supervisor was waiting on has ended and needed no re-adoption — §6.11's
+    /// trust review, which hands nothing over. Recorded because the *absence* of a stale exit is
+    /// otherwise the only trace, and "the pane afleet asked for ended" is worth a line.
+    case paneEnded(id: UUID, purpose: String, code: Int32)
     case jobNotListedAfterBackground(session: String)
     case wedged(session: String, steps: Int)
     /// A fork's engine never announced an id within the supervisor's deadline. The child is ended and the slot goes
@@ -74,6 +78,9 @@ public enum FleetDiagnosticEvent: Sendable {
             return .object(o)
         case let .staleExit(id, purpose):
             return .object(["event": .string("stale_exit"), "id": .string(id.uuidString), "purpose": .string(purpose)])
+        case let .paneEnded(id, purpose, code):
+            return .object(["event": .string("pane_ended"), "id": .string(id.uuidString),
+                            "purpose": .string(purpose), "code": .integer(Int64(code))])
         case let .jobNotListedAfterBackground(session):
             return .object(["event": .string("job_not_listed_after_background"), "session": .string(session)])
         case let .wedged(session, steps):

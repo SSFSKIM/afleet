@@ -94,7 +94,12 @@ public actor ChannelSupervisor {
 
     public private(set) var state: ChannelState
     /// The hatch this channel is waiting on an exit for, matched by `id` and never by value.
-    public var pendingPaneRequest: PaneRequest? { pendingHatch }
+    /// The request a pane exit is matched against: a handoff's, or a trust review's.
+    ///
+    /// Both, because `Fleet.paneExited` finds the channel by this id and an exit nobody claims is
+    /// recorded as stale — so a trust-review pane that ended would otherwise leave a diagnostic
+    /// saying afleet had lost track of a pane it asked for.
+    public var pendingPaneRequest: PaneRequest? { pendingHatch ?? pendingTrustReview }
     /// Zero until the first spawn, which takes `ProcessEpoch.first`; every later spawn takes `.next()`. No event can
     /// carry epoch zero, so the pump's "discard anything older" filter is correct before there is a process.
     private var epoch = ProcessEpoch(rawValue: 0)
@@ -105,6 +110,10 @@ public actor ChannelSupervisor {
     /// wire that no caller ever saw.
     private var queuedInput: [(input: UserInput, uuid: UUID)] = []
     private var pendingHatch: PaneRequest?
+    /// The trust-review pane this channel is waiting on, which is **not** a hatch: nothing was
+    /// handed over, so `OriginResolver` must not be told a handoff is pending and `paneExited` must
+    /// not re-adopt anything when it ends.
+    private var pendingTrustReview: PaneRequest?
     /// Where the channel was when it became Contended, so a holder set that settles to nothing goes back there
     /// rather than to a state the table would refuse.
     private var contendedFrom: LifecycleTable.StateName?
@@ -744,16 +753,47 @@ public actor ChannelSupervisor {
         }
     }
 
-    /// The terminal hatch. The window between the returned request and the panel's spawn is accepted (spec Decision
+    /// The terminal hatch, or — for a channel with no owned process — §6.11's trust review.
+    ///
+    /// **Two answers to one press, because a channel with nothing running is not a handoff** (§14
+    /// item 47, tracker 314, ruled by the architect 2026-09-11). `handOff` refuses any origin that
+    /// is not `.owned(.ready)` or `.owned(.dormant)`, and an untrusted channel never spawns, so its
+    /// origin is `.archived` and the press threw `notOwned` before a pane could open — which made
+    /// item 47's second half unreachable in the running app however correctly the re-read was
+    /// wired. There is nothing to hand over: no child to terminate, no release to wait for, no
+    /// ownership to change, and no transition. What the user needs is `claude` on screen in this
+    /// project so the engine's own trust dialog runs, which is the argument-free launch below.
+    ///
+    /// The window between the returned request and the panel's spawn is accepted (spec Decision
     /// Log, 2026-09-05); everything before it is not.
     public func openInTerminal() async throws -> PaneRequest {
-        try await handOff(during: .openInTerminal, event: .openInTerminal, to: .foreignOwnTab) {
+        guard process != nil else { return trustReviewRequest() }
+        return try await handOff(during: .openInTerminal, event: .openInTerminal, to: .foreignOwnTab) {
             let request = paneRequest(arguments: ["--resume", key.session.description],
                                       cwd: runtime.cwd, purpose: .hatch(key.session))
             pendingHatch = request
             diagnostics.record(.paneRequest(id: request.id, purpose: "hatch", session: key.session.description))
             return request
         }
+    }
+
+    /// `claude`, no arguments, in the channel's own directory — and nothing else changes.
+    ///
+    /// **No arguments** is the whole point: `--resume` would open the conversation, and what §6.11
+    /// asks for is the interactive run whose *startup* puts the trust dialog up. The directory is
+    /// the runtime cwd, which for a created channel is the seed's — the project whose trust is
+    /// missing.
+    ///
+    /// It is recorded as this channel's pending pane request so the exit matches, and in a field of
+    /// its own so `pendingHatch` keeps meaning *a handoff is in flight*: `OriginResolver` reads that
+    /// fact, and a trust review that claimed it would make an archived channel look like one whose
+    /// session had been let go.
+    private func trustReviewRequest() -> PaneRequest {
+        let request = paneRequest(arguments: [], cwd: runtime.cwd, purpose: .trustReview(key.session))
+        pendingTrustReview = request
+        diagnostics.record(.paneRequest(id: request.id, purpose: "trustReview",
+                                        session: key.session.description))
+        return request
     }
 
     /// The shape both handoffs share: an owned channel lets go of its process, waits for the release, and only then
@@ -1785,6 +1825,15 @@ public actor ChannelSupervisor {
     /// The tab closing is not the release. The record it wrote is, so the re-adoption waits for that record to go
     /// and for its pid to die, exactly as every other handoff does.
     public func paneExited(_ exit: PaneExit) async {
+        // The trust review first, and it ends here: the pane was never a handoff, so there is
+        // nothing to re-adopt and no holder to wait out. Clearing the request is the whole of it,
+        // and the channel is left exactly where it was — still untrusted, or trusted now, which
+        // only a re-read of the global config document can tell.
+        if let review = pendingTrustReview, review.id == exit.request.id {
+            pendingTrustReview = nil
+            diagnostics.record(.paneEnded(id: exit.request.id, purpose: "trustReview", code: exit.code))
+            return
+        }
         guard let pending = pendingHatch, pending.id == exit.request.id else {
             diagnostics.record(.staleExit(id: exit.request.id, purpose: String(describing: exit.request.purpose)))
             return

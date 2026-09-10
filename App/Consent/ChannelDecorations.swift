@@ -27,6 +27,9 @@ struct ChannelDecorations: ViewModifier {
     let isApplicationActive: Bool
     let lifecycle: any LifecycleAPI
     let panels: any PanelHost
+    /// Where a pane's exit is announced, so §6.11's trust review re-reads the verdict after the
+    /// user has answered the engine's dialog rather than as soon as the pane was handed over.
+    let paneExits: PaneExitAnnouncer?
 
     /// Built on the first evaluation and kept across them. Nil until then, which is what a column
     /// with no channel selected keeps.
@@ -107,7 +110,8 @@ struct ChannelDecorations: ViewModifier {
                 model?.invalidate()
                 return
             }
-            let model = self.model ?? PrecommitModel(lifecycle: lifecycle, panels: panels)
+            let model = self.model ?? PrecommitModel(lifecycle: lifecycle, panels: panels,
+                                                      paneExits: paneExits)
             self.model = model
             await model.evaluate(channel: channel, project: project)
         }

@@ -40,7 +40,8 @@ struct ChannelColumnView: View {
                                      project: row?.cwd,
                                      isApplicationActive: shell.isApplicationActive,
                                      lifecycle: workspace.fleet,
-                                     panels: app.panels))
+                                     panels: app.panels,
+                                     paneExits: app.paneExits))
         .navigationTitle(row?.title ?? "afleet")
     }
 

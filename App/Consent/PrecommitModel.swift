@@ -66,6 +66,12 @@ final class PrecommitModel {
 
     private let lifecycle: any LifecycleAPI
     private let panels: any PanelHost
+    /// Where the pane afleet asked for is announced to have ended (§14 item 47, tracker 314).
+    ///
+    /// Nil is legal and means *re-read as soon as the request has been handed over*, which is what
+    /// this model did before the trust review was a pane of its own. Every test that is about the
+    /// handoff rather than about the timing leaves it nil.
+    private let paneExits: PaneExitAnnouncer?
 
     /// The evaluation the verdict on screen belongs to. Nil until `evaluate(channel:project:)` has
     /// published one.
@@ -110,9 +116,10 @@ final class PrecommitModel {
     /// disables on it, so nothing is sent twice.
     private(set) var isAnswering = false
 
-    init(lifecycle: any LifecycleAPI, panels: any PanelHost) {
+    init(lifecycle: any LifecycleAPI, panels: any PanelHost, paneExits: PaneExitAnnouncer? = nil) {
         self.lifecycle = lifecycle
         self.panels = panels
+        self.paneExits = paneExits
     }
 
     // MARK: - The verdict
@@ -240,20 +247,34 @@ final class PrecommitModel {
         // at, and the pane would open on somebody else's project.
         guard let evaluation, isCurrent(evaluation), claim() else { return }
         Task {
-            defer { isAnswering = false }
             do {
                 let request = try await lifecycle.openInTerminal(evaluation.channel)
+                // Declared before the pane runs, because a spawn that never executes is reported at
+                // once — the panel synthesises exit code 127 — and a wait armed afterwards would
+                // have missed it.
+                await paneExits?.expect(request.id)
                 try await panels.run(request, for: evaluation.channel)
                 clear(evaluation)
-                // Trust is granted in Claude Code's own dialog, in the pane this just handed over,
-                // and no state afleet holds changes when it is. Without this read the channel stays
-                // history-only on a project the user has since trusted, until the selection moves.
+                // **The in-flight slot is released here and not at the exit.** What it protects is
+                // a second request reaching the host, and by this line the request has been handed
+                // over; the pane is the user's now, and holding the slot for as long as they keep
+                // it open would leave the banner disabled with nothing left to send.
+                isAnswering = false
+                // Trust is granted in Claude Code's own dialog, **inside that pane**, and no state
+                // afleet holds changes when it is — so the verdict can only be re-read from the
+                // global config document afterwards. `run` returns when the pane *starts*, so this
+                // waits for the exit the panel reports through `paneExited`: not a timer, and not a
+                // second source of truth, but a listener on the one path the exit already takes.
+                await paneExits?.whenExited(request.id)
                 await reread(evaluation)
             } catch let error as PanelHostError {
+                isAnswering = false
                 raise(Self.banner(for: error), for: evaluation)
             } catch let error as LifecycleError {
+                isAnswering = false
                 raise(RowBanner(error), for: evaluation)
             } catch {
+                isAnswering = false
                 raise(RowBanner(text: "The terminal handoff did not complete: \(type(of: error))."),
                       for: evaluation)
             }

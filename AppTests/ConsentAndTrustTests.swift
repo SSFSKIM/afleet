@@ -14,6 +14,16 @@ extension PrecommitModel {
     func whenIdle() async {
         while isAnswering { await Task.yield() }
     }
+
+    /// Waits for the work the **pane's exit** starts: the re-read, and the spawn a trust flip earns.
+    ///
+    /// `isAnswering` is released when the pane is handed over — see `reviewTrustInTerminal` — so it
+    /// cannot be what this waits on. The verdict leaving `.untrusted` is what the re-read does, and
+    /// it is the thing the caller is about to assert on, so it is what ends the wait.
+    func settledAfterPane() async {
+        while isHistoryOnly { await Task.yield() }
+        await Task.yield()
+    }
 }
 
 /// The §6.12 consent sheet and the §6.11 trust banner (acceptance G4).
@@ -426,6 +436,75 @@ final class ConsentAndTrustTests: XCTestCase {
         XCTAssertNil(model.banner, "a successful spawn after trust raised a banner")
     }
 
+    /// **Item 47, end to end on the timing that matters: the re-read happens after the pane
+    /// *exits*, not after the request is handed over.**
+    ///
+    /// `PanelHost.run(_:for:)` returns when the pane **starts** — the runner spawns and returns —
+    /// and the exit travels back later through `reportPaneExit`. Trust is granted in the engine's
+    /// own dialog *inside* that pane, so a re-read taken when `run` returned would read the verdict
+    /// before the user had answered: the channel would stay history-only and the one thing that
+    /// re-reads it, coming back to the front, no longer happens now that the pane is inside afleet.
+    func testTheTrustRereadWaitsForThePaneToExit() async throws {
+        let panels = ConsentPanelHost()
+        let announcer = PaneExitAnnouncer()
+        let lifecycle = ConsentDouble()
+        await lifecycle.stage([.untrusted(root: Self.project), .ready])
+        let model = PrecommitModel(lifecycle: lifecycle, panels: panels, paneExits: announcer)
+        await model.evaluate(channel: Self.channel, project: Self.project)
+        let spawns = SpawnCounter()
+        await lifecycle.setSpawn(spawns.factory)
+
+        let banner = TrustBanner(isAnswering: model.isAnswering) { model.reviewTrustInTerminal() }
+        try press("Review trust in terminal", in: banner.body)
+
+        // The pane is running. Nothing has been re-read and nothing has spawned: the user is still
+        // looking at the engine's dialog.
+        await model.whenIdle()
+        XCTAssertEqual(panels.runs.count, 1, "the pane was not handed over")
+        XCTAssertTrue(model.isHistoryOnly, "the verdict was re-read before the pane had ended")
+        let duringPane = await lifecycle.actions.count
+        XCTAssertEqual(duringPane, 0, "the channel acted while the trust dialog was still open")
+        XCTAssertEqual(spawns.count, 0, "the channel spawned while the trust dialog was still open")
+
+        // The user answers the dialog and closes the pane. The panel reports the exit, and that is
+        // what drives the re-read.
+        let request = try XCTUnwrap(panels.runs.first?.request)
+        await announcer.announce(PaneExit(request: request, code: 0, observedAt: Date()))
+        await model.settledAfterPane()
+
+        XCTAssertFalse(model.isHistoryOnly, "the channel stayed history-only after trust was granted")
+        let opens = await lifecycle.actions.filter { if case .open = $0.action { return true }; return false }
+        XCTAssertEqual(opens.count, 1, "the pane's exit issued \(opens.count) open(s), not one")
+        XCTAssertTrue(opens.first?.key == Self.channel,
+                      "the spawn named a channel other than the evaluation's own")
+        XCTAssertEqual(spawns.count, 1, "the pane's exit did not reach a process")
+        // Nothing is left declared, so the announcer does not accumulate one id per pane.
+        let outstanding = await announcer.expectedCount
+        XCTAssertEqual(outstanding, 0, "the announcer kept \(outstanding) pane id(s) after the exit")
+    }
+
+    /// The banner is usable again as soon as the pane has been handed over, and not held for as
+    /// long as the user keeps it open.
+    ///
+    /// `isAnswering` disables every affordance here. It protects a second request reaching the
+    /// host, which is over once the request is handed over — holding it until the exit would leave
+    /// the banner dead for as long as the trust dialog was on screen.
+    func testTheBannerIsUsableAgainOnceThePaneIsHandedOver() async throws {
+        let panels = ConsentPanelHost()
+        let announcer = PaneExitAnnouncer()
+        let lifecycle = ConsentDouble()
+        await lifecycle.stage([.untrusted(root: Self.project)])
+        let model = PrecommitModel(lifecycle: lifecycle, panels: panels, paneExits: announcer)
+        await model.evaluate(channel: Self.channel, project: Self.project)
+
+        let banner = TrustBanner(isAnswering: model.isAnswering) { model.reviewTrustInTerminal() }
+        try press("Review trust in terminal", in: banner.body)
+        await model.whenIdle()
+
+        XCTAssertFalse(model.isAnswering, "the banner is still disabled with the pane already running")
+        XCTAssertEqual(panels.runs.count, 1, "the pane was not handed over")
+    }
+
     /// The negative half, and the one that makes the clause above discriminating: a `.ready` verdict
     /// arriving on a channel that was **not** untrusted spawns nothing.
     ///
@@ -573,7 +652,8 @@ final class ConsentAndTrustTests: XCTestCase {
     func testTheEvaluationKeyCarriesTheProjectAndTheFrontmostState() {
         func key(channel: ChannelKey?, project: URL?, active: Bool) -> ChannelDecorations.EvaluationKey {
             ChannelDecorations(channel: channel, project: project, isApplicationActive: active,
-                               lifecycle: ConsentDouble(), panels: ConsentPanelHost()).evaluationKey
+                               lifecycle: ConsentDouble(), panels: ConsentPanelHost(),
+                               paneExits: nil).evaluationKey
         }
         let base = key(channel: Self.channel, project: Self.project, active: true)
 

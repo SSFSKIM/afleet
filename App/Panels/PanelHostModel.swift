@@ -518,6 +518,13 @@ final class PanelHostModel: PanelHost {
         return context(for: key, cwd: cwd)
     }
 
+    /// Where a pane's exit is announced after X5 has been told, for §6.11's trust review.
+    ///
+    /// Set by the composition root, like `lifecycle` and `timelines` beside it. Nil in the tests
+    /// that build a host for something else; a nil announcer means nothing is told, which is what
+    /// this host did before item 47's second half needed it.
+    @ObservationIgnored var paneExits: PaneExitAnnouncer?
+
     private func makeContext(key: ChannelKey, cwd: URL) -> ChannelContext? {
         guard let workspace, let timelines, let lifecycle else { return nil }
         return ChannelContext(key: key,
@@ -528,7 +535,14 @@ final class PanelHostModel: PanelHost {
                               links: links,
                               recentURLs: TimelineRecentURLFeed(registry: timelines, key: key,
                                                                 limit: Self.recentURLLimit),
-                              reportPaneExit: { exit in await lifecycle.paneExited(exit) })
+                              // **X5 first, then the announcement.** The lifecycle clears the
+                              // request it was waiting on, and only then is anything told the pane
+                              // ended — so a surface that re-reads on the announcement cannot see
+                              // a channel that still believes a pane is in flight (item 47).
+                              reportPaneExit: { [paneExits] exit in
+                                  await lifecycle.paneExited(exit)
+                                  await paneExits?.announce(exit)
+                              })
     }
 
     // MARK: - The pane seam

@@ -9,6 +9,17 @@ public struct JobShort: Hashable, Codable, Sendable {
 
 public enum PanePurpose: Hashable, Sendable {
     case hatch(SessionID)
+    /// §6.11's *Review trust in terminal* on a channel with **no owned process** (§14 item 47,
+    /// tracker 314, ruled 2026-09-11).
+    ///
+    /// It is deliberately not a `hatch`, and the difference is not cosmetic. A hatch is a handoff:
+    /// afleet terminates its child, waits for the release and hands the session over, so the channel
+    /// changes origin and comes back when the pane exits. An untrusted channel has no child to hand
+    /// over — that is *why* the banner is drawn — so there is nothing to terminate, nothing to
+    /// release and no ownership to change. The pane runs `claude` with **no arguments** in the
+    /// channel's directory, which is what puts the engine's own trust dialog on screen, and the
+    /// channel is exactly where it was when the pane ends.
+    case trustReview(SessionID)
     case attach(JobShort)
     case logs(JobShort)
     case shell

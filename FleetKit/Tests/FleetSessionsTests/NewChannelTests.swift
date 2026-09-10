@@ -634,3 +634,174 @@ final class NewChannelTests: XCTestCase {
         return lines.sorted()
     }
 }
+
+/// §6.11's *Review trust in terminal* on a channel with **no owned process** (§14 item 47, tracker
+/// 314, ruled by the architect 2026-09-11).
+///
+/// The whole defect this closes is that a trust review is not a handoff. `handOff` refuses any
+/// origin that is not `.owned(.ready)` or `.owned(.dormant)`, and an untrusted channel never spawns,
+/// so the press threw `notOwned` before a pane could open — which made item 47's second half
+/// unreachable in the running app however correctly the re-read was wired.
+final class TrustReviewPaneTests: XCTestCase {
+
+    private final class Harness: @unchecked Sendable {   // every stored value is set once, in `init`
+        let home: ScratchConfigHome
+        let fleet: Fleet
+        let cwd: URL
+        let spawns = SpawnBox()
+        private let files: ScriptedHolderFiles
+        private let store: FileStateStore
+        private let storeDirectory: URL
+        let diagnosticsDirectoryForReading: URL
+
+        init(trusted: Bool = false) throws {
+            home = try ScratchConfigHome()
+            files = ScriptedHolderFiles(home: home)
+            let temporary = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+            cwd = temporary.appending(path: "afleet-trust-review-cwd-\(UUID().uuidString)")
+            storeDirectory = temporary.appending(path: "afleet-trust-review-store-\(UUID().uuidString)")
+            diagnosticsDirectoryForReading = temporary.appending(path: "afleet-trust-review-diag-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
+            if trusted { try home.trust(root: cwd) }
+            store = try FileStateStore(baseDirectory: storeDirectory, configHomes: [home.url])
+            let session = try FakeClaudeLaunch.sessionID(of: "plain-two-turn")
+            let box = spawns
+            fleet = Fleet(configHome: home.configHome,
+                          environment: FakeClaudeLaunch.environment(fixture: "plain-two-turn"),
+                          binary: FakeClaudeLaunch.binary, store: store,
+                          diagnosticsDirectory: diagnosticsDirectoryForReading, clock: TestClock(),
+                          factory: { epoch, _ in
+                              box.count += 1
+                              return ScriptedProcessHandle(epoch: epoch, session: session,
+                                                           pid: 700_000 + Int32(epoch.rawValue))
+                          },
+                          runner: ScriptedProcessRunner(rules: ScriptedProcessRunner.defaultRules(files)),
+                          newSessionID: { SessionID() })
+        }
+
+        func tearDown() async {
+            await fleet.shutdown()
+            home.removeAll()
+            try? FileManager.default.removeItem(at: cwd)
+            try? FileManager.default.removeItem(at: storeDirectory)
+            try? FileManager.default.removeItem(at: diagnosticsDirectoryForReading)
+        }
+
+        /// Every line the fleet's own diagnostics file holds, as decoded objects.
+        func diagnosticLines() async throws -> [[String: Any]] {
+            await fleet.flushDiagnostics()
+            guard let files = try? FileManager.default
+                .contentsOfDirectory(at: diagnosticsDirectoryForReading,
+                                     includingPropertiesForKeys: nil) else { return [] }
+            var out: [[String: Any]] = []
+            for file in files {
+                guard let text = try? String(contentsOf: file, encoding: .utf8) else { continue }
+                for line in text.split(separator: "\n") {
+                    if let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] {
+                        out.append(object)
+                    }
+                }
+            }
+            return out
+        }
+    }
+
+    /// How many processes the factory built. A `ProcessFactory` is a synchronous, non-isolated
+    /// closure, so the counter cannot live on an actor.
+    private final class SpawnBox: @unchecked Sendable {   // `lock` serialises the one field
+        private let lock = NSLock()
+        private var value = 0
+        var count: Int {
+            get { lock.lock(); defer { lock.unlock() }; return value }
+            set { lock.lock(); value = newValue; lock.unlock() }
+        }
+    }
+
+    /// The request's shape: `claude`, **no arguments**, in the channel's own directory.
+    ///
+    /// No arguments is the whole point. `--resume` opens the conversation; what §6.11 asks for is
+    /// the interactive run whose *startup* puts the trust dialog up.
+    func testATrustReviewRunsTheBinaryWithNoArgumentsInTheChannelsDirectory() async throws {
+        let harness = try Harness()
+        defer { Task { await harness.tearDown() } }
+        let key = await harness.fleet.create(ChannelCreation(cwd: harness.cwd))
+
+        let request = try await harness.fleet.openInTerminal(key)
+
+        XCTAssertTrue(request.arguments.isEmpty,
+                      "a trust review passed \(request.arguments.count) argument(s), so it opens a conversation")
+        XCTAssertTrue(request.cwd.path(percentEncoded: false) == harness.cwd.path(percentEncoded: false),
+                      "the trust review does not run in the channel's own directory")
+        XCTAssertTrue(request.executable == FakeClaudeLaunch.binary,
+                      "the trust review runs something other than the resolved binary")
+        var isReview = false
+        if case .trustReview(let session) = request.purpose { isReview = session == key.session }
+        XCTAssertTrue(isReview, "the request is not a trust review for this channel's own session")
+    }
+
+    /// Nothing moved: no process, no transition, no ownership change.
+    ///
+    /// A handoff terminates a child, waits for the release and changes the channel's origin. There
+    /// is nothing to hand over here — that is why the banner is drawn — so a press that moved the
+    /// channel would be moving it away from the one state the banner is correct for.
+    func testATrustReviewChangesNothingAboutTheChannel() async throws {
+        let harness = try Harness()
+        defer { Task { await harness.tearDown() } }
+        let key = await harness.fleet.create(ChannelCreation(cwd: harness.cwd))
+        let before = await harness.fleet.state(of: key)
+
+        _ = try await harness.fleet.openInTerminal(key)
+
+        let after = await harness.fleet.state(of: key)
+        XCTAssertEqual(harness.spawns.count, 0, "a trust review built a process")
+        XCTAssertTrue(after?.origin == before?.origin, "a trust review moved the channel's origin")
+        XCTAssertTrue(after?.desired == before?.desired, "a trust review changed what afleet wants")
+        XCTAssertNil(after?.banner, "a trust review raised a lifecycle banner")
+    }
+
+    /// The exit clears the pending request, so the pane is matched and re-adopts nothing.
+    ///
+    /// It has to be *pending* for `Fleet.paneExited` to find the channel at all — that lookup is by
+    /// request id — and it must not be a `pendingHatch`, because clearing one of those waits out a
+    /// holder and spawns the channel back.
+    func testTheExitClearsThePendingRequestAndAdoptsNothing() async throws {
+        let harness = try Harness()
+        defer { Task { await harness.tearDown() } }
+        let key = await harness.fleet.create(ChannelCreation(cwd: harness.cwd))
+
+        let request = try await harness.fleet.openInTerminal(key)
+        let pending = await harness.fleet.channel(key)?.pendingPaneRequest
+        XCTAssertTrue(pending?.id == request.id, "the trust review is not the channel's pending pane request")
+
+        await harness.fleet.paneExited(PaneExit(request: request, code: 0, observedAt: Date()))
+
+        let cleared = await harness.fleet.channel(key)?.pendingPaneRequest
+        XCTAssertNil(cleared, "the exit left the trust review pending")
+        XCTAssertEqual(harness.spawns.count, 0, "the trust review's exit re-adopted the channel")
+        let lines = try await harness.diagnosticLines()
+        XCTAssertTrue(lines.contains { $0["event"] as? String == "pane_ended" },
+                      "the trust review's exit was not recorded")
+        XCTAssertFalse(lines.contains { $0["event"] as? String == "stale_exit" },
+                       "the trust review's own exit was recorded as one nobody was waiting for")
+    }
+
+    /// A channel with an owned process keeps today's hatch, unchanged.
+    ///
+    /// The negative half, and the one that makes the clauses above about a *processless* channel: a
+    /// press that always answered a trust review would have replaced the header's *Open in
+    /// terminal* with something that hands nothing over and leaves the child running.
+    func testAChannelWithAProcessStillGetsTheHatch() async throws {
+        let harness = try Harness(trusted: true)
+        defer { Task { await harness.tearDown() } }
+        let key = await harness.fleet.create(ChannelCreation(cwd: harness.cwd))
+        _ = try await harness.fleet.perform(.open, on: key)
+        XCTAssertEqual(harness.spawns.count, 1, "the channel came up with no process, so this proves nothing")
+
+        let request = try await harness.fleet.openInTerminal(key)
+
+        var isHatch = false
+        if case .hatch = request.purpose { isHatch = true }
+        XCTAssertTrue(isHatch, "an owned channel's Open in terminal stopped being a hatch")
+        XCTAssertTrue(request.arguments.contains("--resume"), "the hatch no longer resumes the session")
+    }
+}

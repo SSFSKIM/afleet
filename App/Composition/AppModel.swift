@@ -100,6 +100,15 @@ final class AppModel: FilesTabHost, SourceControlTabHost {
     /// none.
     let branchChanges = BranchChangeLink<ChannelKey>()
 
+    /// Where a pane afleet asked for is announced to have ended (§14 item 47, tracker 314).
+    ///
+    /// **One instance, app-scoped**, for the reason every registry above it is: the announcement is
+    /// teed off the panel host's own context composition, and the surface that waits on it — the
+    /// trust banner's `PrecommitModel`, built per column — has to be listening to the same object
+    /// the host announces into. A second one would leave the banner waiting on a pane whose exit
+    /// was announced elsewhere.
+    let paneExits = PaneExitAnnouncer()
+
     /// C7.4's map from a channel to its Terminal panes.
     ///
     /// **One instance, and it is the whole point of the property.** The registered tab and the
@@ -194,6 +203,7 @@ final class AppModel: FilesTabHost, SourceControlTabHost {
          sequence: LaunchSequence = LaunchSequence(),
          coordinatorFactory: (@MainActor @Sendable (Workspace) -> any WorkspaceCoordinating)? = nil) {
         let panels = PanelHostModel()
+        panels.paneExits = paneExits
         self.panels = panels
         self.shell = ShellModel(panels: panels)
         self.sequence = sequence
