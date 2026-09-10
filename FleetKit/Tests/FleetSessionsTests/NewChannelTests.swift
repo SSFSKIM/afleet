@@ -340,6 +340,30 @@ final class NewChannelTests: XCTestCase {
         XCTAssertTrue(asked, "a non-isolated created channel skipped the project-server consent sheet")
     }
 
+    /// Item 47's flip, against the **real** trust reader: the record appears in the scratch global
+    /// config document and the same channel's verdict becomes `.ready`.
+    ///
+    /// The write is this test's own file — a `.claude.json` in a home this test created — and never
+    /// a real one (X9). What it holds is that the verdict is re-read from disk rather than cached
+    /// per channel: afleet never writes trust, so the only thing that can change the answer is the
+    /// file, and a reader that answered once per channel would leave a project the user has since
+    /// trusted refusing to spawn for the life of the process.
+    func testTheTrustRecordAppearingMakesTheCreatedChannelsVerdictReady() async throws {
+        let harness = try Harness(trusted: false)
+        defer { Task { await harness.tearDown() } }
+
+        let key = await harness.fleet.create(ChannelCreation(cwd: harness.cwd))
+        var refused = false
+        if case .untrusted = await harness.fleet.preconditions(for: key) { refused = true }
+        XCTAssertTrue(refused, "an untrusted root did not refuse a created channel")
+
+        try harness.home.trust(root: harness.cwd)
+
+        let after = await harness.fleet.preconditions(for: key)
+        XCTAssertTrue(after == .ready, "the trust record appeared and the verdict did not become ready")
+        XCTAssertEqual(harness.launches.count, 0, "re-reading the verdict built a process")
+    }
+
     // MARK: - The transition, by the engine's own frames
 
     /// The whole chain against a real child: create, send, the transcript appears under the scratch
