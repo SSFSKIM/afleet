@@ -221,6 +221,244 @@ final class AgentRelayTests: XCTestCase {
                       "an unread older record took the younger send's call once the turn boundary was gone")
     }
 
+    /// **A turn that closed with nobody drawing the channel still concluded (tracker 435).**
+    ///
+    /// The channel publishes; the reader is somewhere else, so no row and no node asks for a
+    /// reading. The turn closes with no `SendMessage` in it, which is item 51's first *Not
+    /// delivered* arm — and the only evidence for it is the turn's `result`, which §7.3 puts in the
+    /// ephemeral overlay and no transcript record carries. So unless the publish itself takes the
+    /// conclusion, *Check again* rebuilds the timeline and the record reads *Pending* for ever: the
+    /// user is told a message is on its way that the model never sent, and is offered no *Retry*.
+    ///
+    /// The discriminating half is that no reading is taken before the rebuild. With one, this passes
+    /// against the derivation alone — which is what `testASettledArmSurvivesARebuildThatCarriesNoTurnSummaries`
+    /// above already covers.
+    func testAConclusionReachedWithNothingDrawingItSurvivesARebuild() {
+        var wire = RelayWire()
+        wire.open()
+        let record = wire.record()
+        wire.assistantText(RelayWire.reply)
+        wire.result()
+        wire.publish()
+
+        let rebuilt = wire.rebuiltFromFiles
+        XCTAssertEqual(rebuilt.overlay.turns.count, 0,
+                       "the file-only rebuild carries \(rebuilt.overlay.turns.count) turn summary(s), "
+                       + "so this asserts nothing about a timeline with no turn boundary in it")
+        XCTAssertTrue(wire.state(of: record, in: rebuilt) == .notDelivered(.noCall),
+                      "a turn that closed while nothing drew the channel lost its conclusion to the rebuild")
+    }
+
+    /// **And it does not take a later turn's call for its own.**
+    ///
+    /// The sharper direction of the same loss. A record whose turn boundary is gone scans on into
+    /// the turns after it, and where no younger *relay* bounds the scan — the ordinary case, because
+    /// the next turn is usually an ordinary prompt — the next `SendMessage` naming this run is read
+    /// as this record's own. The row then says *Relayed* about a message the model never sent, which
+    /// is worse than *Pending*: it is a wrong answer in the reassuring direction, and it offers no
+    /// *Retry* either.
+    ///
+    /// The later turn relays a **different** message to the same run, so the call is a real call
+    /// with a real delivery behind it and nothing about the timeline looks wrong.
+    func testAnUnreadConclusionIsNotOverwrittenByALaterTurnsCall() {
+        var wire = RelayWire()
+        wire.open()
+        let record = wire.record()
+        wire.assistantText(RelayWire.reply)
+        wire.result()
+        wire.publish()
+
+        // A later turn of the same channel: an ordinary prompt — **no relay record of this app's**
+        // — in which the model relays something else to the same run. That is what leaves the older
+        // record's scan unbounded once the boundary is gone: the bound the machine has is a younger
+        // *record's* own prompt echo, and there is no younger record here.
+        wire.echo(promptUUID: RelayWire.secondPromptUUID)
+        wire.sendMessageCall(to: RelayWire.target, id: RelayWire.secondSendCall,
+                             message: RelayWire.secondMessage)
+        wire.sendMessageResult(id: RelayWire.secondSendCall, success: true)
+        wire.forwarded(RelayWire.secondMessage)
+        wire.result()
+        wire.publish()
+
+        XCTAssertTrue(wire.state(of: record, in: wire.rebuiltFromFiles) == .notDelivered(.noCall),
+                      "the record read a later turn's SendMessage call as its own once the turn boundary was gone")
+    }
+
+    /// **The publish hook costs nothing on a channel with no relay, and nothing more on a settled one.**
+    ///
+    /// This runs on the thirty-hertz publish path of **every** channel, and almost no channel has
+    /// ever relayed anything: a hook that advanced the derivation regardless would put a pass over
+    /// the whole timeline into every publish the app makes, which is the growth §8.3 forbids. The
+    /// gate is invisible from the state — the derivation is idempotent, so a skipped pass changes
+    /// nothing a surface can see — and the number of passes is the only thing that can assert it.
+    func testThePublishHookRunsTheDerivationOnlyForAChannelWithARelayInFlight() {
+        var wire = RelayWire()
+        wire.open()
+        for _ in 0..<30 { wire.publish() }
+        XCTAssertEqual(wire.relay.derivations, 0,
+                       "30 publishes over a channel that has relayed nothing ran the derivation "
+                       + "\(wire.relay.derivations) time(s), not 0")
+
+        let record = wire.record()
+        wire.assistantText(RelayWire.reply)
+        wire.result()
+        wire.publish()
+        XCTAssertEqual(wire.relay.derivations, 1,
+                       "the publish that closed the turn ran the derivation \(wire.relay.derivations) time(s), not 1")
+        XCTAssertTrue(wire.state(of: record) == .notDelivered(.noCall),
+                      "the record did not settle, so the clause below asserts nothing about a settled channel")
+
+        let settled = wire.relay.derivations
+        for _ in 0..<30 { wire.publish() }
+        XCTAssertEqual(wire.relay.derivations, settled,
+                       "30 publishes over a channel whose every record has settled ran the derivation "
+                       + "\(wire.relay.derivations - settled) more time(s), not 0")
+    }
+
+    /// **Two sends in one turn, concluded at publish time, keep their own evidence across a rebuild.**
+    ///
+    /// The model was asked to relay twice in one turn and relayed one of them, which is a real
+    /// failure of item 51's: the younger send's message reaches the run's transcript, and the older
+    /// send's turn closes with no call that was ever its own. Both conclusions are taken by the
+    /// publish alone, and the older one **cannot** be re-derived afterwards — its no-call arm is
+    /// read from the turn's `result`, so a rebuilt timeline with no boundary in it leaves the
+    /// derivation at *Pending*. This is therefore the correlation asserted over stored settlements:
+    /// each record keeps its own call and its own frame, and neither takes the other's.
+    func testTwoSendsInOneTurnConcludedAtPublishTimeKeepTheirOwnCalls() {
+        var wire = RelayWire()
+        wire.open()
+        let dropped = wire.record()
+        let relayed = wire.record(promptUUID: RelayWire.secondPromptUUID, message: RelayWire.secondMessage)
+
+        wire.sendMessageCall(to: RelayWire.target, message: RelayWire.secondMessage)
+        wire.sendMessageResult(success: true)
+        wire.forwarded(RelayWire.secondMessage)
+        wire.assistantText(RelayWire.reply)
+        wire.result()
+        wire.publish()
+
+        let rebuilt = wire.rebuiltFromFiles
+        XCTAssertEqual(rebuilt.overlay.turns.count, 0,
+                       "the file-only rebuild carries \(rebuilt.overlay.turns.count) turn summary(s), "
+                       + "so this asserts nothing about a timeline with no turn boundary in it")
+        XCTAssertTrue(wire.state(of: relayed, in: rebuilt) == .delivered,
+                      "the send the model made lost the frame its own call delivered")
+        XCTAssertTrue(wire.state(of: dropped, in: rebuilt) == .notDelivered(.noCall),
+                      "the send the model never made did not keep the conclusion the publish took")
+    }
+
+    /// **A settled refusal does not take the retry's delivery frame.**
+    ///
+    /// *Retry* re-sends the same text to the same run, which is the one case where two records can
+    /// both match one forwarded frame — and now that a conclusion is taken at publish time the
+    /// refused record is settled, so it is the first record the pass looks at and its overtake scan
+    /// reaches the frame first. The failed send would then read *Delivered* and lose the *Retry*
+    /// that is its whole point, while the send that actually arrived read *Relayed*: one frame
+    /// accounted to the wrong send, which is item 51's one-to-one correlation broken in both
+    /// directions at once.
+    ///
+    /// The bound is the one the call-claiming path already uses: a frame that lies after a younger
+    /// record's own prompt echo belongs to that record, and the echo is a transcript record.
+    func testASettledRefusalDoesNotTakeTheRetrysDeliveryFrame() {
+        var wire = RelayWire()
+        wire.open()
+        let failed = wire.record()
+        wire.sendMessageCall(to: RelayWire.target)
+        wire.sendMessageResult(success: false)
+        wire.assistantText(RelayWire.explanation)
+        wire.result()
+        wire.publish()
+        XCTAssertTrue(wire.state(of: failed) == .notDelivered(.refused),
+                      "the refusal did not settle, so nothing below is asserted about a settled record")
+
+        // The *Retry*: the same text to the same run, in its own turn — and this time it arrives.
+        let retried = wire.record(promptUUID: RelayWire.secondPromptUUID)
+        wire.sendMessageCall(to: RelayWire.target, id: RelayWire.secondSendCall)
+        wire.sendMessageResult(id: RelayWire.secondSendCall, success: true)
+        wire.forwarded(RelayWire.message)
+        wire.publish()
+
+        XCTAssertTrue(wire.state(of: retried) == .delivered,
+                      "the retry did not claim the delivery frame its own send produced")
+        let reading = wire.reading(of: failed)
+        XCTAssertTrue(reading.state == .notDelivered(.refused),
+                      "the failed send took the retry's delivery frame")
+        XCTAssertNotNil(reading.retry, "the failed send lost the Retry its arm offers")
+    }
+
+    /// **An unsettled relay does not take a later same-text send's delivery frame either.**
+    ///
+    /// The sibling of the test above, on the path settlement never reaches. *Relayed* is not a
+    /// terminal arm, so a record whose call went through and whose message has not arrived stays
+    /// unsettled for as long as the channel lives (tracker 451) — and the unsettled pass is the one
+    /// that reads the delivery frames. A *Retry* of the same text to the same run then produces the
+    /// frame the older record scans into, and *Delivered* is terminal: the older record freezes on a
+    /// frame the retry's own call produced, while the send that arrived reads *Relayed* and offers
+    /// nothing. The bound is the competing send's own prompt echo, the same one the settled pass
+    /// takes, and not the general younger-record bound the call claiming uses — that one would
+    /// refuse a late delivery from any channel that ever relayed twice.
+    func testAnUnsettledRelayDoesNotTakeALaterSameTextSendsDeliveryFrame() {
+        var wire = RelayWire()
+        wire.open()
+        let older = wire.record()
+        wire.sendMessageCall(to: RelayWire.target)
+        wire.sendMessageResult(success: true)
+        wire.assistantText(RelayWire.reply)
+        wire.result()
+        wire.publish()
+        XCTAssertTrue(wire.state(of: older) == .relayed,
+                      "the first send did not read relayed, so nothing below is asserted about an unsettled record")
+
+        // The second send of the same text to the same run — a *Retry* of a relay that never
+        // arrived — in its own turn, and this one is delivered.
+        let younger = wire.record(promptUUID: RelayWire.secondPromptUUID)
+        wire.sendMessageCall(to: RelayWire.target, id: RelayWire.secondSendCall)
+        wire.sendMessageResult(id: RelayWire.secondSendCall, success: true)
+        wire.forwarded(RelayWire.message)
+        wire.publish()
+
+        XCTAssertTrue(wire.state(of: younger) == .delivered,
+                      "the younger send did not claim the frame its own call delivered")
+        XCTAssertTrue(wire.state(of: older) == .relayed,
+                      "the older send claimed the younger send's delivery frame")
+    }
+
+    /// **And a record does not take its own retry's delivery frame while its turn is still open.**
+    ///
+    /// The other half of the same bound, and the one the turn boundary cannot supply. The fourth arm
+    /// is provisional — the run ended without taking the message, read while the turn is still open
+    /// — so the row offers *Retry* and a user can press it inside that turn. The retry's own frame
+    /// then arrives, the older record's scan reaches it first, and *Delivered* is terminal: the
+    /// failed send freezes as delivered on evidence its own retry produced, and the retry that
+    /// actually arrived reads *Relayed*.
+    ///
+    /// What separates this from two independent sends of one text is the lineage: *Retry* is offered
+    /// on a *Not delivered* arm and nowhere else, so the record it opens is the app's own statement
+    /// that the message it names had not arrived.
+    func testARecordDoesNotTakeItsOwnRetrysDeliveryFrame() {
+        var wire = RelayWire()
+        wire.open()
+        let failed = wire.record()
+        wire.sendMessageCall(to: RelayWire.target)
+        wire.sendMessageResult(success: true)
+        wire.taskNotification()
+        wire.publish()
+        XCTAssertTrue(wire.state(of: failed) == .notDelivered(.stoppedBeforeNextRound),
+                      "the fourth arm was not read, so nothing below is asserted about a retried send")
+
+        // *Retry*, pressed while the turn is still open — which is where this arm is read.
+        let retried = wire.record(promptUUID: RelayWire.secondPromptUUID, retryOf: failed.id)
+        wire.sendMessageCall(to: RelayWire.target, id: RelayWire.secondSendCall)
+        wire.sendMessageResult(id: RelayWire.secondSendCall, success: true)
+        wire.forwarded(RelayWire.message)
+        wire.publish()
+
+        XCTAssertTrue(wire.state(of: retried) == .delivered,
+                      "the retry did not claim the frame its own call delivered")
+        XCTAssertTrue(wire.state(of: failed) == .notDelivered(.stoppedBeforeNextRound),
+                      "the failed send froze as delivered on the frame its own retry produced")
+    }
+
     /// **A settled *Not delivered* still yields to the message arriving.**
     ///
     /// The fourth arm is the provisional one: it concludes that a run stopped without taking the
@@ -938,13 +1176,16 @@ struct RelayWire {
     /// the reducer attributes the turn's `result` to.
     @discardableResult
     mutating func record(promptUUID: String = RelayWire.promptUUID,
-                         message: String = RelayWire.message) -> AgentRelayRecord {
+                         message: String = RelayWire.message,
+                         retryOf: AgentRelayRecord.ID? = nil) -> AgentRelayRecord {
         echo(promptUUID: promptUUID)
         // A resend closure, because production always installs one: the send site captures the text
         // it would re-send, and a record opened without one could not offer *Retry* at all.
+        // `retryOf` is the lineage a *Retry* leaves — the record this one replaced, which is what
+        // tells a re-send apart from a second independent send of the same text.
         return relay.open(promptUUID: promptUUID, target: Self.target,
                           textDigest: AgentRelayDigest.of(message), in: key, at: stamp(),
-                          resend: { _, _ in })
+                          retryOf: retryOf, resend: { _, _ in })
     }
 
     /// The engine's echo of one prompt, and the `promptSent` raise the send path makes inseparable
@@ -1089,6 +1330,16 @@ struct RelayWire {
         ChannelTimeline(durable: reducer.durable, overlay: .empty, preview: nil,
                         agents: reducer.agents, registry: RegistryMirror())
     }
+
+    // MARK: - Publishing it
+
+    /// What the channel's own publish does with this registry — `ChannelTimelineModel.publish()`
+    /// calls exactly this, with the timeline the fold has just produced.
+    ///
+    /// **Nothing is read here**, which is the whole point of the tests that call it: a channel
+    /// publishes whether or not a surface is drawing it, and the conclusions below are taken with no
+    /// row and no node having asked for a reading.
+    func publish() { relay.observe(timeline, in: key) }
 
     // MARK: - Reading it
 

@@ -4151,6 +4151,35 @@ needs more. Nothing above is renumbered.
      above this corrective. Owner: whoever rules on a publish-time seam for app-scoped derivations.
      Raised by the recomposition corrective's review round.
 
+     **Closed 2026-09-11 — `corrective/c6-relay-conclusion` (commit `7472041`).** The seam is the
+     publish path: `AgentRelayRegistry.observe(_:in:)` runs the reading's own one-pass `advance` and
+     stores whatever settled, answering nothing, and `ChannelTimelineModel.publish()` calls it
+     beside `retraction.observe` — the model folds and publishes for a channel nobody is drawing,
+     which is where a conclusion nothing asked for is taken. It returns before the pass for a
+     channel with no records and for one whose every record has settled, so the derivation runs only
+     while a channel holds a relay in flight; the registry reaches the model at construction, from
+     the app's one `AppModel.agentRelay` through `ChannelTimelineRegistry.relay`.
+
+     **`ChannelTimelineModel.close()` is the second place, and it is load-bearing.** The release
+     cancels the publish path, so a conclusion the fold took after the last publish — inside the
+     coalescer's trailing window, or on the hop before the effects loop resumed — would have had
+     nowhere to be read, and the release is *Check again*, which brings the channel back with no
+     turn boundary in it. So `close()` hands the registry the ingestion's final timeline before
+     tearing it down, unconditionally: whether a publish was *armed* is a different question from
+     whether the fold holds something no publish carried, and the registry's own gate is what makes
+     the unconditional call free.
+     Y8 is unchanged: no item, no persisted store, and no change to what a row or a node draws while
+     the evidence is present.
+
+     **And this entry understated the harm.** The bound it relied on is a *younger record's* prompt
+     echo, so it holds only where the app made a second relay on that channel. A later turn's
+     `SendMessage` that belongs to no record — the model relaying on its own, a relay made from the
+     user's terminal — is bounded by nothing once the turn boundary is gone, and the older record
+     settles on it: the row then reads *Relayed* about a message the model never sent, and offers no
+     *Retry*. A wrong answer in the reassuring direction, not a missing sentence.
+     `testAnUnreadConclusionIsNotOverwrittenByALaterTurnsCall` is that arm. What is left of the cost
+     shape is 451.
+
 436. **The relay derivation is O(records × items) per body evaluation.** `reading(of:)` calls
      `outcomes(in:of:)`, which advances every record of the channel over the whole timeline, and the
      message row calls it once per relayed message drawn. It was one pass before this corrective and
@@ -4235,3 +4264,62 @@ needs more. Nothing above is renumbered.
      the three new regressions. Green: all 18 `EditAndRewindTests` passed, with the actual
      `** TEST SUCCEEDED **` verdict read from the captured log. Evidence:
      `.build/corrective-logs/428-{red,green}.log`; fixture integrity/signature verification passed.
+
+## From corrective/c6-relay-conclusion, 2026-09-11 (numbered from 451)
+
+451. **A relay that never settles re-derives on every publish for the life of the channel.**
+     `observe(_:in:)`'s gate keys on every record of the channel holding a settlement, and
+     `.pending` and `.relayed` are not terminal arms — so a record whose turn cannot close (the
+     process was killed mid-turn, the `SendMessage` result never came back) keeps the derivation on
+     every publish that channel makes, at up to thirty hertz, for as long as the app runs. **And the
+     pass is not one pass.** `advance` revisits every *settled* record of the channel first, and
+     each settled *Not delivered* holding a call of its own performs a call lookup and a bounded
+     delivery scan over the items. This branch added a third term of its own: every record of the
+     channel, settled or not, filters the younger records for a competing send of the same text to
+     the same run — O(records) — and each competing send it finds costs an O(items) `firstIndex` for
+     that send's prompt echo, plus one more for the older record's turn close. So the cost that
+     rides each publish is O(settled records × items) for the overtakes, plus O(records²) filtering,
+     plus O(items) per competing send, plus — for each record still in flight — the `contested`
+     computation that has been there since `47b2eb8`, which is an `items.firstIndex` for the prompt
+     echo of **every** younger record, so O(younger records × items) rather than one pass, and it
+     grows with the channel's whole relay history rather than with what is unresolved. The
+     competing-send terms are nil-cheap in the ordinary case: the filter finds nothing unless one
+     text was relayed to one run twice, and no scan is taken when it does not. It is 436's shape
+     moved onto the publish path, bounded the same two ways: the channel has to be actively folding
+     for a publish to happen at all, and each scan is over the items the fold holds. The memo the
+     ruling offered as an alternative gate — the item count and overlay identity against the last
+     observed pair — buys nothing here, because a publish happens *because* the fold changed, so it
+     would skip almost no pass a streaming channel makes and would cost a comparison on every one of
+     them. Closing it is either a rule for abandoning a record whose turn cannot close, which is a
+     behavioural decision about what the row then says, or 436's cache per (channel, timeline
+     identity) — which is the one closer that serves both entries, because it removes the repeated
+     pass for the reading and for the publish alike. Owner: whoever takes 436. Raised by this
+     corrective's own reading of its cost gate, sharpened by its review round.
+
+## From corrective/c6-relay-conclusion's review rounds, 2026-09-11 (numbered from 452)
+
+452. **The unsettled delivery bound is a live-timeline bound: a rebuild loses it.**
+     `supersedingSend`'s second arm — a competing send is a whole turn later — reads this record's
+     turn close out of the overlay, and §7.3 puts the turn summary there and in no transcript
+     record. So on a timeline rebuilt from the files, *Check again*'s, that arm answers nothing, and
+     an unsettled older record can once again take a later same-text send's forwarded frame: the
+     window is the gap between that frame arriving and the younger send's own `tool_result`, because
+     until the result lands the younger record's call is only `.running` and it has not claimed the
+     frame. The retry-lineage arm is unaffected — a record's `retryOf` is the app's own bookkeeping
+     and no timeline carries it — so the case that survives a rebuild is an *independent* re-send of
+     one text to one run. Two things narrow it to residue: a record that concluded before the
+     rebuild is claimed settled-first and never re-derived at all, and the publish and release
+     observations now take those conclusions whether or not anything drew the channel, which is what
+     this corrective is. What is left is an older record that never concluded, on a channel that
+     relayed one text to one run twice without a *Retry*, read inside one tool call's window after a
+     rebuild. Closing it means a turn boundary the transcript carries, which is C3's fold and not
+     this leaf's to invent, or attributing a frame by the call it followed rather than by the prompt
+     echo — which needs the `tool_use` id on the forwarded frame, and the engine writes none. Owner:
+     whoever takes the relay next, with 435's successor.
+
+     **And one line beside it.** `advance(_:in:settled:)` builds the retry-lineage map with
+     `Dictionary(uniqueKeysWithValues:)`, which traps on a duplicate record id. It is unreachable
+     today: every caller passes `records(in:)`, whose ids are minted per `open` and never repeated.
+     A caller that ever hands it a concatenation of two channels' records, or the same record twice,
+     would take the app down rather than mis-read a state — `uniquingKeysWith:` is the one-word
+     change if that day comes.

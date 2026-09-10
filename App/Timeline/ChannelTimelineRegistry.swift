@@ -30,6 +30,15 @@ final class ChannelTimelineRegistry {
     /// subscribe-before-read ordering is observable. Set before the channel's first `model(for:)`.
     @ObservationIgnored var changeFeed: ChannelTimelineModel.ChangeFeedSubscribing?
 
+    /// The app's one relay registry (contract Y8), handed to every model this registry builds so
+    /// that a channel's publish advances the relays it holds whether or not a surface is drawing
+    /// them. Nil until the composition root installs it, and nil for ever in a test that builds a
+    /// registry of its own — a model with no relay registry publishes exactly as it did before.
+    ///
+    /// Not on `attach(to:)` with the two seams above: those belong to the workspace a launch
+    /// reached and are replaced by the next one, and this one is the app's for its whole life.
+    @ObservationIgnored var relay: AgentRelayRegistry?
+
     @ObservationIgnored private var models: [ChannelKey: ChannelTimelineModel] = [:]
 
     init() {}
@@ -49,7 +58,7 @@ final class ChannelTimelineRegistry {
     func model(for key: ChannelKey) -> ChannelTimelineModel {
         if let existing = models[key] { return existing }
         let model = ChannelTimelineModel(key: key, workspace: workspace, lifecycle: lifecycle,
-                                         changeFeed: changeFeed)
+                                         changeFeed: changeFeed, relay: relay)
         models[key] = model
         return model
     }

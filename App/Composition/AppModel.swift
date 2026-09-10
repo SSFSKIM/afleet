@@ -205,6 +205,12 @@ final class AppModel: FilesTabHost, SourceControlTabHost {
         self.coordinatorFactory = coordinatorFactory ?? { [timelines, composers] workspace in
             FleetCoordinator(workspace: workspace, panels: panels, timelines: timelines, composers: composers)
         }
+        // Contract Y8's third wiring, beside the tab's writer and the navigator's reader below: the
+        // app's one relay registry also has to be advanced by the channel's own publish, because a
+        // relay whose turn closes while nobody draws its row concludes nowhere else and *Check
+        // again* rebuilds the timeline without the turn boundary it was read from. Set here, once,
+        // for the app's life — the registry hands it to every timeline model it builds.
+        timelines.relay = agentRelay
         // C5's one shipped tab, under `.thread`. C6 takes that id by `unregister(.thread)` and then
         // its own `register`; `register` refuses a duplicate, so the pair is the handover.
         //
