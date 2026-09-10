@@ -2121,6 +2121,30 @@ the gap between 141 and 157 is C6.1's and C6.2's reservations and is expected. (
      a `.new` composition at `Fleet.register`'s caller, with the developer setting read there.
      Owner: the architect, to assign.
 
+     **Closed 2026-09-11 — `corrective/c6-new-channel`, merge pending.** Implemented as a creation
+     *verb* rather than a composition at `register`'s caller: `Fleet.create(ChannelCreation)` mints
+     the `SessionID`, files a seed and builds the supervisor with `.new(id)`, and spawns nothing, so
+     §6.11 trust and §6.12 consent still gate the first child. The launch line moves to `--resume`
+     on evidence the transcript exists — the channel's first `transcript_mirror` naming
+     `<id>.jsonl`, and a `register` for a key whose supervisor still holds `.new` — and the worktree
+     is cleared with the flag. `isolatedSettingsForNewChannels` now has its consumer: the sheet
+     reads the settings document at the moment it opens and the request carries the flag through to
+     `settingSources = []`, with `--strict-mcp-config` left to `SpawnPreconditions`, which reads the
+     created launch. Verified headless: nine `FleetSessionsTests.NewChannelTests` over a real
+     `Fleet` with the process factory watched, the last driving a real `fake-claude` child replaying
+     `plain-two-turn` into a scratch default-source home so the transcript named `<key>.jsonl`
+     really appears and the respawn's argv proves the transition; eighteen
+     `AfleetTests.NewChannelTests` over the pending row, the sheet's one action and the two spawn
+     gates; two more in `ConsentAndTrustTests` for item 47's trust flip. Floor: 2,535 executed, 30
+     skipped, 0 failures. Evidence under `.build/corrective-logs/`.
+
+     **What remains, and it is not implementation.** Persisting a created-but-unsent channel across
+     an app relaunch is a product decision nobody has taken; the pending map is in memory only and
+     `FleetBrowserModel.pending` names where it would hook in. The live witnesses are still owed:
+     item 3's AI title against a real engine and item 47's real terminal dialog both need an account
+     that permits prompted turns (entry 163), and items 4, 5, 41 and 52 need the same account with
+     the isolation setup this entry unblocks.
+
 163. **`claude auth status` is not a sufficient live-gate precondition, and `ScratchLiveGate` treats
      it as one.** The scratch home reports `loggedIn: true` with an `oauth_token` on `firstParty`,
      and a prompted turn still returns an API error before any tool call: the account's
@@ -4235,3 +4259,39 @@ needs more. Nothing above is renumbered.
      the three new regressions. Green: all 18 `EditAndRewindTests` passed, with the actual
      `** TEST SUCCEEDED **` verdict read from the captured log. Evidence:
      `.build/corrective-logs/428-{red,green}.log`; fixture integrity/signature verification passed.
+
+## From corrective/c6-new-channel, 2026-09-11 (numbered from 442)
+
+442. **`fake-claude`'s cwd rewrite leaves a `/private` prefix on macOS.** `rewrite_paths` replaces
+     the recording's `fixture.json` `cwd` inside every frame by plain substring, and the two
+     spellings disagree: `fixture.json` holds `/tmp/afleet-fixtures/<scenario>` while the recorded
+     `system/init.cwd` holds the engine's realpath `/private/tmp/afleet-fixtures/<scenario>`, so the
+     replacement leaves the `/private` in front of whatever it substitutes. The consequence is not
+     cosmetic for anything that replays into a *live* channel: `RuntimeState` takes `runtime.cwd`
+     from that frame, `composedFromRuntime()` launches from it, and `ProjectRoot.canonical` keys
+     every precondition on it — so the second spawn of a replayed channel asks for trust on
+     `/private/private/var/…` and is refused `untrusted`, four frames after the first spawn worked.
+     Found while driving the created channel's respawn; worked around by handing the child
+     `FAKE_CLAUDE_CWD` in its *unresolved* spelling, so the replacement lands on the real path.
+     Closer: rewrite both spellings of the recorded cwd, or record `fixture.json`'s `cwd` as the
+     realpath the frames carry. Owner: C1, which owns the replayer.
+
+443. **`SidebarView.body` cannot be evaluated in the test host.** Building the value and reading
+     `body` aborts the process — no assertion, no line number, just *Restarting after unexpected
+     exit* and a summary that silently folds in the previous launch's totals. The `List(selection:)`
+     is the likely cause and it is not worth pinning down: the lesson is that a sidebar clause has
+     to be asserted through a smaller view value, which is why `ProjectSectionHeader` is a view of
+     its own. Filed because the failure mode is expensive to diagnose and will be met again by
+     anyone testing the sidebar's affordances. Closer: none needed for correctness; a note in the
+     test-support notes, or a headless render harness if a later child needs the whole sidebar.
+     Owner: C5's successor on the sidebar.
+
+444. **An error thrown inside an XCTest async test is reported at an unrelated source location.**
+     A `LifecycleError.precondition` refusal surfaced as `ClaudeWire/Sources/WireFrames/
+     JSONValue.swift:100` with a `DecodingError` description — a line inside a `try?` that swallows
+     its error — and the reported line and coding path changed between runs of the same failure. The
+     misattribution cost a diagnosis cycle: the file it named decodes cleanly, which is provable in
+     one test. Nothing in this tree causes it and nothing in this tree can fix it. Closer: none; the
+     habit it teaches is to wrap each `try` in the test and print the error rather than trusting the
+     reported location. Owner: none — a note for whoever meets it next.
+
