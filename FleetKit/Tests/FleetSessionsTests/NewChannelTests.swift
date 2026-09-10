@@ -291,6 +291,60 @@ final class NewChannelTests: XCTestCase {
         XCTAssertTrue(argv.contains("--resume"), "a second registration lost the resume")
     }
 
+    /// A quiescent restart before the first turn keeps `--session-id`, and one after it keeps
+    /// `--resume`.
+    ///
+    /// `relaunch(from:applying:)` forces `.resume(key.session)` so a fork's template — which names
+    /// the session it forked *from* and carries `--fork-session` — cannot mint a third session. A
+    /// created channel's `.new(id)` is the one template that must survive it: the transcript does
+    /// not exist yet, `--resume` needs one, and a restart-required setting changed before the first
+    /// send is exactly when a user changes one. The channel would come up refused.
+    func testAQuiescentRestartBeforeTheFirstTurnKeepsSessionID() async throws {
+        let harness = try Harness()
+        defer { Task { await harness.tearDown() } }
+
+        let key = await harness.fleet.create(ChannelCreation(cwd: harness.cwd))
+        _ = try await harness.fleet.perform(.open, on: key)
+        try await harness.waitFor("the created channel came up") { [fleet = harness.fleet] in
+            await fleet.state(of: key)?.origin == .owned(.ready)
+        }
+        _ = try? await harness.fleet.perform(.quiescentRestart(RestartRequest(promptSuggestions: true)), on: key)
+        try await harness.waitFor("the restart built a process") { [launches = harness.launches] in
+            launches.count >= 2
+        }
+
+        let restart = try Self.argv(of: try XCTUnwrap(harness.launches.all.dropFirst().first))
+        XCTAssertTrue(Self.value(of: "--session-id", in: restart) == key.session.description,
+                      "a restart before the first turn dropped --session-id for a transcript that does not exist")
+        XCTAssertFalse(restart.contains("--resume"),
+                       "a restart before the first turn passed --resume, which the engine refuses with no transcript")
+        XCTAssertTrue(restart.contains("--prompt-suggestions"), "the restart request's own change was lost")
+    }
+
+    /// The other direction, so the clause above is not simply "never rewrite the session start": a
+    /// restart *after* the transcript exists resumes it.
+    func testAQuiescentRestartAfterTheTranscriptExistsResumes() async throws {
+        let harness = try Harness()
+        defer { Task { await harness.tearDown() } }
+
+        let key = await harness.fleet.create(ChannelCreation(cwd: harness.cwd))
+        await harness.fleet.register(key, cwd: harness.cwd, recent: true)
+        _ = try await harness.fleet.perform(.open, on: key)
+        try await harness.waitFor("the created channel came up") { [fleet = harness.fleet] in
+            await fleet.state(of: key)?.origin == .owned(.ready)
+        }
+        _ = try? await harness.fleet.perform(.quiescentRestart(RestartRequest(promptSuggestions: true)), on: key)
+        try await harness.waitFor("the restart built a process") { [launches = harness.launches] in
+            launches.count >= 2
+        }
+
+        let restart = try Self.argv(of: try XCTUnwrap(harness.launches.all.dropFirst().first))
+        XCTAssertTrue(Self.value(of: "--resume", in: restart) == key.session.description,
+                      "a restart after the transcript exists did not resume it")
+        XCTAssertFalse(restart.contains("--session-id"),
+                       "a restart after the transcript exists passed --session-id, which the engine refuses")
+    }
+
     // MARK: - The precondition still gates the first child
 
     /// Item 47's first half on the fleet's side: a created channel in an untrusted root refuses to

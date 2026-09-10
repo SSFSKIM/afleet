@@ -1622,7 +1622,15 @@ public actor ChannelSupervisor {
     /// the agent's `initialPrompt` as a user turn behind the connecting glyph (parent §7.4).
     private func relaunch(from snapshot: RestartSnapshot, applying request: RestartRequest) -> LaunchConfiguration {
         var launch = launchTemplate
-        launch.session = .resume(key.session, fork: false)
+        // A restart resumes **this** channel's session, which is what makes a template naming a fork's source, or
+        // carrying `--fork-session`, safe to relaunch from. The one template it must not overwrite is a created
+        // channel's `.new(id)`: the engine's own rule is that `--resume` needs an existing transcript and
+        // `--session-id` is refused once one exists (§6.1), so a restart-required setting changed before the first
+        // turn — which is exactly when a user is most likely to change one — would relaunch with `--resume` against
+        // a session that has never been written and be refused outright. The id is the same either way; only the
+        // flag differs, and only the transcript's existence decides which is legal. `transcriptObserved()` is what
+        // moves it, and until then this keeps the flag the channel came up with.
+        if case .new = launch.session {} else { launch.session = .resume(key.session, fork: false) }
         launch.cwd = snapshot.cwd
         launch.model = snapshot.model
         launch.permissionMode = snapshot.permissionMode
