@@ -105,9 +105,22 @@ enum AgentRelayMachine {
         var claimed: Set<String> = []
         var calls: Set<String> = []
         var outcomes: [AgentRelayRecord.ID: Outcome] = [:]
-        for record in ordered {
+        for (position, record) in ordered.enumerated() {
             guard let held = settled[record.id] else { continue }
-            let outcome = overtakenByDelivery(held, of: record, in: items, claiming: claimed) ?? held
+            // **Where a competing younger send begins.** The overtake below revises a settled *Not
+            // delivered* on a frame that arrived after the record's own call, and *Retry* re-sends
+            // the same text to the same run — so the retry's own delivery frame matches the failed
+            // record just as well. It is the retry's: a frame after a younger record's prompt echo
+            // belongs to that record, which is the bound the call-claiming loop below already uses,
+            // and the echo is a transcript record so it survives a rebuild. Only a send of the
+            // **same text to the same run** can contest a frame, and bounding on any other younger
+            // record would refuse a late delivery that is genuinely this record's.
+            let contested = ordered[ordered.index(after: position)...]
+                .filter { $0.target == record.target && $0.textDigest == record.textDigest }
+                .compactMap { later in items.firstIndex { isPromptEcho($0, of: later) } }
+                .min()
+            let outcome = overtakenByDelivery(held, of: record, in: items, claiming: claimed,
+                                              before: contested) ?? held
             if let key = outcome.claimedKey { claimed.insert(key) }
             if let call = outcome.claimedCall { calls.insert(call) }
             outcomes[record.id] = outcome
@@ -136,15 +149,24 @@ enum AgentRelayMachine {
     /// without taking the message, and the message can still turn up in that run's own transcript
     /// afterwards; a settlement that froze it would leave *Not delivered* and a *Retry* on a message
     /// that had arrived, and the retry would send it twice. It applies only to a record that settled
-    /// on a **call of its own** and scans only after that call, so it cannot take a delivery frame
-    /// that belongs to some other send — which is the correlation the settlement exists to protect.
+    /// on a **call of its own** and scans only after that call, and stops where a younger send of
+    /// the same text to the same run begins, so it cannot take a delivery frame that belongs to some
+    /// other send — which is the correlation the settlement exists to protect.
+    ///
+    /// **The record's own turn boundary is deliberately not a bound.** This arm is the one where the
+    /// run took the message in a *later* round, so the frame it revises on lies after the `result`
+    /// that closed the relay's turn; stopping there would leave *Not delivered* and a *Retry* on
+    /// every message that arrived late, which is what this method exists to prevent
+    /// (`testASettledNotDeliveredYieldsToTheMessageArriving` is that case).
     private static func overtakenByDelivery(_ held: Outcome, of record: AgentRelayRecord,
-                                            in items: [TimelineItem], claiming claimed: Set<String>) -> Outcome? {
+                                            in items: [TimelineItem], claiming claimed: Set<String>,
+                                            before contested: Int? = nil) -> Outcome? {
         guard case .notDelivered = held.state, let call = held.claimedCall else { return nil }
         guard let index = items.firstIndex(where: {
             if case .toolCall(let made) = $0 { return made.toolUseID == call } else { return false }
         }) else { return nil }
-        guard let key = delivery(of: record, in: items, after: index, claiming: claimed) else { return nil }
+        guard let key = delivery(of: record, in: items, after: index, claiming: claimed,
+                                 before: contested) else { return nil }
         return Outcome(.delivered, reply: held.reply, claimedKey: key, claimedCall: call,
                        turnClosed: held.turnClosed)
     }
@@ -381,9 +403,16 @@ enum AgentRelayMachine {
     /// and a peer message, which is what a frame whose `origin.kind` is not `human` becomes. An
     /// assistant message of the run is the agent *replying*, and a reply quoting the message back is
     /// not the message arriving.
+    ///
+    /// `contested` is the first index a **younger send of the same text to the same run** could
+    /// have produced a frame at — its own prompt echo. Nil where no such send exists, which is every
+    /// relay that was never retried, and the scan then runs to the end as it always has.
     private static func delivery(of record: AgentRelayRecord, in items: [TimelineItem],
-                                 after relay: Int, claiming claimed: Set<String>) -> String? {
-        for index in items.index(after: relay)..<items.endIndex {
+                                 after relay: Int, claiming claimed: Set<String>,
+                                 before contested: Int? = nil) -> String? {
+        let end = min(contested ?? items.endIndex, items.endIndex)
+        guard items.index(after: relay) < end else { return nil }
+        for index in items.index(after: relay)..<end {
             let item = items[index]
             guard item.provenance.agentID == record.target, !claimed.contains(item.id.key) else { continue }
             let text: String
@@ -483,6 +512,16 @@ final class AgentRelayRegistry {
     /// from, and a write here during a body evaluation must not invalidate that body.
     @ObservationIgnored private var settlements: [AgentRelayRecord.ID: AgentRelayMachine.Outcome] = [:]
 
+    /// The records of each channel that hold no settlement yet — the publish gate, as a membership
+    /// question rather than a scan.
+    ///
+    /// `observe(_:in:)` runs on every publish of every channel, so the gate itself must not grow
+    /// with the channel's relay history: a record enters when it opens and leaves when its
+    /// conclusion is stored, and a channel whose set is empty costs one dictionary read. Held beside
+    /// `settlements` rather than derived from it for that reason, and `@ObservationIgnored` for the
+    /// same reason.
+    @ObservationIgnored private var unsettled: [ChannelKey: Set<AgentRelayRecord.ID>] = [:]
+
     /// Opens a record for a send that has already happened. Called after `sendPrompt` returned its
     /// uuid, never before: a record for a send the engine refused would be a message with a state and
     /// no message.
@@ -493,6 +532,7 @@ final class AgentRelayRegistry {
         let record = AgentRelayRecord(id: AgentRelayRecord.ID(raw: UUID()), promptUUID: promptUUID,
                                       target: target, textDigest: textDigest, sentAt: sentAt, retryOf: retryOf)
         records[channel, default: []].append(record)
+        unsettled[channel, default: []].insert(record.id)
         resends[record.id] = resend
         return record
     }
@@ -514,6 +554,7 @@ final class AgentRelayRegistry {
         for record in records {
             guard let outcome = outcomes[record.id], outcome.isSettled else { continue }
             settlements[record.id] = outcome
+            unsettled[channel]?.remove(record.id)
         }
         return outcomes
     }
@@ -535,13 +576,14 @@ final class AgentRelayRegistry {
     /// is that a conclusion reached with nobody looking is the conclusion a later reading gives.
     ///
     /// **The cost gate.** It returns before the pass for a channel with no records and for one whose
-    /// every record has already settled, so the derivation runs only while a channel holds a relay
-    /// still in flight — few, and for the length of a turn. Nothing else is compared: a publish
+    /// every record has already settled — one dictionary read either way, over the set `unsettled`
+    /// maintains — so the derivation runs only while a channel holds a relay still in flight: few,
+    /// and for the length of a turn. Nothing else is compared: a publish
     /// happens *because* the fold changed, so a memo of the timeline's item count would skip almost
     /// no pass a streaming channel makes and would cost a comparison on every one of them. What is
     /// left of the shape is tracker 451.
     func observe(_ timeline: ChannelTimeline, in channel: ChannelKey) {
-        guard records(in: channel).contains(where: { settlements[$0.id] == nil }) else { return }
+        guard let waiting = unsettled[channel], !waiting.isEmpty else { return }
         _ = outcomes(in: channel, of: timeline)
     }
 

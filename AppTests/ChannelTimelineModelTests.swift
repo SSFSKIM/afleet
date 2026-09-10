@@ -382,6 +382,108 @@ final class ChannelTimelineModelTests: XCTestCase {
                       + "\(relay.derivations) time(s), so no publish reached the registry")
     }
 
+    /// A release inside the coalescer's trailing window still takes the conclusion.
+    ///
+    /// `close()` cancels the armed publish — which is right, because a publish landing after the
+    /// release would push a timeline at subscribers the release just finished — and that cancel was
+    /// the last thing standing between a terminal `result` folded inside the 33 ms window and
+    /// *Check again*, which rebuilds the channel with no turn boundary in it (§7.3). So the release
+    /// observes the fold's final timeline before it tears the ingestion down, and only when a
+    /// publish was actually armed.
+    ///
+    /// **How the window is entered.** A test cannot land inside a 33 ms window deterministically,
+    /// so the record is opened *after* the publish that carried the turn's close: the evidence is in
+    /// the fold and no conclusion has been taken from it, which is the state a release inside the
+    /// window leaves behind, and the count below asserts that starting point rather than assuming
+    /// it. The frames are invented and decoded (§11); the session is the channel's own.
+    func testAReleaseInsideTheTrailingWindowStillTakesTheConclusion() async throws {
+        let rig = try await Rig(fixtures: ["plain-two-turn"])
+        let key = rig.keys[0]
+        let relay = AgentRelayRegistry()
+        rig.registry.relay = relay
+        await rig.lifecycle.openEvents(of: key)
+        let model = rig.registry.model(for: key)
+        await model.open(rig.row(0, origin: .owned(.ready)))
+
+        // The send's own prompt, as the transcript already holds it: a `promptSent` raise names the
+        // uuid a `result` is then attributed to, which is the turn boundary the rebuild loses.
+        guard let prompt = model.items.compactMap({ item -> String? in
+            guard case .userMessage(let message) = item, message.provenance.agentID == nil,
+                  !message.promptUUID.isEmpty else { return nil }
+            return message.promptUUID
+        }).first else { throw Bail("the channel holds no main-stream user message to send a relay from") }
+        await model.signal(.promptSent(uuid: prompt, at: Date()))
+        rig.lifecycle.enqueue(Self.turnClosed(of: key), to: key)
+        let closed = await Self.settle(until: { model.timeline.overlay.turns.count > 0 })
+        XCTAssertTrue(closed,
+                      "the channel's fold holds \(model.timeline.overlay.turns.count) turn summary(s), so no "
+                      + "turn ever closed and the release below has no conclusion to take")
+
+        let record = relay.open(promptUUID: prompt, target: "task_invented_release01",
+                                textDigest: AgentRelayDigest.of("an invented errand"), in: key,
+                                resend: { _, _ in })
+        XCTAssertEqual(relay.derivations, 0,
+                       "the fold was read \(relay.derivations) time(s) before the release, so what it took "
+                       + "cannot be told from what a publish took")
+
+        model.coalescer.request()
+        XCTAssertTrue(model.coalescer.isArmed, "no publish was armed, so the release cancels nothing")
+        model.close()
+
+        let took = await Self.settle(until: { relay.derivations > 0 })
+        XCTAssertTrue(took, "the release cancelled the armed publish and took no conclusion from the fold")
+
+        // The channel as *Check again* brings it back: every transcript record, none of the overlay.
+        var rebuilt = model.timeline
+        rebuilt.overlay = .empty
+        rebuilt.preview = nil
+        rebuilt.registry = RegistryMirror()
+        XCTAssertTrue(relay.reading(of: record, in: key, of: rebuilt).state == .notDelivered(.noCall),
+                      "a turn that closed inside the trailing window lost its conclusion to the release")
+    }
+
+    /// A release with no publish armed takes nothing: there is nothing the fold holds that the last
+    /// publish did not already carry, and a release is not a reason to derive.
+    func testAReleaseWithNoPublishArmedObservesNothing() async throws {
+        let rig = try await Rig(fixtures: ["plain-two-turn"])
+        let key = rig.keys[0]
+        let relay = AgentRelayRegistry()
+        rig.registry.relay = relay
+        let model = rig.registry.model(for: key)
+        await model.open(rig.row(0, origin: .archived))
+        relay.open(promptUUID: "eeeeeee3-3333-4333-8333-eeeeeeeeeee3", target: "task_invented_release02",
+                   textDigest: AgentRelayDigest.of("an invented errand"), in: key, resend: { _, _ in })
+        let settled = await Self.settle(until: { !model.coalescer.isArmed })
+        XCTAssertTrue(settled, "a publish stayed armed, so the release below is not the unarmed case")
+
+        let before = relay.derivations
+        model.close()
+        // A bounded window rather than the hang guard: this asserts that something does **not**
+        // happen, and the work it would have to happen in is one actor hop on the task `close()`
+        // spawns — so half a second is orders of magnitude more than the event needs, and waiting
+        // the guard out would put thirty idle seconds in the suite for a clause that cannot pass
+        // later than its first iteration.
+        for _ in 0..<50 where relay.derivations == before {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(relay.derivations, before,
+                       "the release derived \(relay.derivations - before) time(s) with no publish armed")
+    }
+
+    /// One invented `result` for this channel, decoded the way a live channel receives it — the
+    /// frame the turn boundary is folded from, and the one no transcript record carries (§7.3).
+    private static func turnClosed(of key: ChannelKey) -> WireEvent {
+        let object: [String: JSONValue] = [
+            "type": .string("result"), "subtype": .string("success"), "duration_ms": .integer(1),
+            "is_error": .bool(false), "num_turns": .integer(1), "total_cost_usd": .number(0),
+            "uuid": .string("fafafafa-4444-4444-8444-fafafafafafa"),
+            "session_id": .string(key.session.description)]
+        guard let data = try? JSONValue.object(object).canonicalData() else {
+            preconditionFailure("an invented frame did not encode as JSON")
+        }
+        return .frame(FrameDecoder.decode(line: data), .first)
+    }
+
     /// A `refusal_fallback_prompt` naming the uuids it takes back: the recorded request with its
     /// `retractedMessageUuids` replaced and re-keyed, so everything but the list under test is the
     /// engine's and every identifier this suite states is invented (§11).

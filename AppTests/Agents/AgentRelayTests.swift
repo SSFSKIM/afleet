@@ -315,32 +315,75 @@ final class AgentRelayTests: XCTestCase {
                        + "\(wire.relay.derivations - settled) more time(s), not 0")
     }
 
-    /// **Two sends in one turn, concluded at publish time, still settle on their own calls.**
+    /// **Two sends in one turn, concluded at publish time, keep their own evidence across a rebuild.**
     ///
-    /// Item 51's correlation is one-to-one and the settlement is what protects it across a rebuild,
-    /// so a settlement written by the publish rather than by a reading must claim the same call the
-    /// reading would have. The turn relays twice: the first call is refused and the second goes
-    /// through, and both conclusions are taken with nothing drawing either row.
+    /// The model was asked to relay twice in one turn and relayed one of them, which is a real
+    /// failure of item 51's: the younger send's message reaches the run's transcript, and the older
+    /// send's turn closes with no call that was ever its own. Both conclusions are taken by the
+    /// publish alone, and the older one **cannot** be re-derived afterwards — its no-call arm is
+    /// read from the turn's `result`, so a rebuilt timeline with no boundary in it leaves the
+    /// derivation at *Pending*. This is therefore the correlation asserted over stored settlements:
+    /// each record keeps its own call and its own frame, and neither takes the other's.
     func testTwoSendsInOneTurnConcludedAtPublishTimeKeepTheirOwnCalls() {
         var wire = RelayWire()
         wire.open()
-        let first = wire.record()
-        let second = wire.record(promptUUID: RelayWire.secondPromptUUID, message: RelayWire.secondMessage)
+        let dropped = wire.record()
+        let relayed = wire.record(promptUUID: RelayWire.secondPromptUUID, message: RelayWire.secondMessage)
 
-        wire.sendMessageCall(to: RelayWire.target, message: RelayWire.message)
-        wire.sendMessageResult(success: false)
-        wire.publish()
-        wire.sendMessageCall(to: RelayWire.target, id: RelayWire.secondSendCall,
-                             message: RelayWire.secondMessage)
-        wire.sendMessageResult(id: RelayWire.secondSendCall, success: true)
+        wire.sendMessageCall(to: RelayWire.target, message: RelayWire.secondMessage)
+        wire.sendMessageResult(success: true)
+        wire.forwarded(RelayWire.secondMessage)
+        wire.assistantText(RelayWire.reply)
         wire.result()
         wire.publish()
 
         let rebuilt = wire.rebuiltFromFiles
-        XCTAssertTrue(wire.state(of: first, in: rebuilt) == .notDelivered(.refused),
-                      "the refused send did not keep the call that carried its own message")
-        XCTAssertTrue(wire.state(of: second, in: rebuilt) == .relayed,
-                      "the second send took the first send's conclusion after the rebuild")
+        XCTAssertEqual(rebuilt.overlay.turns.count, 0,
+                       "the file-only rebuild carries \(rebuilt.overlay.turns.count) turn summary(s), "
+                       + "so this asserts nothing about a timeline with no turn boundary in it")
+        XCTAssertTrue(wire.state(of: relayed, in: rebuilt) == .delivered,
+                      "the send the model made lost the frame its own call delivered")
+        XCTAssertTrue(wire.state(of: dropped, in: rebuilt) == .notDelivered(.noCall),
+                      "the send the model never made did not keep the conclusion the publish took")
+    }
+
+    /// **A settled refusal does not take the retry's delivery frame.**
+    ///
+    /// *Retry* re-sends the same text to the same run, which is the one case where two records can
+    /// both match one forwarded frame — and now that a conclusion is taken at publish time the
+    /// refused record is settled, so it is the first record the pass looks at and its overtake scan
+    /// reaches the frame first. The failed send would then read *Delivered* and lose the *Retry*
+    /// that is its whole point, while the send that actually arrived read *Relayed*: one frame
+    /// accounted to the wrong send, which is item 51's one-to-one correlation broken in both
+    /// directions at once.
+    ///
+    /// The bound is the one the call-claiming path already uses: a frame that lies after a younger
+    /// record's own prompt echo belongs to that record, and the echo is a transcript record.
+    func testASettledRefusalDoesNotTakeTheRetrysDeliveryFrame() {
+        var wire = RelayWire()
+        wire.open()
+        let failed = wire.record()
+        wire.sendMessageCall(to: RelayWire.target)
+        wire.sendMessageResult(success: false)
+        wire.assistantText(RelayWire.explanation)
+        wire.result()
+        wire.publish()
+        XCTAssertTrue(wire.state(of: failed) == .notDelivered(.refused),
+                      "the refusal did not settle, so nothing below is asserted about a settled record")
+
+        // The *Retry*: the same text to the same run, in its own turn — and this time it arrives.
+        let retried = wire.record(promptUUID: RelayWire.secondPromptUUID)
+        wire.sendMessageCall(to: RelayWire.target, id: RelayWire.secondSendCall)
+        wire.sendMessageResult(id: RelayWire.secondSendCall, success: true)
+        wire.forwarded(RelayWire.message)
+        wire.publish()
+
+        XCTAssertTrue(wire.state(of: retried) == .delivered,
+                      "the retry did not claim the delivery frame its own send produced")
+        let reading = wire.reading(of: failed)
+        XCTAssertTrue(reading.state == .notDelivered(.refused),
+                      "the failed send took the retry's delivery frame")
+        XCTAssertNotNil(reading.retry, "the failed send lost the Retry its arm offers")
     }
 
     /// **A settled *Not delivered* still yields to the message arriving.**

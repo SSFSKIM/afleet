@@ -4259,16 +4259,23 @@ needs more. Nothing above is renumbered.
 ## From corrective/c6-relay-conclusion, 2026-09-11 (numbered from 451)
 
 451. **A relay that never settles re-derives on every publish for the life of the channel.**
-     `observe(_:in:)`'s gate keys on every record holding a settlement, and `.pending` and
-     `.relayed` are not terminal arms — so a record whose turn cannot close (the process was killed
-     mid-turn, the `SendMessage` result never came back) keeps one pass over the channel's whole
-     timeline in every publish that channel makes, at up to thirty hertz, for as long as the app
-     runs. It is the shape 436 files for the reading, moved onto the publish path, and it is bounded
-     the same two ways: the channel has to be actively folding for a publish to happen at all, and
-     the pass is over the items the fold holds. The memo the ruling offered as an alternative gate —
+     `observe(_:in:)`'s gate keys on every record of the channel holding a settlement, and
+     `.pending` and `.relayed` are not terminal arms — so a record whose turn cannot close (the
+     process was killed mid-turn, the `SendMessage` result never came back) keeps the derivation on
+     every publish that channel makes, at up to thirty hertz, for as long as the app runs. **And
+     the pass is not one pass.** `advance` revisits every *settled* record of the channel first, and
+     each settled *Not delivered* holding a call of its own performs a call lookup and a bounded
+     delivery scan over the items — so the cost that rides each publish is O(settled records ×
+     items) plus the one pass for the record still in flight, and it grows with the channel's whole
+     relay history rather than with what is unresolved. It is 436's shape moved onto the publish
+     path, bounded the same two ways: the channel has to be actively folding for a publish to happen
+     at all, and each scan is over the items the fold holds. The memo the ruling offered as an
+     alternative gate —
      the item count and overlay identity against the last observed pair — buys nothing here,
      because a publish happens *because* the fold changed, so it would skip almost no pass a
      streaming channel makes and would cost a comparison on every one of them. Closing it is either
      a rule for abandoning a record whose turn cannot close, which is a behavioural decision about
-     what the row then says, or 436's cache per (channel, timeline identity), which would serve both
-     entries. Owner: whoever takes 436. Raised by this corrective's own reading of its cost gate.
+     what the row then says, or 436's cache per (channel, timeline identity) — which is the one
+     closer that serves both entries, because it removes the repeated pass for the reading and for
+     the publish alike. Owner: whoever takes 436. Raised by this corrective's own reading of its
+     cost gate, sharpened by its review round.
