@@ -9,13 +9,23 @@ import AfleetCore
 /// test gets a home-shaped directory anyway, and it refuses to be built anywhere near the three protected roots.
 final class ScratchConfigHome {
     let url: URL
+    let source: ConfigHome.Source
 
-    var configHome: ConfigHome { ConfigHome(root: url, source: .environment) }
+    var configHome: ConfigHome { ConfigHome(root: url, source: source) }
 
-    init() throws {
-        let candidate = FileManager.default.temporaryDirectory
+    /// `source` chooses the *layout*, which is not cosmetic: an `.environment` home holds its global
+    /// config document inside itself and a `.default` home's document is the sibling
+    /// `<parent>/.claude.json` (`ConfigHome.globalConfig`), and the two are different files. It also
+    /// decides whether a child launched against this home is told `CLAUDE_CONFIG_DIR` at all
+    /// (§6.1), which is what a test needs control of when the child is `Tools/fake-claude`: the
+    /// replayer refuses to write into a home that variable names, so a test that wants a real
+    /// transcript materialised has to be a default-home test.
+    init(source: ConfigHome.Source = .environment) throws {
+        self.source = source
+        let base = FileManager.default.temporaryDirectory
             .resolvingSymlinksInPath()
             .appending(path: "afleet-c4-home-\(UUID().uuidString)")
+        let candidate = source == .default ? base.appending(path: ".claude") : base
         Self.refuseProtectedRoots(candidate)
         url = candidate
 
@@ -28,7 +38,7 @@ final class ScratchConfigHome {
         try write(["proto": 1, "supervisorPid": Int(ProcessInfo.processInfo.processIdentifier),
                    "updatedAt": 0, "workers": [String: Any]()],
                   to: url.appending(path: "daemon/roster.json"))
-        try write(["projects": [String: Any]()], to: url.appending(path: ".claude.json"))
+        try write(["projects": [String: Any]()], to: configHome.globalConfig)
     }
 
     /// Marks a project root trusted, the way the trust dialog does — in *this* directory, which is a home the test
@@ -48,7 +58,7 @@ final class ScratchConfigHome {
     }
 
     private func mutateProjectEntry(root: URL, _ body: (inout [String: Any]) -> Void) throws {
-        let file = url.appending(path: ".claude.json")
+        let file = configHome.globalConfig
         var document = (try? JSONSerialization.jsonObject(with: Data(contentsOf: file))) as? [String: Any] ?? [:]
         var projects = document["projects"] as? [String: Any] ?? [:]
         // `realpath`, not `resolvingSymlinksInPath`: the latter rewrites `/private/var` back to `/var`, which is
@@ -62,7 +72,9 @@ final class ScratchConfigHome {
     }
 
     func removeAll() {
-        try? FileManager.default.removeItem(at: url)
+        // The base and not the leaf: a `.default` home's global config document is the leaf's
+        // sibling, so removing `url` alone would leave the document behind.
+        try? FileManager.default.removeItem(at: source == .default ? url.deletingLastPathComponent() : url)
     }
 
     private func write(_ object: [String: Any], to file: URL) throws {
