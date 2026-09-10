@@ -2124,35 +2124,28 @@ the gap between 141 and 157 is C6.1's and C6.2's reservations and is expected. (
      **Closed 2026-09-11 — `corrective/c6-new-channel`, merge pending.** Implemented as a creation
      *verb* rather than a composition at `register`'s caller: `Fleet.create(ChannelCreation)` mints
      the `SessionID`, files a seed and builds the supervisor with `.new(id)`, and spawns nothing, so
-     §6.11 trust and §6.12 consent still gate the first child. The launch line moves to `--resume`
-     on evidence the transcript exists — the channel's first `transcript_mirror` naming
-     `<id>.jsonl`, and a `register` for a key whose supervisor still holds `.new` — and the worktree
-     is cleared with the flag. `isolatedSettingsForNewChannels` now has its consumer: the sheet
-     reads the settings document at the moment it opens and the request carries the flag through to
+     §6.11 trust and §6.12 consent still gate the first child. Two launch flags move on two pieces
+     of evidence, because the facts are different ages: the **worktree** is cleared by the engine's
+     first `system/init`, whose `cwd` is the checkout the CLI made during startup, and the
+     **session** moves to `--resume` on evidence the transcript exists — a `transcript_mirror`
+     carrying records and naming `<id>.jsonl`, or a `register` for a key whose supervisor still
+     holds `.new`. `isolatedSettingsForNewChannels` now has its consumer: the sheet reads the
+     settings document at the moment it opens and the request carries the flag through to
      `settingSources = []`, with `--strict-mcp-config` left to `SpawnPreconditions`, which reads the
-     created launch. Verified headless: nine `FleetSessionsTests.NewChannelTests` over a real
-     `Fleet` with the process factory watched, the last driving a real `fake-claude` child replaying
-     `plain-two-turn` into a scratch default-source home so the transcript named `<key>.jsonl`
-     really appears and the respawn's argv proves the transition; eighteen
-     `AfleetTests.NewChannelTests` over the pending row, the sheet's one action and the two spawn
-     gates; two more in `ConsentAndTrustTests` for item 47's trust flip. Floor: 2,535 executed, 30
-     skipped, 0 failures. Evidence under `.build/corrective-logs/`.
+     created launch. Verified headless in `FleetSessionsTests.NewChannelTests`,
+     `FleetSessionsTests.WorktreeTrustTests`, `FleetSessionsTests.TrustReviewPaneTests`,
+     `AfleetTests.NewChannelTests` and `AfleetTests.ConsentAndTrustTests`; one of them drives a real
+     `fake-claude` child replaying `plain-two-turn` into a scratch default-source home, so the
+     transcript named `<key>.jsonl` really appears and the respawn's argv proves the transition.
+     Counts and the floor are in the corrective's own report and in
+     `.build/corrective-logs/final-status.json` rather than here, because a number transcribed into
+     this file is a number that goes stale on the next commit.
 
-     **What remains.** Item 3's own path is complete. **Item 47's is not, and the blocker is entry
-     314, not this entry.** The flip is wired — `PrecommitModel.reread` requests `perform(.open)`
-     when an evaluation that was `.untrusted` reads `.ready` — but the only caller that can put an
-     evaluation in that state is *Review trust in terminal*, which goes through
-     `ChannelSupervisor.openInTerminal` → `handOff`, and `handOff` refuses any channel whose origin
-     is not `.owned(.ready)` or `.owned(.dormant)`. An untrusted channel never spawns, so its origin
-     is `.archived` and the handoff throws `notOwned` before a pane can open. That is entry 314
-     exactly, filed 2026-09-09 and owned by C6.3 with C7.4; the closure it needs is *with no process
-     to hand over, open a pane on the project's directory directly*. Until then item 47's second half
-     cannot fire in the running app whatever this entry did, and the App-side test passes only
-     because a `LifecycleAPI` double has no such gate. Raised by this corrective's review round.
-
-     Also outstanding, and neither is implementation: persisting a created-but-unsent channel across
-     an app relaunch is a product decision nobody has taken (the pending map is in memory only and
-     `FleetBrowserModel.pending` names where it would hook in); and the live witnesses are still
+     **What remains.** Item 3's path and item 47's are both complete headless; entry 314 closed with
+     this corrective. Two things are still open and neither is implementation: persisting a
+     created-but-unsent channel across an app relaunch is a product decision nobody has taken (the
+     pending map is in memory only and `FleetBrowserModel.pending` names where it would hook in, and
+     entry 448 is the isolation half of the same missing store); and the live witnesses are still
      owed — item 3's AI title against a real engine needs an account that permits prompted turns
      (entry 163), and items 4, 5, 41 and 52 need the same account with the isolation setup this entry
      unblocks.
@@ -2417,6 +2410,28 @@ the gap between 141 and 157 is C6.1's and C6.2's reservations and is expected. (
      pane. Closer: with no process to hand over, the action opens a pane on the project's directory
      directly; no handoff is involved, because there is nothing to hand off. Owner: C6.3 with C7.4.
      Filed 2026-09-09 at C6.3's third review round (hard stop).
+
+     **Closed 2026-09-11 — `corrective/c6-new-channel`, merge pending; the owner line above is
+     superseded by the architect's ruling of the same day.** `Fleet.openInTerminal` on a supervisor
+     that holds no process answers a `PaneRequest` running the binary with **no arguments** in the
+     channel's runtime cwd, purpose `.trustReview(SessionID)` — a new `PanePurpose` case — with no
+     transition, no `pendingHatch` and no ownership change. No arguments is the substance and not a
+     detail: `--resume` opens the conversation, and what §6.11 needs is the interactive run whose
+     *startup* puts the trust dialog up. The request is recorded in a field of its own so
+     `paneExited` matches it, clears it, records `pane_ended` and re-adopts nothing, while
+     `pendingHatch` keeps meaning that a handoff is in flight, which `OriginResolver` reads. A
+     channel with an owned process keeps today's hatch unchanged. C7.4 handles the case where it
+     switches on `PanePurpose`: the readout labels it *Trust review* and names the banner as where a
+     fresh pane comes from, the stop policy takes the hatch's `.report`, and `isHatch` stays false by
+     construction.
+
+     The re-read that item 47's second half turns on is driven by the pane's **exit** and not by the
+     request: `PanelHost.run(_:for:)` returns when the pane starts, so re-reading there reads the
+     verdict before the user has answered the dialog — and coming back to the front, which is
+     §6.11's other trigger, no longer fires now that the pane is inside afleet.
+     `App/Panels/PaneExitAnnouncer.swift` is a listener teed off the one closure that already carries
+     the exit to X5 (`PanelHostModel.makeContext`'s `reportPaneExit`), announced after X5 has been
+     told: no timer, and no second source of truth.
 
 315. **The thread's generic reply to a question card answers only the first question.** A thread
      reply (`App/Threads/ThreadModel.swift`, against `App/Decisions/QuestionCardView.swift`) builds one response from the text in the composer and files it against the first
@@ -4315,10 +4330,13 @@ needs more. Nothing above is renumbered.
      only the supervisor, so from then on the fleet's copy can still say `.new` for a channel whose
      every spawn resumes. Inert today, because nothing reads `session` off it, and left that way
      rather than plumbing a callback from the supervisor back into the facade for a field with no
-     reader. Its one live consequence is a wasted round trip: `register` gates its cross-actor ask on
-     `launches[key].session == .new`, so a drifted copy makes one registration pay an await that
-     answers `false`. The reverse — the fleet's copy resumed while the supervisor still holds `.new`
-     — cannot happen, because only `create` writes `.new` and only `register` promotes the copy.
+     reader. Its live consequence is a wasted round trip **per registration, not one**: `register`
+     gates its cross-actor ask on `launches[key].session == .new`, and once the *frame* evidence has
+     moved the supervisor's template the fleet's copy still says `.new` for ever — so every later
+     `register` for that key pays an `await` into the supervisor that answers `false`. That is one
+     channel and one hop per snapshot or delta naming it, which is small, and it is the direction
+     that is safe: the reverse — the fleet's copy resumed while the supervisor still holds `.new` —
+     cannot happen, because only `create` writes `.new` and only `register` promotes the copy.
      Closer: have `preconditions(for:)` ask the supervisor for the line it would actually launch
      (which would also pick up a `/cd`'s runtime cwd, arguably more correct than the seed's), or drop
      `session` from the fleet's record. Owner: C4.
@@ -4346,4 +4364,50 @@ needs more. Nothing above is renumbered.
      "This channel is new". Closer: a typed `decidingRule`, or an assertion on `ListingPolicy.rules`
      that no rule takes the creation's name. Owner: C5's successor on the row. Raised by this
      corrective's review round.
+
+## From corrective/c6-new-channel's fix wave, 2026-09-11 (448-450, 453)
+
+448. **A created channel's isolation is lost across an app relaunch.** `Fleet.create` composes the
+     launch line — `settingSources = []` for an isolated creation, and the model, effort, agent and
+     session name beside it — and nothing persists it. On the next launch the channel arrives through
+     `ChannelRegistrar` and `Fleet.supervisor(for:)` builds a bare `.resume(key.session, fork: false)`
+     with no setting sources, no model and no name: a channel created *Isolated* comes back reading
+     the user's own rules, which is the opposite of what §14 item 4's setup asks for, and silently.
+     Bounded to the fields only a creation sets — a `/model` or a `/permissions` lives in `runtime`
+     and is restored — and it is the same missing store as the pending-row persistence decision under
+     entry 162, so it wants settling with that rather than separately. Closer: persist the created
+     launch beside the pending row, keyed by `ChannelKey`, and have `supervisor(for:)` prefer it.
+     Owner: whoever takes 162's persistence decision.
+
+449. **A fork of an isolated channel spawns un-isolated.** `Fleet.buildSibling` composes the
+     sibling's launch as `LaunchConfiguration(binary:cwd:session:)` and nothing else, so a fork drops
+     `settingSources`, `model`, `permissionMode`, `effort`, `name` and the environment options of the
+     channel it forked from. Pre-existing — C4 wrote it before any launch carried isolation — and
+     **reachable now**, because *Isolated settings for new channels* is the first setting that puts a
+     non-default `settingSources` on a channel a user can then fork: the fork loads the user's own
+     rules, so a tool the source could not have pre-approved is pre-approved in the copy. Closer:
+     compose the sibling from the source's own template the way `composedFromRuntime` does, keeping
+     only the session start the fork needs. Owner: C4.
+
+450. **A child that dies between the CLI's first write and the pump's mirror leaves the launch line
+     on `--session-id`.** The flip needs a `transcript_mirror` carrying records, and the engine writes
+     the record before it emits the frame — so a child killed in that window has written
+     `<id>.jsonl` while the supervisor still holds `.new`, and the crash respawn passes
+     `--session-id` for a file that now exists and is refused with *Session ID <id> is already in
+     use.* Narrow, and recovery exists rather than being hoped for: the transcript is on disk, so the
+     watcher's next delta registers the channel and `register`'s own evidence moves the flag, after
+     which the respawn resumes. What the user sees in between is a crash series with a refusal in it.
+     Closer: treat the refusal's own message as evidence — the engine names the condition exactly —
+     or `stat` the transcript before composing a `.new` respawn. Owner: C4.
+
+453. **The created channel's column takes no `events(of:)` subscription, against the child spec's
+     directive.** C6's dispatch brief said the awaiting-transcript path should subscribe to
+     `lifecycle.events(of:)`; `ChannelTimelineModel.performOpen` returns without one. Nothing is lost
+     today and the reasoning is recorded at the field: this model's only consumer of that stream is
+     `StreamIngestion`, which cannot exist without a file to read, and the header's readback loop
+     takes its own subscription the moment the channel has a process — so a subscription here would
+     be a second fan-out with no reader, whose buffered frames would be dropped when the ingestion
+     took its own. Filed rather than left as a comment alone, because it is a deliberate divergence
+     from a binding directive and the next reader of that directive should find it. Closer: none
+     unless a consumer appears that needs frames before the transcript does. Owner: C6.
 
