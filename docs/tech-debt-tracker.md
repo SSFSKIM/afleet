@@ -4295,3 +4295,27 @@ needs more. Nothing above is renumbered.
      habit it teaches is to wrap each `try` in the test and print the error rather than trusting the
      reported location. Owner: none — a note for whoever meets it next.
 
+445. **`Fleet`'s own copy of a channel's launch line can disagree with the supervisor's template
+     about the session start.** `Fleet.launches[key]` is written by `build` and read by
+     `preconditions(for:)`, which uses its `cwd` and `settingSources` and nothing else; the template
+     that actually composes a spawn is the supervisor's. Both are promoted when the *index* supplies
+     the `.new`-to-`.resume` evidence (`Fleet.register`), but the engine's own frame evidence reaches
+     only the supervisor, so from then on the fleet's copy can still say `.new` for a channel whose
+     every spawn resumes. Inert today, because nothing reads `session` off it, and left that way
+     rather than plumbing a callback from the supervisor back into the facade for a field with no
+     reader. Closer: have `preconditions(for:)` ask the supervisor for the line it would actually
+     launch (which would also pick up a `/cd`'s runtime cwd, arguably more correct than the seed's),
+     or drop `session` from the fleet's record. Owner: C4.
+
+446. **Forking a created channel before its first turn asks the engine for a session with no
+     transcript.** `ChannelSupervisor.fork` composes `.resume(source, fork: true)` from
+     `state.identity.resolved`, which a created channel has from the moment it exists, so *Fork* on
+     a channel that has never been sent to passes `--resume` for a transcript the engine has not
+     written and is refused. The refusal is clean — the source is untouched and §7.4 leaves the
+     channel where it started — but the sibling supervisor the fork built stays in the fleet under
+     its random provisional key with nothing behind it. The leak is pre-existing for any refused
+     fork; what is new is that a user can now reach the state, because a created channel is
+     selectable with no transcript. Closer: refuse `fork` while the template holds `.new`, with the
+     header's affordance disabled and a sentence saying to send first; and release a sibling whose
+     spawn never reached ready. Owner: C4 for the refusal, C6.2 for the affordance.
+
