@@ -64,10 +64,24 @@ enum ViewTree {
         }
     }
 
-    /// The same press over a button whose concrete type the caller cannot name. It reads the stored
-    /// action, which is where a `Button`'s action lives whatever its label is.
+    /// The typed press, kept as the overload every existing caller resolves to.
+    ///
+    /// It exists **beside** the `Any` one rather than being replaced by it: a caller that passes
+    /// something which is not a button should be a compile error, and with only the untyped member
+    /// it would be a silent `false` — a test asserting "the button carried no action" about a value
+    /// that was never a button. Swift picks this overload for a `Button<Text>` and the one below for
+    /// the `Any` that `labelledButton(_:in:)` answers with.
     @MainActor
-    static func press(_ button: Any) -> Bool {
+    static func press(_ button: Button<Text>) -> Bool { pressAction(of: button) }
+
+    /// The same press over a button whose concrete type the caller cannot name — a `Button` labelled
+    /// with a `Label`, whose generic parameter is the label view's type. It reads the stored action,
+    /// which is where a `Button`'s action lives whatever its label is.
+    @MainActor
+    static func press(_ button: Any) -> Bool { pressAction(of: button) }
+
+    @MainActor
+    private static func pressAction(of button: Any) -> Bool {
         guard let action = Mirror(reflecting: button).descendant("action", "closure") else { return false }
         // Swift 6's dynamic cast from Any rejects this isolated closure. Open the existential
         // and require matching isolation/signature and size before recovering the callable value.
