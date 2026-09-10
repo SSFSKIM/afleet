@@ -4262,20 +4262,25 @@ needs more. Nothing above is renumbered.
      `observe(_:in:)`'s gate keys on every record of the channel holding a settlement, and
      `.pending` and `.relayed` are not terminal arms — so a record whose turn cannot close (the
      process was killed mid-turn, the `SendMessage` result never came back) keeps the derivation on
-     every publish that channel makes, at up to thirty hertz, for as long as the app runs. **And
-     the pass is not one pass.** `advance` revisits every *settled* record of the channel first, and
+     every publish that channel makes, at up to thirty hertz, for as long as the app runs. **And the
+     pass is not one pass.** `advance` revisits every *settled* record of the channel first, and
      each settled *Not delivered* holding a call of its own performs a call lookup and a bounded
-     delivery scan over the items — so the cost that rides each publish is O(settled records ×
-     items) plus the one pass for the record still in flight, and it grows with the channel's whole
-     relay history rather than with what is unresolved. It is 436's shape moved onto the publish
-     path, bounded the same two ways: the channel has to be actively folding for a publish to happen
-     at all, and each scan is over the items the fold holds. The memo the ruling offered as an
-     alternative gate —
-     the item count and overlay identity against the last observed pair — buys nothing here,
-     because a publish happens *because* the fold changed, so it would skip almost no pass a
-     streaming channel makes and would cost a comparison on every one of them. Closing it is either
-     a rule for abandoning a record whose turn cannot close, which is a behavioural decision about
-     what the row then says, or 436's cache per (channel, timeline identity) — which is the one
-     closer that serves both entries, because it removes the repeated pass for the reading and for
-     the publish alike. Owner: whoever takes 436. Raised by this corrective's own reading of its
-     cost gate, sharpened by its review round.
+     delivery scan over the items. This branch added a third term of its own: every record of the
+     channel, settled or not, filters the younger records for a competing send of the same text to
+     the same run — O(records) — and each competing send it finds costs an O(items) `firstIndex` for
+     that send's prompt echo, plus one more for the older record's turn close. So the cost that
+     rides each publish is O(settled records × items) for the overtakes, plus O(records²) filtering,
+     plus O(items) per competing send, plus the one pass for the record still in flight — and it
+     grows with the channel's whole relay history rather than with what is unresolved. The
+     competing-send terms are nil-cheap in the ordinary case: the filter finds nothing unless one
+     text was relayed to one run twice, and no scan is taken when it does not. It is 436's shape
+     moved onto the publish path, bounded the same two ways: the channel has to be actively folding
+     for a publish to happen at all, and each scan is over the items the fold holds. The memo the
+     ruling offered as an alternative gate — the item count and overlay identity against the last
+     observed pair — buys nothing here, because a publish happens *because* the fold changed, so it
+     would skip almost no pass a streaming channel makes and would cost a comparison on every one of
+     them. Closing it is either a rule for abandoning a record whose turn cannot close, which is a
+     behavioural decision about what the row then says, or 436's cache per (channel, timeline
+     identity) — which is the one closer that serves both entries, because it removes the repeated
+     pass for the reading and for the publish alike. Owner: whoever takes 436. Raised by this
+     corrective's own reading of its cost gate, sharpened by its review round.

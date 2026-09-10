@@ -539,18 +539,23 @@ final class ChannelTimelineModel {
     /// Releases the ingestion and both loops. The registry calls it when a new launch replaces the
     /// workspace this model was built over.
     ///
-    /// **A publish still inside its window is evidence nothing else will ever see.** The cancel
-    /// below is right — a publish landing after the release would push a timeline at subscribers the
-    /// release just finished — but a terminal `result` folded in the last 33 ms is a conclusion
-    /// contract Y8's derivation has not been given yet, and the release is *Check again*, which
-    /// brings the channel back with no turn boundary in it. So the relay registry is handed the
-    /// fold's final timeline before the ingestion is closed, and only where a publish was armed:
-    /// with nothing armed there is nothing the last publish did not already carry, and a release is
-    /// not a reason to derive. Nothing else of the release is undone — no publish, no `timeline`
-    /// write on a terminated model, no subscription, no fan-out — so this resurrects nothing.
+    /// **What the fold holds and no publish carried is lost here otherwise.** The cancel below is
+    /// right — a publish landing after the release would push a timeline at subscribers the release
+    /// just finished — but a terminal `result` the fold took in the last window is a conclusion
+    /// contract Y8's derivation has never been given, and the release is *Check again*, which brings
+    /// the channel back with no turn boundary in it. So the relay registry is handed the fold's
+    /// final timeline before the ingestion is closed.
+    ///
+    /// **Unconditionally, and not only where a publish was armed.** "Armed" is not the same question:
+    /// an effect the ingestion has already yielded and the effects loop has not yet resumed to
+    /// consume has armed nothing, and a release on that hop would take no conclusion. The
+    /// registry's own gate is what makes this free — it returns on a dictionary read for a channel
+    /// with no relay in flight, which is every channel that has never relayed anything.
+    ///
+    /// Nothing else of the release is undone: no publish, no `timeline` write on a terminated
+    /// model, no subscription, no fan-out, and no reference to `self` in the task below.
     func close() {
         isTerminated = true
-        let pendingPublish = coalescer.isArmed
         coalescer.cancel()
         openingTask?.cancel(); openingTask = nil
         effectsTask?.cancel(); effectsTask = nil
@@ -558,7 +563,7 @@ final class ChannelTimelineModel {
         readbackTask?.cancel(); readbackTask = nil
         let ingestion = self.ingestion
         self.ingestion = nil
-        let relay = pendingPublish ? self.relay : nil
+        let relay = self.relay
         let key = self.key
         Task { @MainActor in
             if let relay, let ingestion { relay.observe(await ingestion.timeline, in: key) }
@@ -605,10 +610,7 @@ final class ChannelTimelineModel {
     ///
     /// It is `lazy` because it captures `self`: the closure is what a publish *is*, and a coalescer
     /// that published something else would be measuring nothing.
-    ///
-    /// Readable from outside — `private(set)` — because the window it holds open is observable
-    /// behaviour: `close()` reads whether a publish is armed, and a test asserts the same thing.
-    @ObservationIgnored private(set) lazy var coalescer = PublishCoalescer { [weak self] in
+    @ObservationIgnored private lazy var coalescer = PublishCoalescer { [weak self] in
         await self?.publish()
     }
 
@@ -644,10 +646,6 @@ final class PublishCoalescer {
 
     /// How many publishes this coalescer has performed. What a rate is asserted in.
     private(set) var publishCount = 0
-
-    /// Whether a window is open with a publish still to come. What the release reads: the publish
-    /// `cancel()` is about to drop is the last chance anything has to see what the fold now holds.
-    var isArmed: Bool { armed != nil }
 
     init(window: Duration = PublishCoalescer.window, publish: @escaping @Sendable () async -> Void) {
         self.window = window

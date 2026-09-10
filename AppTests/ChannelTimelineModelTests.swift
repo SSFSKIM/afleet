@@ -384,19 +384,18 @@ final class ChannelTimelineModelTests: XCTestCase {
 
     /// A release inside the coalescer's trailing window still takes the conclusion.
     ///
-    /// `close()` cancels the armed publish — which is right, because a publish landing after the
-    /// release would push a timeline at subscribers the release just finished — and that cancel was
-    /// the last thing standing between a terminal `result` folded inside the 33 ms window and
-    /// *Check again*, which rebuilds the channel with no turn boundary in it (§7.3). So the release
-    /// observes the fold's final timeline before it tears the ingestion down, and only when a
-    /// publish was actually armed.
+    /// `close()` cancels the publish path — rightly, because a publish landing after the release
+    /// would push a timeline at subscribers the release just finished — and that cancel was the last
+    /// thing standing between a terminal `result` the fold took after the last publish and *Check
+    /// again*, which rebuilds the channel with no turn boundary in it (§7.3). So the release
+    /// observes the fold's final timeline before it tears the ingestion down.
     ///
-    /// **How the window is entered.** A test cannot land inside a 33 ms window deterministically,
-    /// so the record is opened *after* the publish that carried the turn's close: the evidence is in
-    /// the fold and no conclusion has been taken from it, which is the state a release inside the
-    /// window leaves behind, and the count below asserts that starting point rather than assuming
-    /// it. The frames are invented and decoded (§11); the session is the channel's own.
-    func testAReleaseInsideTheTrailingWindowStillTakesTheConclusion() async throws {
+    /// **The state a release lands in.** The record is opened *after* the publish that carried the
+    /// turn's close, which leaves the fold holding evidence no conclusion has been taken from —
+    /// what a release inside the trailing window, or on the hop before the effects loop resumes,
+    /// leaves behind. The count below asserts that starting point rather than assuming it. The
+    /// frames are invented and decoded (§11); the session is the channel's own.
+    func testAReleaseTakesTheConclusionNoPublishCarried() async throws {
         let rig = try await Rig(fixtures: ["plain-two-turn"])
         let key = rig.keys[0]
         let relay = AgentRelayRegistry()
@@ -426,12 +425,10 @@ final class ChannelTimelineModelTests: XCTestCase {
                        "the fold was read \(relay.derivations) time(s) before the release, so what it took "
                        + "cannot be told from what a publish took")
 
-        model.coalescer.request()
-        XCTAssertTrue(model.coalescer.isArmed, "no publish was armed, so the release cancels nothing")
         model.close()
 
         let took = await Self.settle(until: { relay.derivations > 0 })
-        XCTAssertTrue(took, "the release cancelled the armed publish and took no conclusion from the fold")
+        XCTAssertTrue(took, "the release took no conclusion from the fold it was holding")
 
         // The channel as *Check again* brings it back: every transcript record, none of the overlay.
         var rebuilt = model.timeline
@@ -439,22 +436,35 @@ final class ChannelTimelineModelTests: XCTestCase {
         rebuilt.preview = nil
         rebuilt.registry = RegistryMirror()
         XCTAssertTrue(relay.reading(of: record, in: key, of: rebuilt).state == .notDelivered(.noCall),
-                      "a turn that closed inside the trailing window lost its conclusion to the release")
+                      "a turn that closed with no publish left to carry it lost its conclusion to the release")
     }
 
-    /// A release with no publish armed takes nothing: there is nothing the fold holds that the last
-    /// publish did not already carry, and a release is not a reason to derive.
-    func testAReleaseWithNoPublishArmedObservesNothing() async throws {
+    /// A release on a channel with no relay in flight derives nothing.
+    ///
+    /// The release observes unconditionally — "a publish was armed" is not the same question as
+    /// "the fold holds something no publish carried", because an effect already yielded and not yet
+    /// consumed has armed nothing — so what keeps it free is the registry's own gate: a channel
+    /// whose every record has settled, and the overwhelming majority that have relayed nothing at
+    /// all, cost one dictionary read and no pass. Asserted on the settled case, because the empty
+    /// one would also pass against a registry that had simply lost the records.
+    func testAReleaseOnAChannelWithNoRelayInFlightDerivesNothing() async throws {
         let rig = try await Rig(fixtures: ["plain-two-turn"])
         let key = rig.keys[0]
         let relay = AgentRelayRegistry()
         rig.registry.relay = relay
         let model = rig.registry.model(for: key)
         await model.open(rig.row(0, origin: .archived))
-        relay.open(promptUUID: "eeeeeee3-3333-4333-8333-eeeeeeeeeee3", target: "task_invented_release02",
-                   textDigest: AgentRelayDigest.of("an invented errand"), in: key, resend: { _, _ in })
-        let settled = await Self.settle(until: { !model.coalescer.isArmed })
-        XCTAssertTrue(settled, "a publish stayed armed, so the release below is not the unarmed case")
+
+        // One record, settled: the arm is *Delivered* off a frame in this run's own transcript,
+        // which is the one conclusion that settles without a turn boundary. It leaves the channel
+        // with records and nothing in flight, which is the state the gate is about.
+        let target: AgentRunID = "task_invented_release02"
+        let text = "an invented errand for the release"
+        let record = relay.open(promptUUID: "eeeeeee3-3333-4333-8333-eeeeeeeeeee3", target: target,
+                                textDigest: AgentRelayDigest.of(text), in: key, resend: { _, _ in })
+        relay.observe(Self.delivered(record, of: target, carrying: text, in: key), in: key)
+        XCTAssertTrue(relay.reading(of: record, in: key, of: ChannelTimeline()).state == .delivered,
+                      "the record did not settle, so the release below is not the settled case")
 
         let before = relay.derivations
         model.close()
@@ -467,7 +477,60 @@ final class ChannelTimelineModelTests: XCTestCase {
             try? await Task.sleep(for: .milliseconds(10))
         }
         XCTAssertEqual(relay.derivations, before,
-                       "the release derived \(relay.derivations - before) time(s) with no publish armed")
+                       "the release derived \(relay.derivations - before) time(s) for a channel with no "
+                       + "relay in flight")
+    }
+
+    /// A timeline in which this record's message is in its target run's own transcript, which is
+    /// what *Delivered* is read from. Built from the record's own prompt echo and one forwarded
+    /// frame, both invented (§11): the run's items are all the delivery arm reads.
+    private static func delivered(_ record: AgentRelayRecord, of target: AgentRunID,
+                                  carrying text: String, in key: ChannelKey) -> ChannelTimeline {
+        let stream = LogicalStream(configHome: key.configHome, sessionID: key.session, name: .main)
+        var reducer = WireReducer(stream: stream, slug: "invented-slug")
+        _ = reducer.apply(.promptSent(uuid: record.promptUUID, at: Date()))
+        for object in [
+            ["type": .string("system"), "subtype": .string("task_started"),
+             "task_id": .string(target), "tool_use_id": .string("toolu_invented_release02"),
+             "description": .string("an invented errand"), "subagent_type": .string("an-invented-agent"),
+             "spawn_depth": .integer(1), "task_type": .string("local_agent"),
+             "uuid": .string("fbfbfbfb-2222-4222-8222-fbfbfbfbfbfb"),
+             "session_id": .string(key.session.description)],
+            ["type": .string("user"), "uuid": .string(record.promptUUID),
+             "session_id": .string(key.session.description),
+             "origin": .object(["kind": .string("human")]),
+             "message": .object(["role": .string("user"),
+                                 "content": .string("an invented composed relay prompt")])],
+            ["type": .string("assistant"), "uuid": .string("fcfcfcfc-2222-4222-8222-fcfcfcfcfcfc"),
+             "session_id": .string(key.session.description),
+             "message": .object(["id": .string("msg_invented_release"), "type": .string("message"),
+                                 "role": .string("assistant"), "model": .string("an-invented-model"),
+                                 "content": .array([
+                                    .object(["type": .string("tool_use"),
+                                             "id": .string("toolu_invented_release_send"),
+                                             "name": .string("SendMessage"),
+                                             "input": .object(["to": .string(target),
+                                                               "message": .string(text)])])])])],
+            ["type": .string("user"), "uuid": .string("fdfdfdfd-2222-4222-8222-fdfdfdfdfdfd"),
+             "session_id": .string(key.session.description),
+             "message": .object(["role": .string("user"),
+                                 "content": .array([
+                                    .object(["type": .string("tool_result"),
+                                             "tool_use_id": .string("toolu_invented_release_send"),
+                                             "content": .string("an invented queued sentence")])])])],
+            ["type": .string("user"), "uuid": .string("fefefefe-2222-4222-8222-fefefefefefe"),
+             "session_id": .string(key.session.description),
+             "parent_tool_use_id": .string("toolu_invented_release02"),
+             "message": .object(["role": .string("user"),
+                                 "content": .string("Relayed message:\n\n\(text)")])],
+        ] as [[String: JSONValue]] {
+            guard let data = try? JSONValue.object(object).canonicalData() else {
+                preconditionFailure("an invented frame did not encode as JSON")
+            }
+            _ = reducer.apply(.frame(FrameDecoder.decode(line: data), .first))
+        }
+        return ChannelTimeline(durable: reducer.durable, overlay: reducer.overlay, preview: reducer.preview,
+                               agents: reducer.agents, registry: reducer.registry)
     }
 
     /// One invented `result` for this channel, decoded the way a live channel receives it — the

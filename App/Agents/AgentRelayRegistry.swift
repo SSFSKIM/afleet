@@ -102,25 +102,20 @@ enum AgentRelayMachine {
                         settled: [AgentRelayRecord.ID: Outcome] = [:]) -> [AgentRelayRecord.ID: Outcome] {
         let items = timeline.items
         let ordered = records.sorted { $0.sentAt < $1.sentAt }
+        /// What each record retried, for the lineage `supersedingSend` walks. Built once per pass:
+        /// a *Retry* names the record it replaced, and a retry of a retry names that one.
+        let retries = Dictionary(uniqueKeysWithValues: records.compactMap { record in
+            record.retryOf.map { (record.id, $0) }
+        })
         var claimed: Set<String> = []
         var calls: Set<String> = []
         var outcomes: [AgentRelayRecord.ID: Outcome] = [:]
         for (position, record) in ordered.enumerated() {
             guard let held = settled[record.id] else { continue }
-            // **Where a competing younger send begins.** The overtake below revises a settled *Not
-            // delivered* on a frame that arrived after the record's own call, and *Retry* re-sends
-            // the same text to the same run — so the retry's own delivery frame matches the failed
-            // record just as well. It is the retry's: a frame after a younger record's prompt echo
-            // belongs to that record, which is the bound the call-claiming loop below already uses,
-            // and the echo is a transcript record so it survives a rebuild. Only a send of the
-            // **same text to the same run** can contest a frame, and bounding on any other younger
-            // record would refuse a late delivery that is genuinely this record's.
-            let contested = ordered[ordered.index(after: position)...]
-                .filter { $0.target == record.target && $0.textDigest == record.textDigest }
-                .compactMap { later in items.firstIndex { isPromptEcho($0, of: later) } }
-                .min()
             let outcome = overtakenByDelivery(held, of: record, in: items, claiming: claimed,
-                                              before: contested) ?? held
+                                              before: competingSend(with: record,
+                                                                    among: ordered[ordered.index(after: position)...],
+                                                                    in: items)) ?? held
             if let key = outcome.claimedKey { claimed.insert(key) }
             if let call = outcome.claimedCall { calls.insert(call) }
             outcomes[record.id] = outcome
@@ -135,12 +130,107 @@ enum AgentRelayMachine {
                 items.firstIndex { isPromptEcho($0, of: later) }
             }.min()
             let outcome = advance(record, in: timeline, claiming: claimed, callsClaimed: calls,
-                                  contestedFrom: contested, contestedBy: younger.map(\.textDigest))
+                                  contestedFrom: contested, contestedBy: younger.map(\.textDigest),
+                                  // **A different bound, for a different question.** `contestedFrom`
+                                  // above is every younger record, because a *call* is told apart by
+                                  // the message it carries and the digests ride with it. A delivery
+                                  // frame carries no such distinction — it is this record's text in
+                                  // this record's run — so the bound for the delivery scan is the
+                                  // narrow one below.
+                                  deliveredBefore: supersedingSend(of: record, among: younger,
+                                                                   in: items, retries: retries))
             if let key = outcome.claimedKey { claimed.insert(key) }
             if let call = outcome.claimedCall { calls.insert(call) }
             outcomes[record.id] = outcome
         }
         return outcomes
+    }
+
+    /// Where a younger send that could produce this record's delivery frame begins: the earliest
+    /// prompt echo among the younger records with **the same target and the same text**, or nil
+    /// where the channel holds no such send.
+    ///
+    /// **Asked by the settled pass, where the record has no claim of its own left.** The overtake
+    /// this bounds applies only to a record that already concluded *Not delivered* — its call was
+    /// refused, or the run stopped without taking the message — so a frame that a younger send of
+    /// the same text could have produced is that send's. The unsettled pass asks the narrower
+    /// question in `supersedingSend(of:among:in:retries:)`: there the record's own call went through
+    /// and nothing has concluded that it failed, so the oldest-first rule still governs.
+    ///
+    /// A prompt echo is a transcript record, so this bound survives a rebuild.
+    private static func competingSend(with record: AgentRelayRecord,
+                                      among younger: ArraySlice<AgentRelayRecord>,
+                                      in items: [TimelineItem]) -> Int? {
+        younger
+            .filter { $0.target == record.target && $0.textDigest == record.textDigest }
+            .compactMap { later in items.firstIndex { isPromptEcho($0, of: later) } }
+            .min()
+    }
+
+    /// The same question on the **unsettled** path, answered more narrowly.
+    ///
+    /// The delivery scan there is only ever reached by a record whose own `SendMessage` call went
+    /// through — the refused arm returns before it — so this record's message is queued too, and
+    /// which of two sends of one text a single frame belongs to is settled by
+    /// `testOneForwardedFrameDeliversOneSendAndNotBoth`: the older one, because the queue delivers
+    /// in order. Only a younger send with a **stronger claim than that** displaces it, and there are
+    /// exactly two ways to know one has:
+    ///
+    /// - **The app already told the user this send failed.** *Retry* is offered on a *Not delivered*
+    ///   arm and nowhere else, and the record it opens names the record it replaced — so a retry
+    ///   descendant is the app's own statement that this record's message had not arrived when the
+    ///   retry was sent. It holds while this record's turn is still open, which is where the
+    ///   provisional fourth arm lives and where a user presses *Retry* soonest.
+    /// - **The younger send is a whole turn later.** Oldest-first rests on both messages sitting in
+    ///   one queue, which is the same-turn case the test above constructs. Once this record's turn
+    ///   has closed and a later turn sent the text again, a frame arriving after that later prompt
+    ///   is that send's — the older message would have been handed to the run rounds ago.
+    ///
+    /// The turn close is read only where a competing send exists at all, so the ordinary channel —
+    /// which has never relayed one text twice — pays a filter over the records and no scan.
+    private static func supersedingSend(of record: AgentRelayRecord,
+                                        among younger: ArraySlice<AgentRelayRecord>,
+                                        in items: [TimelineItem],
+                                        retries: [AgentRelayRecord.ID: AgentRelayRecord.ID]) -> Int? {
+        let competing = younger.filter { $0.target == record.target && $0.textDigest == record.textDigest }
+        guard !competing.isEmpty else { return nil }
+        // Read at most once, and only where the lineage did not already answer.
+        var turnClose: Int?
+        var readTurnClose = false
+        var earliest: Int?
+        for later in competing {
+            guard let echo = items.firstIndex(where: { isPromptEcho($0, of: later) }) else { continue }
+            var supersedes = isRetry(later, of: record, through: retries)
+            if !supersedes {
+                if !readTurnClose {
+                    readTurnClose = true
+                    turnClose = items.firstIndex {
+                        if case .turnSummary(let turn) = $0 {
+                            return turn.attribution == .prompted(uuid: record.promptUUID)
+                        }
+                        return false
+                    }
+                }
+                supersedes = turnClose.map { echo > $0 } == true
+            }
+            if supersedes { earliest = min(earliest ?? echo, echo) }
+        }
+        return earliest
+    }
+
+    /// Whether `later` is the record that retried `record`, or a retry of one — the chain a *Retry*
+    /// of a *Retry* leaves behind. Bounded by the number of records, and it cannot loop: a record
+    /// names only a record that already existed when it was opened.
+    private static func isRetry(_ later: AgentRelayRecord, of record: AgentRelayRecord,
+                                through retries: [AgentRelayRecord.ID: AgentRelayRecord.ID]) -> Bool {
+        var id = later.retryOf
+        var hops = retries.count
+        while let current = id, hops > 0 {
+            if current == record.id { return true }
+            id = retries[current]
+            hops -= 1
+        }
+        return false
     }
 
     /// A settled *Not delivered* the message has since overtaken, or nil.
@@ -191,7 +281,8 @@ enum AgentRelayMachine {
                         claiming claimed: Set<String> = [],
                         callsClaimed calls: Set<String> = [],
                         contestedFrom contested: Int? = nil,
-                        contestedBy youngerDigests: [String] = []) -> Outcome {
+                        contestedBy youngerDigests: [String] = [],
+                        deliveredBefore competing: Int? = nil) -> Outcome {
         let items = timeline.items
         guard let sent = items.firstIndex(where: { isPromptEcho($0, of: record) }) else {
             // The engine has not echoed the prompt yet. Nothing has happened that could be read as
@@ -270,7 +361,8 @@ enum AgentRelayMachine {
             return Outcome(.notDelivered(.wrongTarget), reply: reply, turnClosed: turnClosed)
         case .relayed: break
         }
-        if let key = delivery(of: record, in: items, after: ours.index, claiming: claimed) {
+        if let key = delivery(of: record, in: items, after: ours.index, claiming: claimed,
+                              before: competing) {
             return Outcome(.delivered, reply: reply, claimedKey: key, claimedCall: ours.id,
                            turnClosed: turnClosed)
         }
@@ -405,8 +497,11 @@ enum AgentRelayMachine {
     /// not the message arriving.
     ///
     /// `contested` is the first index a **younger send of the same text to the same run** could
-    /// have produced a frame at — its own prompt echo. Nil where no such send exists, which is every
-    /// relay that was never retried, and the scan then runs to the end as it always has.
+    /// have produced a frame at — its own prompt echo, from `competingSend(with:among:in:)`. Both
+    /// callers pass it and compute it the same way: the settled overtake and the unsettled scan both
+    /// reach a retry's frame before the retry does. Nil where the channel holds no competing send,
+    /// which is every relay that was never re-sent, and the scan then runs to the end of the items
+    /// as it always has.
     private static func delivery(of record: AgentRelayRecord, in items: [TimelineItem],
                                  after relay: Int, claiming claimed: Set<String>,
                                  before contested: Int? = nil) -> String? {

@@ -386,6 +386,79 @@ final class AgentRelayTests: XCTestCase {
         XCTAssertNotNil(reading.retry, "the failed send lost the Retry its arm offers")
     }
 
+    /// **An unsettled relay does not take a later same-text send's delivery frame either.**
+    ///
+    /// The sibling of the test above, on the path settlement never reaches. *Relayed* is not a
+    /// terminal arm, so a record whose call went through and whose message has not arrived stays
+    /// unsettled for as long as the channel lives (tracker 451) — and the unsettled pass is the one
+    /// that reads the delivery frames. A *Retry* of the same text to the same run then produces the
+    /// frame the older record scans into, and *Delivered* is terminal: the older record freezes on a
+    /// frame the retry's own call produced, while the send that arrived reads *Relayed* and offers
+    /// nothing. The bound is the competing send's own prompt echo, the same one the settled pass
+    /// takes, and not the general younger-record bound the call claiming uses — that one would
+    /// refuse a late delivery from any channel that ever relayed twice.
+    func testAnUnsettledRelayDoesNotTakeALaterSameTextSendsDeliveryFrame() {
+        var wire = RelayWire()
+        wire.open()
+        let older = wire.record()
+        wire.sendMessageCall(to: RelayWire.target)
+        wire.sendMessageResult(success: true)
+        wire.assistantText(RelayWire.reply)
+        wire.result()
+        wire.publish()
+        XCTAssertTrue(wire.state(of: older) == .relayed,
+                      "the first send did not read relayed, so nothing below is asserted about an unsettled record")
+
+        // The second send of the same text to the same run — a *Retry* of a relay that never
+        // arrived — in its own turn, and this one is delivered.
+        let younger = wire.record(promptUUID: RelayWire.secondPromptUUID)
+        wire.sendMessageCall(to: RelayWire.target, id: RelayWire.secondSendCall)
+        wire.sendMessageResult(id: RelayWire.secondSendCall, success: true)
+        wire.forwarded(RelayWire.message)
+        wire.publish()
+
+        XCTAssertTrue(wire.state(of: younger) == .delivered,
+                      "the younger send did not claim the frame its own call delivered")
+        XCTAssertTrue(wire.state(of: older) == .relayed,
+                      "the older send claimed the younger send's delivery frame")
+    }
+
+    /// **And a record does not take its own retry's delivery frame while its turn is still open.**
+    ///
+    /// The other half of the same bound, and the one the turn boundary cannot supply. The fourth arm
+    /// is provisional — the run ended without taking the message, read while the turn is still open
+    /// — so the row offers *Retry* and a user can press it inside that turn. The retry's own frame
+    /// then arrives, the older record's scan reaches it first, and *Delivered* is terminal: the
+    /// failed send freezes as delivered on evidence its own retry produced, and the retry that
+    /// actually arrived reads *Relayed*.
+    ///
+    /// What separates this from two independent sends of one text is the lineage: *Retry* is offered
+    /// on a *Not delivered* arm and nowhere else, so the record it opens is the app's own statement
+    /// that the message it names had not arrived.
+    func testARecordDoesNotTakeItsOwnRetrysDeliveryFrame() {
+        var wire = RelayWire()
+        wire.open()
+        let failed = wire.record()
+        wire.sendMessageCall(to: RelayWire.target)
+        wire.sendMessageResult(success: true)
+        wire.taskNotification()
+        wire.publish()
+        XCTAssertTrue(wire.state(of: failed) == .notDelivered(.stoppedBeforeNextRound),
+                      "the fourth arm was not read, so nothing below is asserted about a retried send")
+
+        // *Retry*, pressed while the turn is still open — which is where this arm is read.
+        let retried = wire.record(promptUUID: RelayWire.secondPromptUUID, retryOf: failed.id)
+        wire.sendMessageCall(to: RelayWire.target, id: RelayWire.secondSendCall)
+        wire.sendMessageResult(id: RelayWire.secondSendCall, success: true)
+        wire.forwarded(RelayWire.message)
+        wire.publish()
+
+        XCTAssertTrue(wire.state(of: retried) == .delivered,
+                      "the retry did not claim the frame its own call delivered")
+        XCTAssertTrue(wire.state(of: failed) == .notDelivered(.stoppedBeforeNextRound),
+                      "the failed send froze as delivered on the frame its own retry produced")
+    }
+
     /// **A settled *Not delivered* still yields to the message arriving.**
     ///
     /// The fourth arm is the provisional one: it concludes that a run stopped without taking the
@@ -1103,13 +1176,16 @@ struct RelayWire {
     /// the reducer attributes the turn's `result` to.
     @discardableResult
     mutating func record(promptUUID: String = RelayWire.promptUUID,
-                         message: String = RelayWire.message) -> AgentRelayRecord {
+                         message: String = RelayWire.message,
+                         retryOf: AgentRelayRecord.ID? = nil) -> AgentRelayRecord {
         echo(promptUUID: promptUUID)
         // A resend closure, because production always installs one: the send site captures the text
         // it would re-send, and a record opened without one could not offer *Retry* at all.
+        // `retryOf` is the lineage a *Retry* leaves — the record this one replaced, which is what
+        // tells a re-send apart from a second independent send of the same text.
         return relay.open(promptUUID: promptUUID, target: Self.target,
                           textDigest: AgentRelayDigest.of(message), in: key, at: stamp(),
-                          resend: { _, _ in })
+                          retryOf: retryOf, resend: { _, _ in })
     }
 
     /// The engine's echo of one prompt, and the `promptSent` raise the send path makes inseparable
