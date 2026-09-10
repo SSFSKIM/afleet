@@ -264,7 +264,10 @@ final class ProjectGroupingTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: checkout.path),
                        "the checkout already exists, so this test measures nothing")
 
+        // `beginGeneration()` is what a rebuild does, and `sections(from:paths:)` calls it; a test
+        // that drives the memo directly stands in for the rebuild by calling it too.
         let memo = PathMemo()
+        memo.beginGeneration()
         let firstAnswer = memo.root(of: checkout)
         XCTAssertGreaterThan(memo.probeCount, 0, "the first ask derived nothing")
         // The walk finds the repository's own `.git`, which is the answer that must not be settled.
@@ -273,22 +276,50 @@ final class ProjectGroupingTests: XCTestCase {
                       "a missing checkout did not fall back to its repository")
         let afterFirst = memo.probeCount
 
-        // A second ask while it is still missing re-derives nothing.
+        // A second rebuild while it is still missing re-derives nothing.
+        memo.beginGeneration()
         let secondAnswer = memo.root(of: checkout)
         XCTAssertTrue(secondAnswer == firstAnswer, "the provisional answer changed while the path was still missing")
         XCTAssertEqual(memo.probeCount, afterFirst,
                        "a still-missing directory cost \(memo.probeCount - afterFirst) fresh derivation(s)")
 
-        // The CLI makes the checkout. The next ask derives again, and settles.
+        // The CLI makes the checkout. The next rebuild derives again, and settles.
         try FileManager.default.createDirectory(at: checkout, withIntermediateDirectories: true)
+        memo.beginGeneration()
         let settled = memo.root(of: checkout)
         XCTAssertGreaterThan(memo.probeCount, afterFirst,
                             "the directory appeared and the memo kept its provisional answer")
         XCTAssertTrue(settled == CanonicalPath.string(checkout) || settled == firstAnswer,
                       "the settled answer is neither the checkout nor the repository")
         let afterSettling = memo.probeCount
+        memo.beginGeneration()
         _ = memo.root(of: checkout)
         XCTAssertEqual(memo.probeCount, afterSettling, "a settled answer was derived again")
+    }
+
+    /// A rebuild asks the filesystem **once per distinct missing path**, not once per row.
+    ///
+    /// The gate that keeps a missing directory from being re-derived is a `stat`, and a `stat` per
+    /// row per rebuild on the main actor is the cost `PathMemo` exists to remove: a project the user
+    /// worked in has several channels, and `root(of:)` is asked once for each of them. Counted under
+    /// its own counter for exactly this clause — a cost no test can see is a cost that grows.
+    func testAMissingProjectIsStattedOncePerRebuildAndNotOncePerRow() throws {
+        let tree = try TempTree()
+        let missing = tree.root.appending(path: "vanished/checkout", directoryHint: .isDirectory)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: missing.path),
+                       "the fixture path exists, so nothing here is missing")
+        let rows = [Self.row("1", cwd: missing), Self.row("2", cwd: missing), Self.row("3", cwd: missing)]
+        let memo = PathMemo()
+
+        _ = ProjectGrouping().sections(from: rows, paths: memo)
+        let afterFirst = memo.existenceCheckCount
+        _ = ProjectGrouping().sections(from: rows, paths: memo)
+        let added = memo.existenceCheckCount - afterFirst
+
+        // One root and one repository question for the one distinct path, whatever the row count.
+        XCTAssertLessThanOrEqual(added, 2,
+                                 "a rebuild over three rows of one missing project cost \(added) existence checks")
+        XCTAssertGreaterThan(added, 0, "the gate is not being asked at all, so this measures nothing")
     }
 
     // MARK: - Ordering

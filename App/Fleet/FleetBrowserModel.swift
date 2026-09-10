@@ -279,9 +279,7 @@ final class FleetBrowserModel {
         for id in delta.removed {
             listed[id] = nil
             decisions[id] = nil
-            states[id] = nil
-            banners[id] = nil
-            if selected == id { selected = nil }
+            forget(id)
         }
         for id in delta.added + delta.updated {
             guard let entry = await resolving(id) else {
@@ -297,12 +295,26 @@ final class FleetBrowserModel {
                 // A transcript that was listed and now is not — a fork's source gaining its
                 // `continued-in` line is the ordinary way this happens — loses its row here.
                 listed[id] = nil
-                states[id] = nil
-                banners[id] = nil
-                if selected == id { selected = nil }
+                forget(id)
             }
         }
         rebuild()
+    }
+
+    /// Drops everything the model held *about* a session, unless a created channel still draws it.
+    ///
+    /// **The delta path has to ask the same question `paint` asks**, and for the same reason: a
+    /// pending channel is drawn by this model and named by nothing in the index, so a delta that
+    /// removes an id — or re-reads an entry the listing policy no longer lists — must not take its
+    /// live half, its banner or the selection with it. It is the created channel's *own* id that
+    /// arrives here in the ordinary case: the first delta that lists it names it as `added`, and a
+    /// transcript deleted a moment later names it as `removed` while the channel is still there,
+    /// with a process, being typed into.
+    private func forget(_ id: SessionID) {
+        guard pending[id] == nil else { return }
+        states[id] = nil
+        banners[id] = nil
+        if selected == id { selected = nil }
     }
 
     // MARK: - The lifecycle feed

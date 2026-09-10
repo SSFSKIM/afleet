@@ -25,18 +25,29 @@ struct ChannelHeader: Hashable, Sendable {
     /// branch that moves under a selected channel therefore moves on screen, with no second watcher
     /// and no edit to a file another leaf owns.
     var branch: String?
+    /// The name of the rule that put the row this header was built from on screen, or nil for a
+    /// header nobody built from a row.
+    ///
+    /// It rides here for `branch`'s reason: the column calls `adopt` on every change to the row, so
+    /// a value that has to follow a row that was *replaced* — and a created channel's row is
+    /// replaced by the indexed one the moment the index lists it — must travel on the header rather
+    /// than be read once at the open. `ChannelTimelineModel.isCreatedChannel` is the one reader.
+    var decidingRule: String?
 
     var glyph: OriginGlyph? { origin.map(OriginGlyph.init) }
 
     init(title: String = "No channel selected", origin: ChannelOrigin? = nil, presence: Presence? = nil,
-         banner: ChannelBanner? = nil, systemItem: SystemItem? = nil, branch: String? = nil) {
+         banner: ChannelBanner? = nil, systemItem: SystemItem? = nil, branch: String? = nil,
+         decidingRule: String? = nil) {
         self.title = title; self.origin = origin; self.presence = presence
         self.banner = banner; self.systemItem = systemItem; self.branch = branch
+        self.decidingRule = decidingRule
     }
 
     init(row: ChannelRow) {
         self.init(title: row.title, origin: row.origin, presence: row.presence,
-                  banner: row.channelBanner, systemItem: row.systemItem, branch: row.gitBranch)
+                  banner: row.channelBanner, systemItem: row.systemItem, branch: row.gitBranch,
+                  decidingRule: row.decidingRule)
     }
 }
 
@@ -196,6 +207,15 @@ final class ChannelTimelineModel {
     /// True for a channel the fleet has minted and whose transcript does not exist yet (§8.2's
     /// *New channel*, §14 item 3).
     ///
+    /// **No event subscription is taken while this holds, and none is needed.** The child spec's
+    /// directive said the awaiting path should subscribe to `lifecycle.events(of:)`; it does not,
+    /// because this model's only consumer of that stream is `StreamIngestion`, which cannot exist
+    /// without a file to read, and the header's readback loop takes a subscription of its own the
+    /// moment the channel has a process (`beginReadbacks`, which `adopt` triggers on every row
+    /// change). A subscription taken here would be a second fan-out with no reader, and the frames
+    /// it buffered would be dropped when the ingestion took its own. What the created channel needs
+    /// from the stream — the mode and the readbacks — it already gets. Recorded as tracker 453.
+    ///
     /// **Not a failure, and that distinction is the whole of it.** The engine creates no transcript
     /// at startup — `sessionFile` is null until the first `user`, `assistant` or `system` record is
     /// written (bundle `SPEC/35-session-persistence.md` §35.6.3) — so a channel created and not yet
@@ -213,8 +233,13 @@ final class ChannelTimelineModel {
     /// channel, and tracker 66's case — a transcript deleted between listing and opening — is a
     /// registered channel too. The row is the surface's own statement about which kind of channel
     /// this is, and a created one says so in `decidingRule` because no `ListingPolicy` rule listed
-    /// it. Read from the row rather than stored by whoever created the channel, so a model built
-    /// for a channel the index has since caught up with is not still calling it new.
+    /// it.
+    ///
+    /// **Re-read on every `adopt(_:)`, which is every change to the row.** The column calls that on
+    /// each of §8's live fields, and the row a created channel is drawn from is *replaced* by the
+    /// indexed one the moment the index lists it — with a listing rule in place of the creation's.
+    /// Reading it once, at the first `open`, left the model calling a long-indexed channel new for
+    /// the rest of its life, which is the opposite of what this comment claimed.
     @ObservationIgnored private var isCreatedChannel = false
 
     /// The transcript the ingestion is reading, as the index spelled it. Held so a relocation is a
@@ -291,6 +316,7 @@ final class ChannelTimelineModel {
     /// a selected channel arrives here like any other change.
     func adopt(_ header: ChannelHeader) {
         self.header = header
+        if let rule = header.decidingRule { isCreatedChannel = rule == FleetBrowserModel.creationRule }
         readout.branch = header.branch
         // A channel that was archived or connecting when the strip was first drawn has a process
         // now, and this is the moment that becomes true. Nothing is armed on a timer, and nothing
@@ -401,7 +427,6 @@ final class ChannelTimelineModel {
     /// which the registry owns, ends it.
     func open(_ row: ChannelRow) async {
         adopt(ChannelHeader(row: row))
-        isCreatedChannel = row.decidingRule == FleetBrowserModel.creationRule
         // Awaiting a non-throwing task is not itself cancellable, so a cancelled view cannot leave
         // a second caller here — see `openIngestion()`.
         await openIngestion()
@@ -437,12 +462,21 @@ final class ChannelTimelineModel {
     private func performOpen(workspace: Workspace, lifecycle: any LifecycleAPI) async {
         guard let entry = await workspace.index.entry(key.session) else {
             // A created channel, or a transcript that has gone — and the row says which.
-            if isCreatedChannel {
-                awaitsTranscript = true
-                failure = nil
-            } else {
+            guard isCreatedChannel else {
                 failure = "this channel has no transcript in the index"
+                return
             }
+            awaitsTranscript = true
+            failure = nil
+            // **One re-read, on entry to the wait.** The lookup above suspends, and the index delta
+            // that first lists this channel can land inside that suspension: `transcriptMoved` then
+            // finds `awaitsTranscript` still false, takes the relocation arm's early return, and the
+            // channel waits for a *second* delta that on a quiet channel never comes. Asking once
+            // more now closes the window against the state that was published while this call was
+            // in flight, rather than against a timer.
+            guard await workspace.index.entry(key.session) != nil, !isTerminated else { return }
+            awaitsTranscript = false
+            await performOpen(workspace: workspace, lifecycle: lifecycle)
             return
         }
         // The other half of tracker 66: a retry that found the entry has to clear the failure the

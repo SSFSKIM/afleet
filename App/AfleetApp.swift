@@ -84,13 +84,17 @@ struct AfleetApp: App {
             // tab and `ShellModel.selectPanelTab(at:)` is the shortcut those keys reach; a plain
             // Cmd+N alongside them reads as a member of that range rather than as *New*. The item
             // sits at `.newItem` so it lands in the **File** menu, where a user reaches for it.
-            // **Disabled until a launch has reached a workspace.** The sheet is presented by the
-            // sidebar, which only exists on the workspace route, so a press on the setup or upgrade
-            // screen would set a request nothing can present and nothing can clear — and the sheet
-            // would then appear unasked the moment the sidebar mounted.
+            // **Disabled until a launch has reached the workspace route.** The sheet is presented by
+            // the sidebar, which `RootView` mounts on that route alone, so a press before it would
+            // set a request nothing can present and nothing can clear — and the sheet would then
+            // appear unasked the moment the sidebar mounted.
+            //
+            // The **route** and not `model.browser`: the coordinator is built inside the launch and
+            // the browser it owns therefore exists while the route is still `.launching`, which is
+            // exactly the window a user has the menu open in.
             Button("New Channel…") { shell.presentNewChannel(root: nil) }
                 .keyboardShortcut("n", modifiers: [.command, .shift])
-                .disabled(model.browser == nil)
+                .disabled(model.route.workspace == nil)
         }
 
         CommandGroup(after: .sidebar) {

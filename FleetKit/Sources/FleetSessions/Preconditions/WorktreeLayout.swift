@@ -83,8 +83,9 @@ public enum WorktreeLayout {
         guard let separator = path.range(of: "/.git/worktrees/") else { return nil }
         let repository = String(path[path.startIndex..<separator.lowerBound])
         guard !repository.isEmpty else { return nil }
-        return URL(filePath: RealPath.string(URL(filePath: repository, directoryHint: .isDirectory)),
-                   directoryHint: .isDirectory)
+        // No `directoryHint`, deliberately: the caller turns this into a `ProjectSection.id`, and a
+        // trailing slash makes one directory two section ids.
+        return URL(filePath: repository)
     }
 
     // MARK: - Reading the pointer files

@@ -31,13 +31,25 @@ struct NewChannelSheet: View {
                 Divider().padding(.vertical, 10)
                 footer(model)
             } else {
-                ProgressView().frame(maxWidth: .infinity, alignment: .center)
+                // **A modal always has a way out.** The model is built asynchronously and a launch
+                // that has not reached a workspace never answers one, so a sheet with only a
+                // progress view would be a window the user cannot close.
+                VStack(spacing: 12) {
+                    ProgressView()
+                    Button("Cancel", action: dismiss).keyboardShortcut(.cancelAction)
+                }
+                .frame(maxWidth: .infinity, alignment: .center)
             }
         }
         .padding(16)
         .frame(width: 460)
-        .task {
-            guard model == nil else { return }
+        // **Keyed on the request, and the model is rebuilt when it changes.** `.sheet(item:)` keeps
+        // one view value across a replacing item — pressing a section header's item and then
+        // Cmd+Shift+N over the open sheet is two requests for the same presentation — and a `.task`
+        // that only ran while `model == nil` would leave the second sheet holding the first
+        // request's root, so a channel would be created in a project the user was no longer
+        // looking at.
+        .task(id: request) {
             model = await app?.makeNewChannelModel(root: request.root)
         }
     }

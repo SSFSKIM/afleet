@@ -150,6 +150,9 @@ struct ProjectGrouping: Sendable {
     /// it appears; see `PathMemo`.
     @MainActor
     func sections(from rows: [ChannelRow], paths: PathMemo) -> [ProjectSection] {
+        // One generation per rebuild: the memo asks the filesystem about a still-missing directory
+        // once per generation rather than once per row that names it.
+        paths.beginGeneration()
         var buckets: [String: [String: [ChannelRow]]] = [:]   // repository -> root -> rows
 
         for row in rows {
@@ -244,6 +247,15 @@ final class PathMemo {
     /// Re-derived on the first rebuild that finds the directory there, and settled then.
     private var provisionalRoot: [String: String] = [:]
     private var provisionalRepository: [String: String] = [:]
+    /// Which paths this rebuild has already asked the filesystem about, so the question is asked
+    /// once per distinct path per rebuild rather than once per row.
+    ///
+    /// A rebuild groups two rows of one missing project — the ordinary case, since a project the
+    /// user worked in has several channels — and `root(of:)` is asked once per row. Without this the
+    /// stat is paid per row, and `repository(of:)` pays a second one for the same directory: four
+    /// stats for one absent project with two channels. Cleared by `beginGeneration()`, which
+    /// `sections(from:paths:)` calls.
+    private var askedThisGeneration: Set<String> = []
 
     /// How many times the filesystem was actually consulted — a miss, not an entry.
     ///
@@ -257,7 +269,38 @@ final class PathMemo {
     /// is the gate that keeps the derivation from being re-run, not the derivation.
     private(set) var probeCount = 0
 
+    /// How many times the filesystem was asked *whether a path exists* — the gate that keeps a
+    /// missing directory from being re-derived.
+    ///
+    /// Counted separately from `probeCount` and counted at all for one reason: it is a syscall on
+    /// the main actor inside a rebuild, so it is a cost, and a cost no test can see is a cost that
+    /// grows. `probeCount` stays what it was — the derivation the cache exists to avoid — because
+    /// folding the two would make the existing cost test unable to tell them apart.
+    private(set) var existenceCheckCount = 0
+
     init() {}
+
+    /// Starts a new rebuild's generation, forgetting which paths this memo has already asked about.
+    ///
+    /// Called by `ProjectGrouping.sections(from:paths:)` and by nothing else: the generation is a
+    /// rebuild, and a caller that grouped twice under one generation would be told a directory is
+    /// still missing after it appeared.
+    func beginGeneration() { askedThisGeneration.removeAll(keepingCapacity: true) }
+
+    /// Whether `path` is on disk, asked at most once per path per rebuild.
+    private func exists(_ path: String, provisional: Bool) -> Bool {
+        // A path with no provisional answer has never been asked about, so the caller is going to
+        // derive anyway and the gate would buy nothing.
+        guard provisional else { return checkedExists(path) }
+        guard !askedThisGeneration.contains(path) else { return false }
+        askedThisGeneration.insert(path)
+        return checkedExists(path)
+    }
+
+    private func checkedExists(_ path: String) -> Bool {
+        existenceCheckCount += 1
+        return FileManager.default.fileExists(atPath: path)
+    }
 
     /// The canonical project root of a working directory: up to the first `.git`, else the directory.
     ///
@@ -267,10 +310,9 @@ final class PathMemo {
     func root(of cwd: URL) -> String {
         let key = cwd.path
         if let known = rootOfCWD[key] { return known }
-        let exists = FileManager.default.fileExists(atPath: key)
-        // The gate is not counted as a probe. `probeCount` measures the derivation the cache exists
-        // to avoid — a `realpath` and an upward walk per component — and one `stat` is what makes
-        // avoiding it possible for a path that is still missing.
+        // The gate is not counted as a probe — `probeCount` measures the derivation the cache exists
+        // to avoid — but it *is* counted, under `existenceCheckCount`: see that property.
+        let exists = exists(key, provisional: provisionalRoot[key] != nil)
         if !exists, let provisional = provisionalRoot[key] { return provisional }
         probeCount += 1
         let resolved = Self.native(CanonicalPath.string(ProjectRoot.canonical(for: cwd).root))
@@ -306,7 +348,7 @@ final class PathMemo {
     /// the file that identifies it, and a checkout the CLI has not made yet has none.
     func repository(of root: String) -> String {
         if let known = repositoryOfRoot[root] { return known }
-        let exists = FileManager.default.fileExists(atPath: root)
+        let exists = exists(root, provisional: provisionalRepository[root] != nil)
         if !exists, let provisional = provisionalRepository[root] { return provisional }
         probeCount += 1
         let resolved = Self.native(WorktreeLink.mainRepository(of: root) ?? root)
@@ -332,6 +374,6 @@ final class PathMemo {
 enum WorktreeLink {
     static func mainRepository(of root: String) -> String? {
         WorktreeLayout.repositoryByPathShape(ofWorktreeAt: URL(filePath: root, directoryHint: .isDirectory))
-            .map { $0.path(percentEncoded: false) }
+            .map { CanonicalPath.string($0) }
     }
 }

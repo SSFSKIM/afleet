@@ -152,6 +152,49 @@ final class NewChannelTests: XCTestCase {
         XCTAssertTrue(model.selected == created.session, "the created channel lost the selection")
     }
 
+    /// A delta that **removes** a created channel's id does not take its live half, its banner or
+    /// the selection with it.
+    ///
+    /// `paint` was made to ask this and the delta path was not, which left the two halves of one
+    /// join disagreeing. The id really does arrive here: the first delta that lists a created
+    /// channel names it `added`, and a transcript deleted a moment later names it `removed` while
+    /// the channel is still there, with a process, being typed into.
+    func testADeltaRemovingACreatedChannelsIDKeepsItsRowAndItsLiveHalf() async throws {
+        let lifecycle = LifecycleDouble()
+        let model = browser(lifecycle)
+        let created = key("6")
+        model.addPending(created, name: nil, cwd: Self.project)
+        model.select(created.session)
+        model.apply(SidebarFixtures.state(created, origin: .owned(.ready)))
+
+        await model.apply(IndexDelta(added: [], updated: [], removed: [created.session],
+                                     durationMs: 0)) { _ in nil }
+
+        let row = try XCTUnwrap(model.row(created.session), "a removal dropped the created channel's row")
+        XCTAssertTrue(row.origin == .owned(.ready), "the created channel lost its live half to a removal")
+        XCTAssertTrue(model.selected == created.session, "the created channel lost the selection to a removal")
+    }
+
+    /// The same for the arm where the listing policy stops listing an id the index still resolves.
+    func testAnUnlistedVerdictOnACreatedChannelKeepsItsLiveHalf() async throws {
+        let lifecycle = LifecycleDouble()
+        let model = browser(lifecycle)
+        let created = key("7")
+        model.addPending(created, name: nil, cwd: Self.project)
+        model.apply(SidebarFixtures.state(created, origin: .owned(.connecting)))
+
+        // A `continued-in` entry is what the listing policy stops listing, and it is the ordinary
+        // way an id the index resolves loses its row.
+        let entry = SidebarFixtures.entry(created.session, configHome: Self.configHome,
+                                           cwd: Self.project.path, mtime: Date(),
+                                           continuedIn: SidebarFixtures.session("8"))
+        await model.apply(IndexDelta(added: [], updated: [created.session], removed: [],
+                                     durationMs: 0)) { _ in entry }
+
+        let row = try XCTUnwrap(model.row(created.session), "an unlisted verdict dropped the created row")
+        XCTAssertTrue(row.origin == .owned(.connecting), "the created channel lost its live half")
+    }
+
     // MARK: - The sheet's one action
 
     /// A ready verdict: create, select, and spawn — in that order, once each.
@@ -284,6 +327,117 @@ final class NewChannelTests: XCTestCase {
         XCTAssertNil(request.agent, "a blank agent field became a token")
         XCTAssertNil(request.effort, "a blank effort field became a token")
         XCTAssertNil(request.name, "a blank session name became a token")
+    }
+
+    // MARK: - The production seams
+
+    /// `FleetCoordinator.createChannel` is the pairing itself: one `Fleet.create`, and the row that
+    /// makes the channel visible.
+    ///
+    /// Asserted through the coordinator and not through an equivalent closure, because the pairing
+    /// is the thing: a `create` with no `addPending` hands the window a session the sidebar cannot
+    /// draw and the column cannot mount, and every model-level clause in this file would stay green.
+    func testTheCoordinatorPairsCreationWithTheRowThatShowsIt() async throws {
+        let lifecycle = LifecycleDouble()
+        let creator = CreatorDouble(configHome: Self.configHome)
+        let registrar = RegistrarDouble()
+        let model = browser(lifecycle)
+        let coordinator = FleetCoordinator(configHome: Self.configHome, registrar: registrar,
+                                           creator: creator,
+                                           index: StubIndex(persisted: nil,
+                                                            built: SidebarFixtures.snapshot(
+                                                                configHome: Self.configHome, entries: [])),
+                                           model: model)
+        defer { coordinator.stop() }
+
+        let made = await coordinator.createChannel(ChannelCreation(cwd: Self.project))
+        let created = try XCTUnwrap(made, "the coordinator created nothing")
+
+        let minted = await creator.count
+        XCTAssertEqual(minted, 1, "the coordinator minted more than one channel")
+        XCTAssertTrue(model.row(created.session) != nil, "the created channel got no row")
+        // **And nothing was registered.** The creation already filed the seed; a `register` over it
+        // would tell the fleet about a channel it had just made, with the request's cwd in place of
+        // the one the engine will report.
+        let registered = await registrar.count
+        XCTAssertEqual(registered, 0, "the coordinator registered a channel it had just created")
+    }
+
+    /// A worktree creation's row runs at the checkout the CLI is about to make, which is
+    /// `ChannelCreation.expectedCWD` and is the coordinator's choice to make.
+    func testTheCoordinatorDrawsAWorktreeCreationAtItsCheckout() async throws {
+        let lifecycle = LifecycleDouble()
+        let creator = CreatorDouble(configHome: Self.configHome)
+        let model = browser(lifecycle)
+        let coordinator = FleetCoordinator(configHome: Self.configHome, registrar: RegistrarDouble(),
+                                           creator: creator,
+                                           index: StubIndex(persisted: nil,
+                                                            built: SidebarFixtures.snapshot(
+                                                                configHome: Self.configHome, entries: [])),
+                                           model: model)
+        defer { coordinator.stop() }
+
+        let request = ChannelCreation(cwd: Self.project, worktree: .named("invented-worktree"))
+        let madeWorktree = await coordinator.createChannel(request)
+        let created = try XCTUnwrap(madeWorktree)
+
+        let row = try XCTUnwrap(model.row(created.session))
+        XCTAssertTrue(row.cwd?.standardizedFileURL == request.expectedCWD.standardizedFileURL,
+                      "the worktree creation's row does not run at the checkout")
+        XCTAssertFalse(row.cwd?.standardizedFileURL == Self.project.standardizedFileURL,
+                       "the worktree creation's row runs in the repository, not the checkout")
+    }
+
+    /// `AppModel.makeNewChannelModel` reads the Developer setting **from the store, at the moment
+    /// the sheet opens**.
+    ///
+    /// Settings writes that document as the toggle moves, so a value captured at launch would be
+    /// the one the app started with — and this setting decides whether the channel's own launch line
+    /// narrows its setting sources for the life of the session.
+    func testTheSheetsModelReadsTheIsolationSettingFromTheStoreAtOpenTime() async throws {
+        let rig = try await WorkspaceRig()
+        var settings = AfleetSettings()
+        settings.developer.isolatedSettingsForNewChannels = true
+        try await AfleetSettingsStore.write(settings, to: rig.workspace.store)
+
+        let built = await rig.app.makeNewChannelModel(root: Self.project)
+        let on = try XCTUnwrap(built, "no workspace was bound, so the sheet has no model")
+        XCTAssertTrue(on.isolatedSettings, "the sheet did not read the isolation setting the store holds")
+
+        // Written again while the first sheet is still alive, as Settings would: the next sheet
+        // reads the new value and the first keeps the one it was built with.
+        settings.developer.isolatedSettingsForNewChannels = false
+        try await AfleetSettingsStore.write(settings, to: rig.workspace.store)
+        let rebuilt = await rig.app.makeNewChannelModel(root: Self.project)
+        let off = try XCTUnwrap(rebuilt)
+        XCTAssertFalse(off.isolatedSettings, "a second sheet did not re-read the setting")
+        XCTAssertTrue(on.isolatedSettings, "the first sheet's request changed under it")
+    }
+
+    /// A replacing request rebuilds the sheet's model, so the second press's project is the one a
+    /// channel is created in.
+    ///
+    /// `.sheet(item:)` keeps one view value across a replacing item — a section header's item and
+    /// then Cmd+Shift+N over the open sheet is two requests for one presentation — and a `.task`
+    /// that only ran while the model was nil left the second sheet holding the first request's root.
+    func testAReplacingRequestRebuildsTheSheetsModel() async throws {
+        let rig = try await WorkspaceRig()
+
+        let firstBuilt = await rig.app.makeNewChannelModel(root: Self.project)
+        let first = try XCTUnwrap(firstBuilt)
+        XCTAssertTrue(first.cwd == Self.project, "the first request's root did not reach its model")
+        let secondBuilt = await rig.app.makeNewChannelModel(root: Self.otherProject)
+        let second = try XCTUnwrap(secondBuilt)
+        XCTAssertTrue(second.cwd == Self.otherProject, "a second request's root did not reach a fresh model")
+
+        // The view's own key is what makes the rebuild happen at all, and it is the request itself:
+        // two presses are two `NewChannelRequest` values, so `.task(id: request)` re-runs.
+        rig.shell.presentNewChannel(root: Self.project)
+        let firstRequest = try XCTUnwrap(rig.shell.newChannelRequest)
+        rig.shell.presentNewChannel(root: Self.otherProject)
+        let secondRequest = try XCTUnwrap(rig.shell.newChannelRequest)
+        XCTAssertNotEqual(firstRequest, secondRequest,
+                          "two presses are one request value, so the sheet's task would not re-run")
     }
 
     // MARK: - The entry points
@@ -429,6 +583,62 @@ final class NewChannelTests: XCTestCase {
         XCTAssertFalse(model.rows.isEmpty, "the reopened channel drew no timeline rows")
     }
 
+    /// A relocate landing **inside** the first open's index lookup is not lost.
+    ///
+    /// `performOpen` suspends on `index.entry(...)`, and the delta that first lists a created
+    /// channel can land in that window: `transcriptMoved` then finds `awaitsTranscript` still false
+    /// and returns, and the channel waits for a second delta that on a quiet channel never comes.
+    /// The wait's own entry re-reads the index once, which closes the window against the state
+    /// published while the call was in flight rather than against a timer.
+    func testARelocateLandingInsideTheFirstLookupIsNotLost() async throws {
+        let rig = try await TimelineRig()
+        let model = rig.registry.model(for: rig.created)
+
+        // The transcript appears while the first open is suspended on its lookup: the index is
+        // rebuilt and the relocation is delivered before `open` resumes.
+        let path = try rig.writeTranscript()
+        await rig.index.beforeEntry { [index = rig.index, registry = rig.registry, created = rig.created] in
+            _ = try? await index.inner.build()
+            await registry.relocate(created, to: path)
+        }
+
+        await model.open(rig.row)
+
+        XCTAssertFalse(model.awaitsTranscript,
+                       "the channel is still waiting for a transcript the index already holds")
+        XCTAssertTrue(model.hasOpened, "a relocate inside the lookup left the channel unopened")
+        XCTAssertNil(model.failure, "the recovered open reported a failure")
+        XCTAssertFalse(model.rows.isEmpty, "the recovered open drew no timeline rows")
+    }
+
+    /// The created-channel flag follows the **row**, which is replaced by the indexed one.
+    ///
+    /// It used to be read once, at the first `open`, so a long-indexed channel went on calling
+    /// itself new for the life of its model — the opposite of what its own comment claimed.
+    func testTheCreatedFlagFollowsTheRowItIsDrawnFrom() async throws {
+        let rig = try await TimelineRig()
+        let model = rig.registry.model(for: rig.created)
+
+        model.adopt(ChannelHeader(row: rig.row))
+        XCTAssertTrue(model.header.decidingRule == FleetBrowserModel.creationRule,
+                      "the creation's rule did not reach the header")
+        await model.open(rig.row)
+        XCTAssertTrue(model.awaitsTranscript, "a created channel is not waiting for its transcript")
+
+        // The index catches up and the column adopts the indexed row.
+        model.adopt(ChannelHeader(row: rig.listedRow))
+        let path = try rig.writeTranscript()
+        _ = try await rig.index.build()
+        await rig.registry.relocate(rig.created, to: path)
+        XCTAssertTrue(model.hasOpened, "the indexed row did not open the channel")
+
+        // And a later open of a listed row reports a missing transcript rather than a new channel.
+        let other = try await TimelineRig()
+        let listedOnly = other.registry.model(for: other.created)
+        await listedOnly.open(other.listedRow)
+        XCTAssertFalse(listedOnly.awaitsTranscript, "a listed row was treated as newly created")
+    }
+
     // MARK: - Rigs
 
     /// `NewChannelModel` over a recording creator, a lifecycle double staged with one verdict, and
@@ -464,6 +674,61 @@ final class NewChannelTests: XCTestCase {
         }
     }
 
+    /// An `AppModel` taken through a **real launch** with the sequence's seams stubbed, which is
+    /// what `makeNewChannelModel` needs: the workspace route, a store to read the settings document
+    /// out of, and the production `FleetCoordinator` the composition root builds.
+    ///
+    /// A launch rather than a test-only binder, because the route and the coordinator are what the
+    /// sheet resolves through and a member that only a test could call is the wiring defect
+    /// `check-app-wiring` exists to catch.
+    @MainActor
+    private struct WorkspaceRig {
+        let temp: TempTree
+        let app: AppModel
+        let shell: ShellModel
+
+        var workspace: Workspace { app.route.workspace! }
+
+        init() async throws {
+            let temp = try TempTree()
+            self.temp = temp
+            let configHome = try temp.directory("home")
+            let storeRoot = temp.root.appending(path: "store", directoryHint: .isDirectory)
+            let diagnosticsRoot = temp.root.appending(path: "logs", directoryHint: .isDirectory)
+            let binary = try temp.file("bin/claude", "#!/bin/sh\nexit 0\n")
+            try FileManager.default.setAttributes([.posixPermissions: 0o755],
+                                                  ofItemAtPath: binary.path)
+            let index = StubIndex(persisted: nil,
+                                  built: LaunchFixtures.snapshot(configHome: configHome, ids: []),
+                                  delta: IndexDelta(added: [], updated: [], removed: [], durationMs: 0))
+            let fleet = StubFleet()
+            let watcher = StubWatcher()
+            let sequence = LaunchSequence(
+                storeRoot: storeRoot,
+                diagnosticsRoot: diagnosticsRoot,
+                resolveEnvironment: { LaunchFixtures.environment(home: temp.root, configHome: configHome) },
+                locateBinary: { _, _ in binary },
+                checkVersion: { _, _ in .accepted(SemanticVersion(major: 2, minor: 1, patch: 263)) },
+                makeStore: { base, homes in try FileStateStore(baseDirectory: base, configHomes: homes) },
+                makeDiagnostics: { DiagnosticsComposer(directory: $0) },
+                makeIndex: { _, _, _ in index },
+                fleetFactory: { _, _, _, _, _, _ in fleet },
+                makeWatcher: { _ in watcher },
+                readClaudeJSON: { _ in true })
+            app = AppModel(registry: RowRegistry(), sequence: sequence)
+            shell = app.shell
+            await app.launch()
+            guard app.route.workspace != nil else {
+                throw Bail("the stubbed launch reached no workspace")
+            }
+        }
+    }
+
+    private struct Bail: Error, CustomStringConvertible {
+        let description: String
+        init(_ description: String) { self.description = description }
+    }
+
     /// A workspace with a real `TranscriptIndex` over a scratch home holding **no** transcript for
     /// the created channel, which is exactly the state a creation leaves the index in.
     @MainActor
@@ -473,7 +738,7 @@ final class NewChannelTests: XCTestCase {
         let workspace: Workspace
         let lifecycle: LifecycleDouble
         let registry: ChannelTimelineRegistry
-        let index: TranscriptIndex
+        let index: HookedIndex
         let created: ChannelKey
         let app: AppModel
         let shell: ShellModel
@@ -496,7 +761,7 @@ final class NewChannelTests: XCTestCase {
             temp = try TempTree()
             home = try ScratchConfigHome(tree: temp)
             let configHome = home.configHome
-            index = TranscriptIndex(configHome: configHome, storage: InMemoryIndexStorage())
+            index = HookedIndex(TranscriptIndex(configHome: configHome, storage: InMemoryIndexStorage()))
             _ = try await index.build()
             let store = try FileStateStore(baseDirectory: temp.root.appending(path: "store",
                                                                              directoryHint: .isDirectory),
@@ -526,4 +791,33 @@ final class NewChannelTests: XCTestCase {
                                           session: created.session)
         }
     }
+}
+
+/// A real `TranscriptIndex` with one seam: a body that runs **inside** `entry(_:)`, before it
+/// answers.
+///
+/// That suspension is the window `ChannelTimelineModel.performOpen` has, and the interleaving it
+/// admits — an index delta landing while the first open is waiting for its own lookup — is not
+/// something a test can arrange from outside. Everything else forwards, so what is under test is
+/// the model's own recovery and not a stubbed index's idea of one.
+actor HookedIndex: IndexAccess {
+    let inner: TranscriptIndex
+    private var hook: (@Sendable () async -> Void)?
+
+    init(_ inner: TranscriptIndex) { self.inner = inner }
+
+    func beforeEntry(_ body: @escaping @Sendable () async -> Void) { hook = body }
+
+    func entry(_ id: SessionID) async -> IndexEntry? {
+        let body = hook
+        hook = nil
+        await body?()
+        return await inner.entry(id)
+    }
+
+    func loadPersisted() async throws -> IndexSnapshot? { try await inner.loadPersisted() }
+    @discardableResult func build() async throws -> IndexSnapshot { try await inner.build() }
+    func update(changed: [URL]) async -> IndexDelta { await inner.update(changed: changed) }
+    func persist() async throws { try await inner.persist() }
+    var currentSnapshot: IndexSnapshot { get async { await inner.snapshot } }
 }
