@@ -536,7 +536,13 @@ final class ChannelTimelineModel {
         // the case *New channel* is always in. Tracker 66's retry left `hasOpened` false for
         // exactly this, and this is the trigger it needed.
         if awaitsTranscript, ingestion == nil {
-            awaitsTranscript = false
+            // **The flag is not cleared here, and `performOpen` sets it on both outcomes.**
+            // `openIngestion()` can return without reading anything — a read started by the column
+            // may still be in flight — and clearing the flag on the way in would then leave the
+            // model with nothing waiting, nothing opened and nothing left to retrigger: the column
+            // would draw "Opening…" for a channel with no transcript until the user selected away
+            // and back. Left alone, the flag stays a live retry condition for the next delta.
+            //
             // Through `open`'s own stored task and never `performOpen` directly. `hasOpened` is set
             // only *after* the index lookup suspends, so a `.task(id:)` re-run landing inside that
             // window would start a second read: both would assign `ingestion`, `effectsTask` and

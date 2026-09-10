@@ -246,6 +246,51 @@ final class ProjectGroupingTests: XCTestCase {
                        "the second grouping added \(memo.probeCount - afterFirst) fresh probes")
     }
 
+    /// A directory that does not exist yet is answered, re-derived once it appears, and costs one
+    /// derivation per rebuild in the meantime and not a full one.
+    ///
+    /// §8.2's worktree creation is what produces the case: the row is drawn at
+    /// `<repo>/.claude/worktrees/<name>` before the CLI has made the checkout, and the fallback
+    /// answer for a missing path is the repository itself. Settling that answer would group the
+    /// checkout's channel into the repository's own rows for the life of the process; re-deriving it
+    /// every rebuild would put a `realpath` and an upward walk back on the main actor for every row
+    /// whose directory is gone, which on a real config home is hundreds of them. So it is held
+    /// provisionally, and the gate is one `stat`.
+    func testAMissingDirectoryIsAnsweredProvisionallyAndSettledWhenItAppears() throws {
+        let tree = try TempTree()
+        let repository = try tree.directory("repo-beta")
+        try tree.directory("repo-beta/.git")
+        let checkout = repository.appending(path: ".claude/worktrees/invented", directoryHint: .isDirectory)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: checkout.path),
+                       "the checkout already exists, so this test measures nothing")
+
+        let memo = PathMemo()
+        let firstAnswer = memo.root(of: checkout)
+        XCTAssertGreaterThan(memo.probeCount, 0, "the first ask derived nothing")
+        // The walk finds the repository's own `.git`, which is the answer that must not be settled.
+        // Asked before the count is taken, because it is a distinct key and derives once itself.
+        XCTAssertTrue(firstAnswer == memo.root(of: repository),
+                      "a missing checkout did not fall back to its repository")
+        let afterFirst = memo.probeCount
+
+        // A second ask while it is still missing re-derives nothing.
+        let secondAnswer = memo.root(of: checkout)
+        XCTAssertTrue(secondAnswer == firstAnswer, "the provisional answer changed while the path was still missing")
+        XCTAssertEqual(memo.probeCount, afterFirst,
+                       "a still-missing directory cost \(memo.probeCount - afterFirst) fresh derivation(s)")
+
+        // The CLI makes the checkout. The next ask derives again, and settles.
+        try FileManager.default.createDirectory(at: checkout, withIntermediateDirectories: true)
+        let settled = memo.root(of: checkout)
+        XCTAssertGreaterThan(memo.probeCount, afterFirst,
+                            "the directory appeared and the memo kept its provisional answer")
+        XCTAssertTrue(settled == CanonicalPath.string(checkout) || settled == firstAnswer,
+                      "the settled answer is neither the checkout nor the repository")
+        let afterSettling = memo.probeCount
+        _ = memo.root(of: checkout)
+        XCTAssertEqual(memo.probeCount, afterSettling, "a settled answer was derived again")
+    }
+
     // MARK: - Ordering
 
     /// Pinned first; then the user's own `sectionOrder`; then `.claude.json`'s order; then most
