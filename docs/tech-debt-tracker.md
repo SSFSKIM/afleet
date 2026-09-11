@@ -2141,6 +2141,14 @@ the gap between 141 and 157 is C6.1's and C6.2's reservations and is expected. (
      `.build/corrective-logs/final-status.json` rather than here, because a number transcribed into
      this file is a number that goes stale on the next commit.
 
+     **The isolated-settings store follows the checkout, and a bare repository is why.**
+     `LocalSettingsStore.resolve` moves the store up to the git root only when `.git` is **present**
+     and owned there, mirroring the engine's own unguarded `lstat` of it: a worktree of a bare
+     repository has a git root with no `.git` entry at all, and the tolerant "absent is not foreign"
+     rule — which `.claude` keeps, because a project that has never been written to has no `.claude`
+     — moved the store to a directory the engine never reads, so a §6.12 decline written for the
+     worktree would be invisible to the child it was written for.
+
      **What remains.** Item 3's path and item 47's are both complete headless; entry 314 closed with
      this corrective. Two things are still open and neither is implementation: persisting a
      created-but-unsent channel across an app relaunch is a product decision nobody has taken (the
@@ -2444,7 +2452,10 @@ the gap between 141 and 157 is C6.1's and C6.2's reservations and is expected. (
      one of them dropped it whenever another got there first, which is exactly what switching
      applications while the dialog is open does. `PrecommitModel.applyVerdict` is the one place, and
      the flip still requires a previous `untrusted` verdict for that same channel, so a channel the
-     user has merely clicked onto spawns nothing.
+     user has merely clicked onto spawns nothing. The one-press slot is keyed on the channel for the
+     same reason and not on the evaluation's generation number: returning to the front re-evaluates,
+     which bumps the generation, so a generation-keyed slot re-opened the action while its own pane
+     was still up and a second press overwrote the supervisor's single pending request.
 
      **One refusal is kept and is worth naming.** A wedged channel is refused with
      `LifecycleError.wedged` even though it holds no process: the verb's gate is `process == nil`,
