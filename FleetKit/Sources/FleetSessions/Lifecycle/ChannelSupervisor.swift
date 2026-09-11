@@ -93,12 +93,6 @@ public actor ChannelSupervisor {
     private var isRecent: Bool
 
     public private(set) var state: ChannelState
-    /// The hatch this channel is waiting on an exit for, matched by `id` and never by value.
-    /// The request a pane exit is matched against: a handoff's, or a trust review's.
-    ///
-    /// Both, because `Fleet.paneExited` finds the channel by this id and an exit nobody claims is
-    /// recorded as stale — so a trust-review pane that ended would otherwise leave a diagnostic
-    /// saying afleet had lost track of a pane it asked for.
     /// The requests a pane exit is matched against: a handoff's, or a trust review's.
     ///
     /// Both, because `Fleet.paneExited` finds the channel by this id and an exit nobody claims is recorded as

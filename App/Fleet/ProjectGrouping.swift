@@ -256,9 +256,11 @@ final class PathMemo {
     /// stats for one absent project with two channels.
     ///
     /// **Keyed by the question and not by the path alone.** A missing directory with no `.git` above
-    /// it is its own root, so `root(of:)` and `repository(of:)` are asked about the *same* path —
-    /// and a set of paths made the second of them skip its own stat and hand back a provisional
-    /// answer that a checkout appearing would never refresh. Cleared by `beginGeneration()`, which
+    /// it is its own root, so `root(of:)` and `repository(of:)` are asked about the *same* path: the
+    /// first is handed `cwd.path` and the second the canonical root, and `URL.path` strips a
+    /// directory URL's trailing slash, so those are one identical string. A set keyed on paths alone
+    /// therefore made the second question skip its own stat and hand back a provisional answer that
+    /// a checkout appearing would never refresh. Cleared by `beginGeneration()`, which
     /// `sections(from:paths:)` calls.
     private var askedThisGeneration: Set<Question> = []
 

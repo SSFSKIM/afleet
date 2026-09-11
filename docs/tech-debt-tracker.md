@@ -2446,6 +2446,12 @@ the gap between 141 and 157 is C6.1's and C6.2's reservations and is expected. (
      the flip still requires a previous `untrusted` verdict for that same channel, so a channel the
      user has merely clicked onto spawns nothing.
 
+     **One refusal is kept and is worth naming.** A wedged channel is refused with
+     `LifecycleError.wedged` even though it holds no process: the verb's gate is `process == nil`,
+     and the wedge check sits behind it exactly as it does in `handOff`, because a wedge is a live
+     trace the user is meant to read rather than a state a terminal pane recovers from. So the §6.11
+     banner's action does nothing on a wedged channel, which is showing its wedge banner anyway.
+
 315. **The thread's generic reply to a question card answers only the first question.** A thread
      reply (`App/Threads/ThreadModel.swift`, against `App/Decisions/QuestionCardView.swift`) builds one response from the text in the composer and files it against the first
      question, so the selections and notes the user entered on the card's own controls for the other
@@ -4439,14 +4445,26 @@ needs more. Nothing above is renumbered.
      harness, if one ever becomes worth its weight for this tree (see also entry 443, which is the
      same wall from the other side). Owner: C6.
 
-455. **`PathMemo`'s two questions avoid colliding by a trailing slash, not by design.**
-     `root(of:)` keys its cache and its per-rebuild gate on `cwd.path`, which carries a trailing
-     slash for a directory URL, while `repository(of:)` is handed the canonical string, which does
-     not — so the two never key on the same string even for a path that is its own root. The gate is
-     now keyed by (question, path), which is correct independently, but the *caches* still lean on
-     that difference: normalise one side and two unrelated answers start sharing a key. Closer: key
-     both maps on `RealPath.string` of the directory, which is what every comparison in the fleet
-     already uses. Owner: C5's successor on the sidebar.
+455. **`PathMemo` keys its caches on the spelling it was handed, not on the resolved path.**
+     `root(of:)` keys `rootOfCWD` and `provisionalRoot` on `cwd.path` — the URL as the index spelled
+     it — and only the *answer* is canonicalised, so two spellings of one directory (`/tmp/x` and
+     `/private/tmp/x`, or any symlinked project path) are two keys and each pays its own derivation.
+     Wasted work only: both keys resolve to the same answer, and the section id is the resolved
+     string, so grouping is unaffected. Closer: key both maps on `RealPath.string` of the directory,
+     which is what every comparison in the fleet already uses. Owner: C5's successor on the sidebar.
+
+     **Corrected 2026-09-11 — `corrective/c6-new-channel`.** This entry was filed claiming the two
+     questions could never key on the same string, because `root(of:)` was handed a directory URL
+     and `repository(of:)` a canonical string. That premise is wrong: `URL.path` *strips* a
+     directory URL's trailing slash (`URL(fileURLWithPath:"/tmp/x", isDirectory: true).path` is
+     `/tmp/x`; only the newer `path()` keeps the slash). So for a directory that is its own root the
+     two questions were asked about one identical string, the per-rebuild gate keyed on paths alone
+     did collide, and keying it by `(question, path)` repaired a live defect rather than guarding a
+     hypothetical one — the second question was skipping its own `stat` and handing back a
+     provisional answer no later rebuild would refresh. The entry's other half is withdrawn too:
+     the answers live in four separate dictionaries (`rootOfCWD`/`repositoryOfRoot` and their
+     provisional twins), so normalising one side cannot make two unrelated answers share a key.
+     What survives is the duplicate-spelling cost above.
 
 456. **The engine's guarded-path checks on `gitdir:` and `commondir` pointers are not
      transcribed.** `WorktreeLayout` reads both pointer files and compares real paths, and the engine
@@ -4476,3 +4494,18 @@ needs more. Nothing above is renumbered.
      Closer: treat the CLI's own refusal as evidence, or `stat` `<repo>/.claude/worktrees/<name>`
      before composing a `-w` respawn. Owner: C4.
 
+
+459. **A relocated channel is evaluated against the directory it was seeded in.**
+     `Fleet.launches[key].cwd` is written once by `build` and never updated, while the directory the
+     channel actually runs in lives on the supervisor (`runtime.cwd`) and moves twice: the engine's
+     first `system/init` reports the `-w` checkout, and `/cd` reports wherever the user went. Only
+     `preconditions(for:)` reads the stale copy, so the §6.11 trust verdict, the §6.12 server
+     verdicts and the settings-isolation reads for a worktree channel are all taken against the
+     repository root the request named rather than `<repo>/.claude/worktrees/<name>`. Pre-existing
+     and shared by every launch path — a `/cd` has always had it — but the worktree arm makes it
+     ordinary rather than rare, and the directions differ: trust resolves to the repository either
+     way (the key is the git root), while a decline written for the checkout is read at the root and
+     misses, so a server the user declined inside the worktree is offered again. Beside entry 445,
+     which is the same record disagreeing about `session` instead of `cwd`, and the same closer
+     fixes both: have `preconditions(for:)` ask the supervisor for the line it would actually
+     launch. Owner: C4.

@@ -255,6 +255,63 @@ final class WorktreeTrustTests: XCTestCase {
                        "the decline target is the worktree's own store, which the engine never reads")
     }
 
+    /// A worktree of a **bare** repository keeps its store at the **checkout**, because the engine
+    /// does.
+    ///
+    /// The engine's resolver `lstat`s `join(root, ".git")` unguarded, and a bare directory has none
+    /// inside it — the may-be-absent licence is `.claude`'s alone. afleet treating an absent entry
+    /// as "not foreign" moved the store to the bare directory, so a decline landed in a file the
+    /// engine never reads while afleet read it back as authoritative: the declined server loads.
+    func testAWorktreeOfABareRepositoryKeepsItsStoreAtTheCheckout() throws {
+        try XCTSkipUnless(FileManager.default.isExecutableFile(atPath: "/usr/bin/git"),
+                          "git is not available, so no real worktree can be made")
+        let repository = try Repository.bare()
+        defer { repository.removeAll() }
+
+        let resolved = ProjectRoot.roots(for: repository.checkout)
+        XCTAssertTrue(RealPath.string(resolved.trustKey) == RealPath.string(repository.root),
+                      "the bare repository is not the trust key, so this measures nothing")
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: repository.root.appending(path: ".git").path(percentEncoded: false)),
+                       "the bare repository has a .git inside it, so this measures nothing")
+
+        let store = LocalSettingsStore().resolve(gitRoot: resolved.trustKey, cwd: repository.checkout)
+        XCTAssertFalse(store.atGitRoot, "the store moved to a root the engine does not move it to")
+        XCTAssertTrue(RealPath.string(store.storeDirectory.deletingLastPathComponent())
+                      == RealPath.string(repository.checkout),
+                      "the bare repository's worktree writes somewhere the engine never reads")
+
+        // And the rejection gate reads it there: a declined server stays declined.
+        let claude = repository.checkout.appending(path: ".claude", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: claude, withIntermediateDirectories: true)
+        try Data(#"{"disabledMcpjsonServers":["invented-server"]}"#.utf8)
+            .write(to: claude.appending(path: "settings.local.json"))
+        try Data(#"{"mcpServers":{"invented-server":{"command":"/usr/bin/true"}}}"#.utf8)
+            .write(to: repository.checkout.appending(path: ".mcp.json"))
+
+        let consent = ProjectMCPConsent(settings: LocalSettingsStore())
+        let verdicts = consent.evaluate(root: resolved.checkout, gitRoot: resolved.trustKey,
+                                        cwd: repository.checkout,
+                                        configHome: FileManager.default.temporaryDirectory
+                                            .appending(path: "afleet-bare-unwritten"),
+                                        settingSources: nil, acceptances: [])
+        let rejected = verdicts.filter { if case .rejected = $0.value { return true } else { return false } }
+            .keys.map(\.name)
+        XCTAssertTrue(rejected == ["invented-server"],
+                      "the decline the checkout's own store holds was not read as a rejection")
+    }
+
+    /// An ordinary repository is unchanged: its `.git` is there, so the store is still the
+    /// repository's — the negative half of the clause above.
+    func testAnOrdinaryRepositoryStillKeepsItsStoreAtTheRoot() throws {
+        let repository = try repository()
+        defer { repository.removeAll() }
+
+        let resolved = ProjectRoot.roots(for: repository.checkout)
+        let store = LocalSettingsStore().resolve(gitRoot: resolved.trustKey, cwd: repository.checkout)
+        XCTAssertTrue(store.atGitRoot, "an ordinary repository's store stopped being the root's")
+    }
+
     /// §6.12's "no owned process in this project" spans **every checkout of the repository**.
     ///
     /// The write target is the repository's store, so a live child in the main working copy has
