@@ -7,10 +7,10 @@
 > parent's §17 C6 row asked for; each leaf runs the controlled track (child spec → plan →
 > execute) in its own worktree. **Status:** cut **approved by the human 2026-09-08**; all four
 > leaves merged by 2026-09-10; **integration review completed 2026-09-10** on `main` `91e0902`
-> (Outcomes & Retrospective below); **parent acceptance remains open**, including item 3
-> (*New channel*). Tracker 162 is a cross-owner prerequisite: shell/lifecycle implementation,
-> C6 integration verification. Closure conditions are recorded in Outcomes; a checklist walk
-> and the `send-message-delivery` signature alone do not close C6.
+> (Outcomes & Retrospective below); **parent acceptance remains open** for the human and live
+> witnesses and the `send-message-delivery` signature. Every implementation prerequisite is met:
+> tracker 162 and 314 closed 2026-09-11 at `493c948` (New channel), 435 at `749246b` (relay
+> conclusions). Closure conditions are recorded in Outcomes.
 >
 > This document treats the parent's §17 C6 section and its design inheritance (§6.6, §7.3,
 > §7.5, §7.6, §7.7, §8.3 through §8.8, contracts X4, X5, X7, X9, X10) as landed and records
@@ -689,8 +689,8 @@ This review and its test floor do not demonstrate every inherited acceptance ite
 
 | Bullet | How it stands on the merged tree |
 |---|---|
-| Checklist items against the CLI or fixtures | Demonstrated headless, each by the leaf named in the tracking map: 2, 6–8, 10, 12, 13, 29, 30, 37, 40–42, 44, 45, 57, 60, 61 (composer, cards, dialogs, threads); 4 and 5 in the timeline through C6.1's `decision` slot over C6.3's component; 9, 38, 49–51 in the Agents tab (C6.4's G1–G5), 52's card half by the corrective below. Three items held only at the component and not on the product path until the correctives: **62** (the `model_consent_fallback` frame had a test that supplied it by hand and no host that passed it — `91e0902`), **52** (the main-timeline permission card said "In a subagent run" while the tree it needed had arrived two merges earlier — `91e0902`), **43** (the Developer arming action the item names did not exist — `91e0902`; its rendering half was C6.3's fixture arm all along). Item **43** still lacks real-engine end-to-end evidence; prompted tests are blocked by organisation policy. Items **3** and **47**, and the isolation-dependent legs of **4, 5, 41 and 52**, also have the implementation prerequisite below; policy is not their only blocker. |
-| Item 3 — New channel; item 47 — Trust | **Open, blocked by implementation (tracker 162).** Item 3 is §14's *New channel*, not answer mapping: afleet must choose a UUID, create a new transcript on send and show an AI title after the first turn. No new-channel path exists, and the isolated-settings toggle has no consumer. Item 47's trust banner and terminal action have component/integration evidence, but its required entry through *New channel* is absent. Shell/lifecycle owns that implementation; C6 retains integration verification of both items and the isolation-dependent permission legs. A live account change cannot supply missing implementation. |
+| Checklist items against the CLI or fixtures | Demonstrated headless, each by the leaf named in the tracking map: 2, 6–8, 10, 12, 13, 29, 30, 37, 40–42, 44, 45, 57, 60, 61 (composer, cards, dialogs, threads); 4 and 5 in the timeline through C6.1's `decision` slot over C6.3's component; 9, 38, 49–51 in the Agents tab (C6.4's G1–G5), 52's card half by the corrective below. Three items held only at the component and not on the product path until the correctives: **62** (the `model_consent_fallback` frame had a test that supplied it by hand and no host that passed it — `91e0902`), **52** (the main-timeline permission card said "In a subagent run" while the tree it needed had arrived two merges earlier — `91e0902`), **43** (the Developer arming action the item names did not exist — `91e0902`; its rendering half was C6.3's fixture arm all along). Item **43** still lacks real-engine end-to-end evidence; prompted tests are blocked by organisation policy. Items **3** and **47**, and the isolation-dependent legs of **4, 5, 41 and 52**, had the implementation prerequisite below until `493c948`; what remains for them is the live policy blocker (items 4, 5, 41, 52 and item 3's AI title) or a human witness (item 47's dialog). |
+| Item 3 — New channel; item 47 — Trust | **Implemented and verified headless at `493c948` (tracker 162, 314); live and human legs open.** Item 3: *New channel…* on a section header or File ▸ New Channel… (Cmd+Shift+N) opens a sheet (directory or new worktree, model, permission mode, effort, agent, name, isolation note); confirm mints the UUID, files a pending row and spawns only when the precommit verdict is ready. `Fleet.create` spawns nothing and writes nothing; the first launch passes `--session-id <key>` (`--setting-sources ""` with the Developer isolation setting, `--strict-mcp-config` when the project declares servers), a real `fake-claude` child replaying `plain-two-turn` creates `<key>.jsonl` under the scratch home, the first record-carrying `transcript_mirror` (or the index's registration) moves the template to `--resume` and the handshake clears `-w`; the pending row is replaced by the indexed row with `titleSource == .aiTitle` (App half, invented title). Item 47: an untrusted root yields the banner and no process; *Review trust in terminal* is X5's `reviewTrustInTerminal`, a bare-`claude` pane (`.trustReview`) with no handoff; the pane's exit re-reads the verdict and the `.untrusted → .ready` flip issues exactly one `perform(.open)`, on doubles end to end. Trust keys on the common repository root for a linked worktree and consent on the checkout, as the engine does. Open: item 3's AI title on a real engine and the isolation-dependent permission legs (policy, tracker 163); item 47's real dialog (human); persisting a created-but-unsent channel across relaunch is an untaken product decision (tracker 448). |
 | Item 24's link emission | `FileLinkTests`: a path in a Read row emits `WorkspaceLink.file` with its line through X7's `LinkRouterCapability`; the timeline now sends `.newWindow` on Cmd-click (C7's corrective). |
 | S7 | Met 2026-09-09 as recorded above (p50 3.51 ms, p99 7.66 ms, worst 10.34 ms over 1,781 samples). The workload streams markdown rows that carry no item, so it measures markdown hosting, the table and scroll correction under streaming load, not production item builders. Tracker 427 remains a deferred performance-coverage gap; the S7 result is scoped to that workload. |
 | `nested-depth-2` | C6.4's G1 in three arms over the corrected clause: the join alone when the sidecar is withheld, the sidecar first when present with the join's agreeing answer retained, a disagreeing source drawn rather than hidden; one node per repeated `task_started`. A parent whose sidecar is read after its child's now lists the child (`ec054f6`). |
@@ -711,8 +711,9 @@ must say so; a fixture may invent nothing, and the one synthetic recording this 
 frame by frame at its definition sites. **What remains.** The original checklist recorded 26 C6 legs, thirteen prompted,
 with sixteen budgeted turns unspent (C6.2 four, C6.3 six, C6.4 six). Those are historical counts,
 not complete acceptance coverage; the checklist now also names items 3, 47 and 43 and separates
-implementation blockers from policy-blocked live evidence. Tracker 162 remains a cross-owner C6
-acceptance prerequisite, not an exclusion. Fixes for 397 (readbacks after drain/reopen) and 428
+implementation blockers from policy-blocked live evidence. Tracker 162 and 314 are **closed** at `493c948` (New channel creation, the isolation consumer, the
+`--session-id`→`--resume` transition, the trust-review pane; three review rounds on Opus, the last converged;
+floor 2,589 executed, 30 skipped, 0 failed across 19 bundles); their live legs remain. Fixes for 397 (readbacks after drain/reopen) and 428
 (rewind's main-stream UUID) are **merged and verified** at `b2f1607`: focused regressions failed
 first, then passed; the independent review was clean. The tested executable tree matches the merge. Tracker 435 is **closed** at `749246b` (relay conclusions taken at publish and at release; three review
 rounds, the last clean; floor 2,516 executed, 30 skipped, 0 failed; residue filed as 451 and 452); 427 still lacks production
@@ -720,10 +721,11 @@ item-builder performance coverage. Other corrective entries (436–441), leaf de
 Codex review route remain recorded with their owners.
 
 **Closure conditions.** All inherited Parent-Level Acceptance clauses must be demonstrated on the
-integrated tree by the CLI or fixtures exactly as specified. This includes shell/lifecycle delivery
-of tracker 162 and C6 verification of item 3's afleet-selected UUID, new transcript and first-turn
-AI title, item 47's new-channel trust entry through owned spawn, and the isolated-settings spawn
-consumer used by permission legs. Acceptance-affecting gaps must be resolved and verified; 435's
+integrated tree by the CLI or fixtures exactly as specified. Shell/lifecycle delivery of tracker 162 and
+C6's headless verification of item 3's afleet-selected UUID and new transcript, the AI title's indexing,
+item 47's trust entry through the review pane to an owned spawn, and the isolated-settings spawn
+consumer used by the permission legs are done at `493c948`; what remains for those items is the
+live or human witness. Acceptance-affecting gaps must be resolved and verified; 435's
 unobserved-rebuild relay conclusion is resolved at `749246b`. The 397/428 fixes have merged with verification; they
 do not establish the remaining requirements. The required human/live legs must then actually be witnessed on an account that permits
 them, including item 43's malformed-answer denial and continued channel, with the X9 witness;
@@ -814,3 +816,15 @@ leaf executed against differently without a corrective now on `main`.
   the last clean; residue filed as 451 and 452. Floor 2,516 executed, 30 skipped, zero failures
   across 19 bundles; the merge's tree matches the reviewed branch. Acceptance stays open for
   tracker 162, the live witnesses and the fixture signature.
+- 2026-09-11 corrective `493c948` closes tracker 162 and 314 (New channel; 26 commits on
+  `corrective/c6-new-channel`): `Fleet.create` and `ChannelCreation` mint the UUID and spawn nothing;
+  the sheet and the two entry points; the pending sidebar row replaced by the indexed row; the Developer
+  isolation setting on the launch line; `--session-id` until the first record-carrying mirror or the
+  index's registration, `--resume` after, `-w` cleared on the handshake's relocation; the trust review as
+  X5's own verb answering a bare-`claude` pane with the re-read after the pane's exit; the root question
+  split into a trust key (common repository root) and a checkout root (consent, grouping), with the
+  §6.12 live-process gate and the decline target compared and placed as the engine does. Three review
+  rounds on Opus (two lenses each in the first two), the last converged; residue filed as 442–450 and
+  453–459. Floor 2,589 executed, 30 skipped, 0 failed across 19 bundles on the
+  merged tree. Open: the live legs (policy), item 47's dialog and the visual legs (human), the fixture
+  signature, tracker 427, and the persistence product decision.
