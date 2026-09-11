@@ -195,16 +195,36 @@ final class NewChannelTests: XCTestCase {
         XCTAssertTrue(row.origin == .owned(.connecting), "the created channel lost its live half")
     }
 
-    /// A delta whose entry the index can no longer **resolve** keeps a created channel's live half.
+    /// A delta whose entry the index can no longer **resolve** lets the channel go completely.
     ///
-    /// The third arm of the same join. `TranscriptIndex.update` names a candidate in `updated` and
-    /// then answers nil for it when the file went between the two — a transcript written and removed
-    /// inside one watcher batch, which is what a created channel's first moments look like — and
-    /// that arm dropped the row's live half while the other two kept it.
+    /// The third arm of the same join, and the asymmetry runs the other way here: the arm dropped
+    /// the row and kept the live half, the banner and the selection, so the sidebar held an origin
+    /// and a selection for a channel it could no longer draw. `TranscriptIndex.update` names a
+    /// candidate in `updated` and then answers nil for it when the file went between the two, which
+    /// is an ordinary watcher batch.
+    func testADeltaWhoseEntryCannotBeResolvedLetsTheChannelGo() async throws {
+        let lifecycle = LifecycleDouble()
+        let model = browser(lifecycle)
+        let listed = SidebarFixtures.session("a")
+        model.apply(SidebarFixtures.snapshot(configHome: Self.configHome, entries: [
+            SidebarFixtures.entry(listed, configHome: Self.configHome, cwd: Self.project.path, mtime: Date())
+        ]))
+        model.select(listed)
+        model.apply(SidebarFixtures.state(ChannelKey(configHome: Self.configHome, session: listed),
+                                           origin: .owned(.ready)))
+        XCTAssertNotNil(model.row(listed), "the snapshot drew no row, so this proves nothing")
+
+        await model.apply(IndexDelta(added: [], updated: [listed], removed: [], durationMs: 0)) { _ in nil }
+
+        XCTAssertNil(model.row(listed), "an unresolvable entry kept its row")
+        XCTAssertNil(model.selected, "the selection still points at a channel the sidebar cannot draw")
+    }
+
+    /// And the same arm keeps a **created** channel's live half, which is what the guard is for.
     func testADeltaWhoseEntryCannotBeResolvedKeepsACreatedChannelsLiveHalf() async throws {
         let lifecycle = LifecycleDouble()
         let model = browser(lifecycle)
-        let created = key("a")
+        let created = key("b")
         model.addPending(created, name: nil, cwd: Self.project)
         model.select(created.session)
         model.apply(SidebarFixtures.state(created, origin: .owned(.ready)))
