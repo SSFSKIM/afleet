@@ -322,6 +322,42 @@ final class ProjectGroupingTests: XCTestCase {
         XCTAssertGreaterThan(added, 0, "the gate is not being asked at all, so this measures nothing")
     }
 
+    /// A missing directory that is **its own root** does not make the repository answer stale.
+    ///
+    /// With no `.git` above it the path is both the root and the root whose repository is asked for,
+    /// so `root(of:)` and `repository(of:)` are asked about the *same* path. Keyed by the path
+    /// alone, the per-rebuild memo made the second of them skip its own stat and hand back a
+    /// provisional answer — so a checkout that appeared was never re-derived for the repository
+    /// question and the section it grouped under never moved.
+    func testAMissingDirectoryThatIsItsOwnRootStillRefreshesItsRepositoryAnswer() throws {
+        let tree = try TempTree()
+        let repository = try tree.directory("repo-gamma")
+        try tree.directory("repo-gamma/.git")
+        // A checkout that does not exist yet, under a repository that does. Both questions are about
+        // this one path: with no `.git` inside it, its root is itself.
+        let checkout = tree.root.appending(path: "not-yet", directoryHint: .isDirectory)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: checkout.path),
+                       "the checkout exists, so this test measures nothing")
+
+        let memo = PathMemo()
+        memo.beginGeneration()
+        let firstRoot = memo.root(of: checkout)
+        let firstRepository = memo.repository(of: firstRoot)
+        XCTAssertTrue(firstRepository == firstRoot,
+                      "a missing directory with no .git inside it is not its own repository")
+
+        // It appears, as a real linked worktree of the repository.
+        try FileManager.default.createDirectory(at: checkout, withIntermediateDirectories: true)
+        try Data("gitdir: \(repository.path)/.git/worktrees/not-yet\n".utf8)
+            .write(to: checkout.appending(path: ".git"))
+
+        memo.beginGeneration()
+        let secondRoot = memo.root(of: checkout)
+        let secondRepository = memo.repository(of: secondRoot)
+        XCTAssertTrue(secondRepository == CanonicalPath.string(repository),
+                      "the repository answer stayed provisional after the checkout appeared")
+    }
+
     // MARK: - Ordering
 
     /// Pinned first; then the user's own `sectionOrder`; then `.claude.json`'s order; then most

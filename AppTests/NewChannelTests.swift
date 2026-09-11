@@ -195,6 +195,29 @@ final class NewChannelTests: XCTestCase {
         XCTAssertTrue(row.origin == .owned(.connecting), "the created channel lost its live half")
     }
 
+    /// A delta whose entry the index can no longer **resolve** keeps a created channel's live half.
+    ///
+    /// The third arm of the same join. `TranscriptIndex.update` names a candidate in `updated` and
+    /// then answers nil for it when the file went between the two — a transcript written and removed
+    /// inside one watcher batch, which is what a created channel's first moments look like — and
+    /// that arm dropped the row's live half while the other two kept it.
+    func testADeltaWhoseEntryCannotBeResolvedKeepsACreatedChannelsLiveHalf() async throws {
+        let lifecycle = LifecycleDouble()
+        let model = browser(lifecycle)
+        let created = key("a")
+        model.addPending(created, name: nil, cwd: Self.project)
+        model.select(created.session)
+        model.apply(SidebarFixtures.state(created, origin: .owned(.ready)))
+
+        await model.apply(IndexDelta(added: [], updated: [created.session], removed: [],
+                                     durationMs: 0)) { _ in nil }
+
+        let row = try XCTUnwrap(model.row(created.session),
+                                "an unresolvable entry dropped the created channel's row")
+        XCTAssertTrue(row.origin == .owned(.ready), "the created channel lost its live half")
+        XCTAssertTrue(model.selected == created.session, "the created channel lost the selection")
+    }
+
     // MARK: - The sheet's one action
 
     /// A ready verdict: create, select, and spawn — in that order, once each.
@@ -653,35 +676,11 @@ final class NewChannelTests: XCTestCase {
         XCTAssertFalse(model.rows.isEmpty, "the recovered open drew no timeline rows")
     }
 
-    /// The created-channel flag follows the **row**, and a row whose rule changes changes it.
-    ///
-    /// It used to be read once, at the first `open`, so a long-indexed channel went on calling
-    /// itself new for the life of its model. The discriminating observation is a model that has not
-    /// opened yet — `hasOpened` false — being handed an indexed row and then asked to open: with the
-    /// flag stale it waits for a transcript the index already holds; re-read, it reports the failure
-    /// a listed row with no transcript deserves.
-    func testTheCreatedFlagFollowsTheRowItIsDrawnFrom() async throws {
-        let rig = try await TimelineRig()
-        let model = rig.registry.model(for: rig.created)
-
-        // Drawn first as a created channel, which is what the column does the moment it mounts.
-        model.adopt(ChannelHeader(row: rig.row))
-        XCTAssertTrue(model.header.decidingRule == FleetBrowserModel.creationRule,
-                      "the creation's rule did not reach the header")
-
-        // Then the index catches up and the column adopts the indexed row — still before any open,
-        // because a channel created and immediately switched away from is exactly that.
-        model.adopt(ChannelHeader(row: rig.listedRow))
-        XCTAssertFalse(model.header.decidingRule == FleetBrowserModel.creationRule,
-                       "the indexed row's rule did not reach the header")
-
-        // The transcript is not there, so a *listed* row must report the failure rather than wait.
-        await model.open(rig.listedRow)
-        XCTAssertFalse(model.awaitsTranscript,
-                       "a model first drawn as a created channel still calls itself new after the "
-                       + "indexed row replaced it")
-        XCTAssertNotNil(model.failure, "a listed row with no transcript reported no failure")
-    }
+    // **There is no test for the flag being re-read on every row change, and there is no re-read.**
+    // `isCreatedChannel` is read in exactly one place — `performOpen`, once per model behind
+    // `hasOpened` — and every `open` is handed the row the column has just resolved, so a re-read on
+    // `adopt` changed nothing any test could observe. The field's own comment says so; a test that
+    // passed with the mechanism removed would have said the opposite.
 
     // MARK: - Rigs
 

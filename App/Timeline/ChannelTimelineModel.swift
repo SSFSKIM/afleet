@@ -25,29 +25,17 @@ struct ChannelHeader: Hashable, Sendable {
     /// branch that moves under a selected channel therefore moves on screen, with no second watcher
     /// and no edit to a file another leaf owns.
     var branch: String?
-    /// The name of the rule that put the row this header was built from on screen, or nil for a
-    /// header nobody built from a row.
-    ///
-    /// It rides here for `branch`'s reason: the column calls `adopt` on every change to the row, so
-    /// a value that has to follow a row that was *replaced* — and a created channel's row is
-    /// replaced by the indexed one the moment the index lists it — must travel on the header rather
-    /// than be read once at the open. `ChannelTimelineModel.isCreatedChannel` is the one reader.
-    var decidingRule: String?
-
     var glyph: OriginGlyph? { origin.map(OriginGlyph.init) }
 
     init(title: String = "No channel selected", origin: ChannelOrigin? = nil, presence: Presence? = nil,
-         banner: ChannelBanner? = nil, systemItem: SystemItem? = nil, branch: String? = nil,
-         decidingRule: String? = nil) {
+         banner: ChannelBanner? = nil, systemItem: SystemItem? = nil, branch: String? = nil) {
         self.title = title; self.origin = origin; self.presence = presence
         self.banner = banner; self.systemItem = systemItem; self.branch = branch
-        self.decidingRule = decidingRule
     }
 
     init(row: ChannelRow) {
         self.init(title: row.title, origin: row.origin, presence: row.presence,
-                  banner: row.channelBanner, systemItem: row.systemItem, branch: row.gitBranch,
-                  decidingRule: row.decidingRule)
+                  banner: row.channelBanner, systemItem: row.systemItem, branch: row.gitBranch)
     }
 }
 
@@ -235,11 +223,12 @@ final class ChannelTimelineModel {
     /// this is, and a created one says so in `decidingRule` because no `ListingPolicy` rule listed
     /// it.
     ///
-    /// **Re-read on every `adopt(_:)`, which is every change to the row.** The column calls that on
-    /// each of §8's live fields, and the row a created channel is drawn from is *replaced* by the
-    /// indexed one the moment the index lists it — with a listing rule in place of the creation's.
-    /// Reading it once, at the first `open`, left the model calling a long-indexed channel new for
-    /// the rest of its life, which is the opposite of what this comment claimed.
+    /// **Read from the row `open(_:)` is handed, and that is sufficient.** An earlier version
+    /// re-read it on every `adopt(_:)` so the field would be honest at all times; the field is read
+    /// in exactly one place — `performOpen`, which runs once per model behind `hasOpened` — and
+    /// every `open` is called with the row the column has just resolved, so the value it needs is
+    /// always the current one and a re-read changed nothing observable. Said plainly here rather
+    /// than kept as a line nothing can hold to account.
     @ObservationIgnored private var isCreatedChannel = false
 
     /// The transcript the ingestion is reading, as the index spelled it. Held so a relocation is a
@@ -316,7 +305,6 @@ final class ChannelTimelineModel {
     /// a selected channel arrives here like any other change.
     func adopt(_ header: ChannelHeader) {
         self.header = header
-        if let rule = header.decidingRule { isCreatedChannel = rule == FleetBrowserModel.creationRule }
         readout.branch = header.branch
         // A channel that was archived or connecting when the strip was first drawn has a process
         // now, and this is the moment that becomes true. Nothing is armed on a timer, and nothing
@@ -427,6 +415,7 @@ final class ChannelTimelineModel {
     /// which the registry owns, ends it.
     func open(_ row: ChannelRow) async {
         adopt(ChannelHeader(row: row))
+        isCreatedChannel = row.decidingRule == FleetBrowserModel.creationRule
         // Awaiting a non-throwing task is not itself cancellable, so a cancelled view cannot leave
         // a second caller here — see `openIngestion()`.
         await openIngestion()
