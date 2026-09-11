@@ -19,8 +19,10 @@ import FleetKit
 ///
 /// A caller declares the id it cares about *before* the pane runs, because a spawn that never
 /// executes is reported at once — the panel synthesises exit code 127 — and a wait armed afterwards
-/// would have missed it. Only declared ids are remembered, so what this holds is bounded by the
-/// panes in flight rather than by the panes that have ever run.
+/// would have missed it. Only declared ids are remembered and a satisfied wait forgets its own, so
+/// what this holds is bounded by the panes in flight rather than by the panes that have ever run —
+/// which is why a second announcement of an id already waited for does nothing, and is how a test
+/// can see the bound without this type growing an accessor for it.
 actor PaneExitAnnouncer {
 
     private var expected: Set<UUID> = []
@@ -59,8 +61,4 @@ actor PaneExitAnnouncer {
         expected.remove(id)
         ended.remove(id)
     }
-
-    /// How many ids are still declared. A count, for the test that holds this object to not leaking
-    /// one per pane (§11).
-    var expectedCount: Int { expected.count }
 }

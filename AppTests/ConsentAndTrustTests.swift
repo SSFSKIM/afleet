@@ -478,9 +478,14 @@ final class ConsentAndTrustTests: XCTestCase {
         XCTAssertTrue(opens.first?.key == Self.channel,
                       "the spawn named a channel other than the evaluation's own")
         XCTAssertEqual(spawns.count, 1, "the pane's exit did not reach a process")
-        // Nothing is left declared, so the announcer does not accumulate one id per pane.
-        let outstanding = await announcer.expectedCount
-        XCTAssertEqual(outstanding, 0, "the announcer kept \(outstanding) pane id(s) after the exit")
+
+        // **The id is forgotten, which is the bound.** A second announcement of a pane already
+        // waited for must do nothing: an announcer that kept every id would keep every waiter's
+        // entry too, and this one would re-read and spawn again.
+        await announcer.announce(PaneExit(request: request, code: 0, observedAt: Date()))
+        await Task.yield()
+        let again = await lifecycle.actions.filter { if case .open = $0.action { return true }; return false }
+        XCTAssertEqual(again.count, 1, "a second announcement of one pane issued \(again.count) opens")
     }
 
     /// The banner is usable again as soon as the pane has been handed over, and not held for as
