@@ -86,6 +86,21 @@ final class PrecommitModel {
     /// precondition looks like and is what draws nothing.
     private(set) var precondition: SpawnPrecondition = .ready
 
+    /// The channel the last verdict was read for, and whether that verdict was `untrusted`.
+    ///
+    /// **The untrusted-to-ready flip belongs to the channel, not to one observation point.** Trust
+    /// is granted outside afleet and three things can be the first to notice: the re-read a pane's
+    /// exit drives, the re-read an answer drives, and `evaluate` — which runs on every selection
+    /// *and* on every return to the front, so switching apps while the trust dialog is open is
+    /// itself an observation. Hanging item 47's spawn off only one of them drops it whenever another
+    /// gets there first, which is what a trip out of the app does.
+    ///
+    /// It is still not a general auto-spawn on selection: the flip needs a *previous* verdict for
+    /// **this same channel** that was untrusted, and a channel the user has just clicked onto has
+    /// none.
+    private var lastVerdictChannel: ChannelKey?
+    private var lastVerdictWasUntrusted = false
+
     /// Why the last action did not happen, and the evaluation it did not happen under.
     ///
     /// **A banner belongs to one evaluation.** The actions that reach the fleet all fail
@@ -115,6 +130,23 @@ final class PrecommitModel {
     /// True while an accept, a decline or a terminal handoff is on the wire. Every affordance
     /// disables on it, so nothing is sent twice.
     private(set) var isAnswering = false
+
+    /// The evaluation whose trust-review pane is open, or nil.
+    ///
+    /// **Separate from `isAnswering`, which is released at the handover.** That slot protects a
+    /// second *request* reaching the host and its job is done once the request is handed over; this
+    /// one protects the single pending review the supervisor holds. A second press while the pane is
+    /// open would mint a second request and overwrite that slot, so the first pane's exit would
+    /// match nothing and the channel would wait for a pane nobody is going to close. One press, one
+    /// pane, until the pane ends.
+    private var reviewInFlight: Int?
+
+    /// Whether §6.11's action is offered. The banner reads it, so one press means one pane.
+    var canReviewTrust: Bool {
+        guard !isAnswering else { return false }
+        guard let evaluation else { return true }
+        return reviewInFlight != evaluation.id
+    }
 
     init(lifecycle: any LifecycleAPI, panels: any PanelHost, paneExits: PaneExitAnnouncer? = nil) {
         self.lifecycle = lifecycle
@@ -165,8 +197,22 @@ final class PrecommitModel {
         // would let A's consent publish over a column that has no channel at all.
         guard id == started, !Task.isCancelled else { return }
         evaluation = Evaluation(id: id, channel: channel, project: project)
-        precondition = verdict
         raised = nil
+        await applyVerdict(verdict, for: Evaluation(id: id, channel: channel, project: project))
+    }
+
+    /// Publishes a verdict and, when it is this channel's own untrusted-to-ready flip, spawns.
+    ///
+    /// One place, so the three observations that can notice trust being granted cannot disagree
+    /// about what follows — see `lastVerdictChannel`.
+    private func applyVerdict(_ verdict: SpawnPrecondition, for evaluation: Evaluation) async {
+        let sameChannel = lastVerdictChannel == evaluation.channel
+        let wasUntrusted = sameChannel && lastVerdictWasUntrusted
+        precondition = verdict
+        lastVerdictChannel = evaluation.channel
+        lastVerdictWasUntrusted = { if case .untrusted = verdict { return true } else { return false } }()
+        guard wasUntrusted, verdict == .ready else { return }
+        await spawnAfterTrust(evaluation)
     }
 
     /// Drops the verdict on screen, because the context it was read for is gone.
@@ -181,6 +227,10 @@ final class PrecommitModel {
         precondition = .ready
         raised = nil
         deferredChannel = nil
+        // The flip's memory goes with the context it was about: a verdict remembered across an
+        // empty column would fire on whatever channel is selected next.
+        lastVerdictChannel = nil
+        lastVerdictWasUntrusted = false
     }
 
     // MARK: - §6.12, the consent sheet's three answers
@@ -245,8 +295,9 @@ final class PrecommitModel {
         // the evaluation on screen, and an evaluation already in flight means that is no longer the
         // one the model holds: the press would then hand the host a channel the user is not looking
         // at, and the pane would open on somebody else's project.
-        guard let evaluation, isCurrent(evaluation), claim() else { return }
+        guard let evaluation, isCurrent(evaluation), canReviewTrust, claim() else { return }
         Task {
+            var declared: UUID?
             do {
                 // X5's own verb, not the hatch: the channel has no process to hand over, which is
                 // why this banner is drawn at all (tracker 314).
@@ -254,13 +305,15 @@ final class PrecommitModel {
                 // Declared before the pane runs, because a spawn that never executes is reported at
                 // once — the panel synthesises exit code 127 — and a wait armed afterwards would
                 // have missed it.
+                declared = request.id
                 await paneExits?.expect(request.id)
+                reviewInFlight = evaluation.id
                 try await panels.run(request, for: evaluation.channel)
                 clear(evaluation)
                 // **The in-flight slot is released here and not at the exit.** What it protects is
                 // a second request reaching the host, and by this line the request has been handed
-                // over; the pane is the user's now, and holding the slot for as long as they keep
-                // it open would leave the banner disabled with nothing left to send.
+                // over. What keeps one press to one pane afterwards is `reviewInFlight`, which the
+                // exit clears.
                 isAnswering = false
                 // Trust is granted in Claude Code's own dialog, **inside that pane**, and no state
                 // afleet holds changes when it is — so the verdict can only be re-read from the
@@ -268,23 +321,32 @@ final class PrecommitModel {
                 // waits for the exit the panel reports through `paneExited`: not a timer, and not a
                 // second source of truth, but a listener on the one path the exit already takes.
                 await paneExits?.whenExited(request.id)
-                await reread(evaluation)
+                reviewInFlight = nil
+                await rereadAfterReview(evaluation)
             } catch let error as PanelHostError {
                 // Raised *before* the slot is released: a surface — or a test — that waits for the
                 // model to go idle must find the banner already there.
                 raise(Self.banner(for: error), for: evaluation)
+                await release(declared)
                 isAnswering = false
             } catch let error as LifecycleError {
-                // Raised *before* the slot is released: a surface — or a test — that waits for the
-                // model to go idle must find the banner already there.
                 raise(RowBanner(error), for: evaluation)
+                await release(declared)
                 isAnswering = false
             } catch {
                 raise(RowBanner(text: "The terminal handoff did not complete: \(type(of: error))."),
                       for: evaluation)
+                await release(declared)
                 isAnswering = false
             }
         }
+    }
+
+    /// Gives back everything a failed review took: the declared pane id, and the one-press slot.
+    private func release(_ declared: UUID?) async {
+        reviewInFlight = nil
+        guard let declared else { return }
+        await paneExits?.withdraw(declared)
     }
 
     // MARK: - Refusals
@@ -347,36 +409,49 @@ final class PrecommitModel {
     /// Re-reads the verdict for the evaluation an answer belongs to, under the same fence
     /// `evaluate` publishes under: an answer's re-read landing after the selection moved would
     /// replace the new channel's verdict with the old channel's.
-    private func reread(_ evaluation: Evaluation) async {
-        let wasUntrusted = isHistoryOnly
+    /// The re-read a **pane exit** earns, fenced on the evaluation's **channel** rather than on its
+    /// generation number.
+    ///
+    /// The generation is the right fence for an answer taken from a sheet: a later evaluation means
+    /// the user has navigated past the thing they answered. It is the wrong fence here, because the
+    /// decoration's `.task(id:)` keys on `isApplicationActive` — so switching to another application
+    /// while the trust dialog is open bumps the generation for the *same* channel, and item 47's
+    /// spawn would be dropped exactly when the user does the thing the dialog asks for. What matters
+    /// is that the channel this review was started for is still the one on screen.
+    private func rereadAfterReview(_ evaluation: Evaluation) async {
         let verdict = await lifecycle.preconditions(for: evaluation.channel)
-        guard isCurrent(evaluation) else { return }
-        precondition = verdict
-        // §14 item 47's second half: the trust dialog was accepted in the pane this model handed
-        // over, and the channel spawns owned. Nothing else would spawn it — trust is granted
-        // outside afleet, no state afleet holds changed when it was, and the channel is
-        // history-only precisely because the user has not been able to send.
-        //
-        // **Scoped to the flip, on this evaluation's own channel.** Not a general auto-spawn on a
-        // `.ready` verdict: `evaluate` reads one for every selection and every return to the
-        // front, and spawning on each of those would open a process in every channel the user
-        // clicks past. The condition is that *this* evaluation was untrusted a moment ago and is
-        // ready now, which happens once per accepted dialog.
-        guard wasUntrusted, verdict == .ready else { return }
-        await spawnAfterTrust(evaluation)
+        guard self.evaluation?.channel == evaluation.channel else { return }
+        await applyVerdict(verdict, for: evaluation)
     }
 
-    /// The owned spawn a trust flip earns, under the same generation fence every other action here
-    /// takes: a `perform` whose answer lands after the selection moved belongs to a channel the
-    /// user has left, and its refusal is not the new context's news.
+    private func reread(_ evaluation: Evaluation) async {
+        let verdict = await lifecycle.preconditions(for: evaluation.channel)
+        guard isCurrent(evaluation) else { return }
+        await applyVerdict(verdict, for: evaluation)
+    }
+
+    /// The owned spawn a trust flip earns (§14 item 47's second half).
+    ///
+    /// Nothing else would spawn it: trust is granted outside afleet, no state afleet holds changes
+    /// when it is, and the channel is history-only precisely because the user has not been able to
+    /// send. `applyVerdict` is the one caller and it is what scopes this to the flip — a channel
+    /// whose previous verdict for itself was untrusted, now ready — so a `.ready` read on a channel
+    /// the user has merely clicked onto spawns nothing.
     private func spawnAfterTrust(_ evaluation: Evaluation) async {
         do {
             _ = try await lifecycle.perform(.open, on: evaluation.channel)
         } catch let error as LifecycleError {
-            raise(RowBanner(error), for: evaluation)
+            raiseForChannel(RowBanner(error), of: evaluation)
         } catch {
-            raise(RowBanner(text: "The channel did not open after trust was granted: \(type(of: error))."),
-                  for: evaluation)
+            raiseForChannel(RowBanner(text: "The channel did not open after trust was granted: "
+                                    + "\(type(of: error))."), of: evaluation)
         }
+    }
+
+    /// A refusal the **channel** still owns, for the spawn a trust flip earns: the generation may
+    /// have moved for a reason that is not the user navigating away — see `rereadAfterReview`.
+    private func raiseForChannel(_ banner: RowBanner, of evaluation: Evaluation) {
+        guard self.evaluation?.channel == evaluation.channel else { return }
+        raised = (started, banner)
     }
 }

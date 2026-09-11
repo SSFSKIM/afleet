@@ -329,6 +329,41 @@ final class NewChannelTests: XCTestCase {
         XCTAssertNil(request.name, "a blank session name became a token")
     }
 
+    // MARK: - The two guards the menu and the sheet carry
+
+    /// The File menu's item is offered exactly when the sheet has somewhere to be presented.
+    ///
+    /// **The predicate and not the modifier.** `AfleetApp.shellCommands` is a `Commands` builder
+    /// inside a `Scene`, and constructing the `App` value instantiates its `@State` model and its
+    /// `NSApplicationDelegateAdaptor`; there is no way to evaluate it here, and `SidebarView.body`
+    /// already showed what happens when a test tries to render a scene-level value. So what is
+    /// asserted is the decision — `model.route.workspace == nil` — which is the whole of what the
+    /// `.disabled` carries, and the attachment itself is read at review.
+    ///
+    /// It has to be the route and not `model.browser`: the coordinator is built inside the launch,
+    /// so the browser exists while the route is still `.launching`, which is the window a user has
+    /// the menu open in.
+    func testTheMenuItemIsOfferedOnlyOnceTheRouteHasAWorkspace() async throws {
+        let launching = AppModel(registry: RowRegistry())
+        XCTAssertTrue(launching.route.isLaunching, "a fresh model is not launching, so this proves nothing")
+        XCTAssertNil(launching.route.workspace, "a launching route offered the New Channel item")
+
+        let rig = try await WorkspaceRig()
+        XCTAssertNotNil(rig.app.route.workspace, "a launched route does not offer the New Channel item")
+        // The browser exists on both, which is why it is the wrong predicate.
+        XCTAssertNotNil(rig.app.browser, "the launched model has no browser")
+    }
+
+    /// The sheet always has a way out, including before its model exists.
+    ///
+    /// The model is built asynchronously and a launch that has not reached a workspace never answers
+    /// one, so a sheet with only a progress view would be a window the user cannot close.
+    func testTheSheetOffersCancelBeforeItsModelExists() throws {
+        let sheet = NewChannelSheet(request: NewChannelRequest(id: 1, root: Self.project)) {}
+        let cancel = ViewTree.button("Cancel", in: sheet.body)
+        XCTAssertNotNil(cancel, "the sheet with no model yet offered no way out")
+    }
+
     // MARK: - The production seams
 
     /// `FleetCoordinator.createChannel` is the pairing itself: one `Fleet.create`, and the row that
@@ -420,6 +455,13 @@ final class NewChannelTests: XCTestCase {
     /// `.sheet(item:)` keeps one view value across a replacing item — a section header's item and
     /// then Cmd+Shift+N over the open sheet is two requests for one presentation — and a `.task`
     /// that only ran while the model was nil left the second sheet holding the first request's root.
+    ///
+    /// **What is asserted here is the model and the request identity, not the `.task(id:)` itself.**
+    /// SwiftUI owns `@State` and the task's lifetime through the render tree, and neither exists
+    /// outside one; there is no way from here to observe that a replaced item re-ran the task. So
+    /// this holds the two halves that *are* observable — two presses are two distinct request
+    /// values, which is what makes the keying fire at all, and the factory answers per root — and
+    /// the keying itself is read at review. Filed as tracker 454.
     func testAReplacingRequestRebuildsTheSheetsModel() async throws {
         let rig = try await WorkspaceRig()
 
@@ -611,32 +653,34 @@ final class NewChannelTests: XCTestCase {
         XCTAssertFalse(model.rows.isEmpty, "the recovered open drew no timeline rows")
     }
 
-    /// The created-channel flag follows the **row**, which is replaced by the indexed one.
+    /// The created-channel flag follows the **row**, and a row whose rule changes changes it.
     ///
     /// It used to be read once, at the first `open`, so a long-indexed channel went on calling
-    /// itself new for the life of its model — the opposite of what its own comment claimed.
+    /// itself new for the life of its model. The discriminating observation is a model that has not
+    /// opened yet — `hasOpened` false — being handed an indexed row and then asked to open: with the
+    /// flag stale it waits for a transcript the index already holds; re-read, it reports the failure
+    /// a listed row with no transcript deserves.
     func testTheCreatedFlagFollowsTheRowItIsDrawnFrom() async throws {
         let rig = try await TimelineRig()
         let model = rig.registry.model(for: rig.created)
 
+        // Drawn first as a created channel, which is what the column does the moment it mounts.
         model.adopt(ChannelHeader(row: rig.row))
         XCTAssertTrue(model.header.decidingRule == FleetBrowserModel.creationRule,
                       "the creation's rule did not reach the header")
-        await model.open(rig.row)
-        XCTAssertTrue(model.awaitsTranscript, "a created channel is not waiting for its transcript")
 
-        // The index catches up and the column adopts the indexed row.
+        // Then the index catches up and the column adopts the indexed row — still before any open,
+        // because a channel created and immediately switched away from is exactly that.
         model.adopt(ChannelHeader(row: rig.listedRow))
-        let path = try rig.writeTranscript()
-        _ = try await rig.index.build()
-        await rig.registry.relocate(rig.created, to: path)
-        XCTAssertTrue(model.hasOpened, "the indexed row did not open the channel")
+        XCTAssertFalse(model.header.decidingRule == FleetBrowserModel.creationRule,
+                       "the indexed row's rule did not reach the header")
 
-        // And a later open of a listed row reports a missing transcript rather than a new channel.
-        let other = try await TimelineRig()
-        let listedOnly = other.registry.model(for: other.created)
-        await listedOnly.open(other.listedRow)
-        XCTAssertFalse(listedOnly.awaitsTranscript, "a listed row was treated as newly created")
+        // The transcript is not there, so a *listed* row must report the failure rather than wait.
+        await model.open(rig.listedRow)
+        XCTAssertFalse(model.awaitsTranscript,
+                       "a model first drawn as a created channel still calls itself new after the "
+                       + "indexed row replaced it")
+        XCTAssertNotNil(model.failure, "a listed row with no transcript reported no failure")
     }
 
     // MARK: - Rigs
@@ -808,11 +852,17 @@ actor HookedIndex: IndexAccess {
 
     func beforeEntry(_ body: @escaping @Sendable () async -> Void) { hook = body }
 
+    /// **The hook runs after the inner lookup, not before it.** Before it, the lookup answers with
+    /// the entry the hook had just created and `performOpen` takes its ordinary path — the awaiting
+    /// branch is never entered and the recovery under test never runs. After it, the answer is the
+    /// `nil` the real suspension would have returned while the delta landed behind it, which is the
+    /// interleaving exactly.
     func entry(_ id: SessionID) async -> IndexEntry? {
         let body = hook
         hook = nil
+        let answer = await inner.entry(id)
         await body?()
-        return await inner.entry(id)
+        return answer
     }
 
     func loadPersisted() async throws -> IndexSnapshot? { try await inner.loadPersisted() }

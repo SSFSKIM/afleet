@@ -488,6 +488,98 @@ final class ConsentAndTrustTests: XCTestCase {
         XCTAssertEqual(again.count, 1, "a second announcement of one pane issued \(again.count) opens")
     }
 
+    /// **One press, one pane.** A second press while the review pane is open opens nothing.
+    ///
+    /// `isAnswering` is released at the handover, which is right — it protects a second *request*
+    /// reaching the host and that is over. What protects the supervisor's single pending review is
+    /// its own flag: a second request would overwrite that slot, so the first pane's exit would
+    /// match nothing and the channel would wait for a pane nobody is going to close.
+    func testASecondPressWhileTheReviewPaneIsOpenOpensNothing() async throws {
+        let panels = ConsentPanelHost()
+        let announcer = PaneExitAnnouncer()
+        let lifecycle = ConsentDouble()
+        await lifecycle.stage([.untrusted(root: Self.project), .ready])
+        let model = PrecommitModel(lifecycle: lifecycle, panels: panels, paneExits: announcer)
+        await model.evaluate(channel: Self.channel, project: Self.project)
+
+        try press("Review trust in terminal", in: TrustBanner(isAnswering: !model.canReviewTrust) {
+            model.reviewTrustInTerminal()
+        }.body)
+        await model.whenIdle()
+        XCTAssertEqual(panels.runs.count, 1, "the first press opened no pane")
+        XCTAssertFalse(model.canReviewTrust, "the banner is still offered with a review pane open")
+
+        // The second press, taken exactly as the banner would take it.
+        model.reviewTrustInTerminal()
+        await model.whenIdle()
+        XCTAssertEqual(panels.runs.count, 1, "a second press opened \(panels.runs.count) panes, not one")
+        let asked = await lifecycle.openings
+        XCTAssertEqual(asked, 1, "a second press asked X5 for \(asked) requests, not one")
+
+        // The pane ends, and the action is offered again.
+        let request = try XCTUnwrap(panels.runs.first?.request)
+        await announcer.announce(PaneExit(request: request, code: 0, observedAt: Date()))
+        await model.settledAfterPane()
+        XCTAssertTrue(model.canReviewTrust, "the action was not offered again after the pane ended")
+    }
+
+    /// A refused handoff gives back everything it took, so the user can press again.
+    ///
+    /// The declared pane id and the one-press slot are both taken *before* `PanelHost.run`, and the
+    /// host discharges a request it refuses — the exit it synthesises goes to X5, not here. Without
+    /// the withdrawal the id stayed declared for the life of the app and the banner stayed disabled
+    /// for ever.
+    func testARefusedReviewGivesBackTheSlotAndTheDeclaration() async throws {
+        let panels = ConsentPanelHost()
+        panels.refusal = .noPaneRunner(.terminal)
+        let announcer = PaneExitAnnouncer()
+        let lifecycle = ConsentDouble()
+        await lifecycle.stage([.untrusted(root: Self.project)])
+        let model = PrecommitModel(lifecycle: lifecycle, panels: panels, paneExits: announcer)
+        await model.evaluate(channel: Self.channel, project: Self.project)
+
+        model.reviewTrustInTerminal()
+        await model.whenIdle()
+        XCTAssertNotNil(model.banner, "the refusal raised no banner")
+        XCTAssertTrue(model.canReviewTrust, "a refused review left the action disabled for ever")
+
+        // And a second press really does reach the host, which is what the slot being back means.
+        panels.refusal = nil
+        model.reviewTrustInTerminal()
+        await model.whenIdle()
+        XCTAssertEqual(panels.runs.count, 1, "the retry after a refusal opened no pane")
+    }
+
+    /// Switching to another application while the trust dialog is open does not drop the spawn.
+    ///
+    /// The decoration's `.task(id:)` keys on `isApplicationActive`, so coming back to the front
+    /// re-evaluates the **same** channel and bumps the generation. Fenced on the generation, the
+    /// exit-driven re-read dropped item 47's spawn exactly when the user did the thing the dialog
+    /// asks for; fenced on the channel, it does not.
+    func testLeavingAndReturningToTheAppWhileThePaneIsOpenKeepsTheSpawn() async throws {
+        let panels = ConsentPanelHost()
+        let announcer = PaneExitAnnouncer()
+        let lifecycle = ConsentDouble()
+        await lifecycle.stage([.untrusted(root: Self.project), .ready])
+        let model = PrecommitModel(lifecycle: lifecycle, panels: panels, paneExits: announcer)
+        await model.evaluate(channel: Self.channel, project: Self.project)
+
+        model.reviewTrustInTerminal()
+        await model.whenIdle()
+        let request = try XCTUnwrap(panels.runs.first?.request)
+
+        // The user switches away and back while the dialog is up: the same channel, a new
+        // evaluation, a bumped generation.
+        await model.evaluate(channel: Self.channel, project: Self.project)
+
+        await announcer.announce(PaneExit(request: request, code: 0, observedAt: Date()))
+        await model.settledAfterPane()
+
+        let opens = await lifecycle.actions.filter { if case .open = $0.action { return true }; return false }
+        XCTAssertEqual(opens.count, 1, "a trip out of the app dropped the spawn (\(opens.count) opens)")
+        XCTAssertTrue(opens.first?.key == Self.channel, "the spawn named another channel")
+    }
+
     /// The banner is usable again as soon as the pane has been handed over, and not held for as
     /// long as the user keeps it open.
     ///

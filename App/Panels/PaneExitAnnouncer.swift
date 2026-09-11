@@ -44,6 +44,19 @@ actor PaneExitAnnouncer {
         for continuation in waiters.removeValue(forKey: id) ?? [] { continuation.resume() }
     }
 
+    /// Withdraws a declaration whose pane will never run.
+    ///
+    /// Every path that declares an id and then fails to reach a pane calls this: `PanelHost.run`
+    /// throwing is the real one — the host discharges the request, and the exit it synthesises is
+    /// reported to X5 and not here. Without it a refused handoff left its id declared for the life of
+    /// the app, so what this object holds grew by one per refusal instead of being bounded by the
+    /// panes in flight.
+    func withdraw(_ id: UUID) {
+        expected.remove(id)
+        ended.remove(id)
+        for continuation in waiters.removeValue(forKey: id) ?? [] { continuation.resume() }
+    }
+
     /// Returns when `id`'s pane has ended — at once if it already has.
     ///
     /// Returns at once for an id nobody declared as well, which is the safe direction: a caller

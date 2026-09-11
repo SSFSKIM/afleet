@@ -54,7 +54,9 @@ struct ChannelDecorations: ViewModifier {
         VStack(spacing: 0) {
             if let model {
                 if model.isHistoryOnly {
-                    TrustBanner(isAnswering: model.isAnswering) { model.reviewTrustInTerminal() }
+                    // Disabled while a review pane of this evaluation's is open, not only while a
+                    // request is on the wire: one press, one pane (see `canReviewTrust`).
+                    TrustBanner(isAnswering: !model.canReviewTrust) { model.reviewTrustInTerminal() }
                     Divider()
                 }
                 if model.isConsentDeferred {

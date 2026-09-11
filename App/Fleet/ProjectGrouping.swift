@@ -247,15 +247,27 @@ final class PathMemo {
     /// Re-derived on the first rebuild that finds the directory there, and settled then.
     private var provisionalRoot: [String: String] = [:]
     private var provisionalRepository: [String: String] = [:]
-    /// Which paths this rebuild has already asked the filesystem about, so the question is asked
-    /// once per distinct path per rebuild rather than once per row.
+    /// Which (question, path) pairs this rebuild has already asked the filesystem about, so each is
+    /// asked once per rebuild rather than once per row.
     ///
     /// A rebuild groups two rows of one missing project — the ordinary case, since a project the
     /// user worked in has several channels — and `root(of:)` is asked once per row. Without this the
     /// stat is paid per row, and `repository(of:)` pays a second one for the same directory: four
-    /// stats for one absent project with two channels. Cleared by `beginGeneration()`, which
+    /// stats for one absent project with two channels.
+    ///
+    /// **Keyed by the question and not by the path alone.** A missing directory with no `.git` above
+    /// it is its own root, so `root(of:)` and `repository(of:)` are asked about the *same* path —
+    /// and a set of paths made the second of them skip its own stat and hand back a provisional
+    /// answer that a checkout appearing would never refresh. Cleared by `beginGeneration()`, which
     /// `sections(from:paths:)` calls.
-    private var askedThisGeneration: Set<String> = []
+    private var askedThisGeneration: Set<Question> = []
+
+    /// Which of the two answers a memo entry is about, with the path it is about.
+    private struct Question: Hashable {
+        enum Kind: Hashable { case root, repository }
+        var kind: Kind
+        var path: String
+    }
 
     /// How many times the filesystem was actually consulted — a miss, not an entry.
     ///
@@ -287,13 +299,16 @@ final class PathMemo {
     /// still missing after it appeared.
     func beginGeneration() { askedThisGeneration.removeAll(keepingCapacity: true) }
 
-    /// Whether `path` is on disk, asked at most once per path per rebuild.
-    private func exists(_ path: String, provisional: Bool) -> Bool {
-        // A path with no provisional answer has never been asked about, so the caller is going to
-        // derive anyway and the gate would buy nothing.
+    /// Whether `path` is on disk, asked at most once per (question, path) per rebuild.
+    ///
+    /// The first generation that meets a path costs one stat per question — there is no provisional
+    /// answer yet, so the caller is going to derive anyway and a gate would buy nothing — and every
+    /// later generation costs one per question until the directory appears.
+    private func exists(_ path: String, _ kind: Question.Kind, provisional: Bool) -> Bool {
         guard provisional else { return checkedExists(path) }
-        guard !askedThisGeneration.contains(path) else { return false }
-        askedThisGeneration.insert(path)
+        let asked = Question(kind: kind, path: path)
+        guard !askedThisGeneration.contains(asked) else { return false }
+        askedThisGeneration.insert(asked)
         return checkedExists(path)
     }
 
@@ -312,7 +327,7 @@ final class PathMemo {
         if let known = rootOfCWD[key] { return known }
         // The gate is not counted as a probe — `probeCount` measures the derivation the cache exists
         // to avoid — but it *is* counted, under `existenceCheckCount`: see that property.
-        let exists = exists(key, provisional: provisionalRoot[key] != nil)
+        let exists = exists(key, .root, provisional: provisionalRoot[key] != nil)
         if !exists, let provisional = provisionalRoot[key] { return provisional }
         probeCount += 1
         // **The checkout and not the trust key.** §8.2 sub-groups a repository that holds several
@@ -353,7 +368,7 @@ final class PathMemo {
     /// the file that identifies it, and a checkout the CLI has not made yet has none.
     func repository(of root: String) -> String {
         if let known = repositoryOfRoot[root] { return known }
-        let exists = exists(root, provisional: provisionalRepository[root] != nil)
+        let exists = exists(root, .repository, provisional: provisionalRepository[root] != nil)
         if !exists, let provisional = provisionalRepository[root] { return provisional }
         probeCount += 1
         let resolved = Self.native(WorktreeLink.mainRepository(of: root) ?? root)

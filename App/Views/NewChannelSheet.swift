@@ -50,6 +50,11 @@ struct NewChannelSheet: View {
         // request's root, so a channel would be created in a project the user was no longer
         // looking at.
         .task(id: request) {
+            // **Cleared before the await, not after it.** Building the model reads the settings
+            // document, which suspends; a replacing request would otherwise leave the *previous*
+            // request's model on screen and interactive for that window, so a *Create* pressed in it
+            // would make a channel in the project the user had just navigated away from.
+            model = nil
             model = await app?.makeNewChannelModel(root: request.root)
         }
     }

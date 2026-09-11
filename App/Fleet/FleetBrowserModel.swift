@@ -285,6 +285,7 @@ final class FleetBrowserModel {
             guard let entry = await resolving(id) else {
                 listed[id] = nil
                 decisions[id] = nil
+                forget(id)
                 continue
             }
             let decision = ChannelRegistrar.decide(entry)
@@ -305,11 +306,15 @@ final class FleetBrowserModel {
     ///
     /// **The delta path has to ask the same question `paint` asks**, and for the same reason: a
     /// pending channel is drawn by this model and named by nothing in the index, so a delta that
-    /// removes an id — or re-reads an entry the listing policy no longer lists — must not take its
-    /// live half, its banner or the selection with it. It is the created channel's *own* id that
-    /// arrives here in the ordinary case: the first delta that lists it names it as `added`, and a
-    /// transcript deleted a moment later names it as `removed` while the channel is still there,
-    /// with a process, being typed into.
+    /// touches its id must not take its live half, its banner or the selection with it.
+    ///
+    /// Two arms reach it for a channel the index has never listed, and those are the ones the guard
+    /// is for. A delta's `removed` can name a created channel before any delta has *added* it —
+    /// `TranscriptIndex` emits a removal for a candidate it cannot resolve, and a transcript written
+    /// and deleted inside one watcher batch is exactly that — and the `resolving` failure arm below
+    /// reaches it for the same id on the same batch. The third arm, a verdict that stops listing an
+    /// already-listed id, cannot be a pending channel by definition, and calls this for symmetry so
+    /// that the three arms cannot drift.
     private func forget(_ id: SessionID) {
         guard pending[id] == nil else { return }
         states[id] = nil
