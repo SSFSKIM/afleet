@@ -835,6 +835,12 @@ actor ConsentDouble: LifecycleAPI {
     private(set) var openings = 0
 
     func openInTerminal(_ key: ChannelKey) async throws -> PaneRequest {
+        unreachable("openInTerminal")
+    }
+
+    /// §6.11's verb, which is the one the trust banner calls (tracker 314). Counted, so a superseded
+    /// banner's press is asserted as *nothing left the surface* rather than as a flag (§11).
+    func reviewTrustInTerminal(_ key: ChannelKey) async throws -> PaneRequest {
         openings += 1
         return paneRequest
     }

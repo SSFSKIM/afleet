@@ -51,9 +51,18 @@ public enum WorktreeLayout {
     /// somebody else's tree — would move the trust key to a directory the engine never reads, and
     /// the channel would be refused as untrusted on a project the user has trusted.
     ///
-    /// One guard is this transcription's own and the fallback direction is why it is safe: the
-    /// common directory's last component must be `.git`, because the repository root is that
-    /// directory's parent and there is no way to name a root without it.
+    /// **The last step is the engine's own branch, not a `.git` assumption.** Its resolver ends
+    ///
+    /// ```js
+    /// if (basename(commondir) !== ".git") return normalize(commondir);
+    /// return normalize(dirname(commondir));
+    /// ```
+    ///
+    /// (2.1.263 `chunk-gbme4p3n.js`; the bundle prose at `SPEC/03:4036-4038` paraphrases it loosely
+    /// and the code is what ships). So a worktree of a **bare** repository — whose common directory
+    /// is `…/repo.git`, not `…/repo/.git` — keys on that directory itself, and an earlier version of
+    /// this transcription refused the whole resolution there and left the checkout, which is a
+    /// false `untrusted` on a repository the user trusted.
     public static func commonRepositoryRoot(ofWorktreeAt root: URL) -> URL? {
         guard let gitDirectory = gitDirectory(ofWorktreeAt: root) else { return nil }
         let worktrees = gitDirectory.deletingLastPathComponent()
@@ -62,13 +71,15 @@ public enum WorktreeLayout {
                                              relativeTo: gitDirectory) else { return nil }
         // The exact parent of the `worktrees` directory, compared as real paths so two spellings of
         // one directory — a linked `TMPDIR`, `/private/var` against `/var` — do not read as two.
-        guard RealPath.string(commonDirectory) == RealPath.string(worktrees.deletingLastPathComponent()),
-              commonDirectory.lastPathComponent == ".git" else { return nil }
+        guard RealPath.string(commonDirectory) == RealPath.string(worktrees.deletingLastPathComponent())
+        else { return nil }
         // The reciprocal pointer, which is what tells a *live* link from a stale or forged one.
         guard let back = resolved(pointerFile: "gitdir", in: gitDirectory, relativeTo: gitDirectory),
               RealPath.string(back) == RealPath.string(root.appending(path: ".git")) else { return nil }
-        return URL(filePath: RealPath.string(commonDirectory.deletingLastPathComponent()),
-                   directoryHint: .isDirectory)
+        let common = commonDirectory.lastPathComponent == ".git"
+            ? commonDirectory.deletingLastPathComponent()
+            : commonDirectory
+        return URL(filePath: RealPath.string(common))
     }
 
     /// The tolerant answer, for grouping: the main checkout a `gitdir:` path implies, taken from the

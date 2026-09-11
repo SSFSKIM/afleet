@@ -845,6 +845,7 @@ actor ActionDouble: LifecycleAPI {
     func run(_ strategy: RouteStrategy, arguments: [String], on key: ChannelKey,
              ui: any StrategyUI) async throws -> StrategyOutcome { unreachable("run") }
     func openInTerminal(_ key: ChannelKey) async throws -> PaneRequest { unreachable("openInTerminal") }
+    func reviewTrustInTerminal(_ key: ChannelKey) async throws -> PaneRequest { unreachable("reviewTrustInTerminal") }
     func attach(_ job: JobShort) async throws -> PaneRequest { unreachable("attach") }
     func logs(_ job: JobShort) async throws -> PaneRequest { unreachable("logs") }
     func paneExited(_ exit: PaneExit) async { unreachable("paneExited") }

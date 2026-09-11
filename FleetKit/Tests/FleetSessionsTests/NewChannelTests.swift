@@ -351,6 +351,53 @@ final class NewChannelTests: XCTestCase {
         XCTAssertFalse(movedNow, "the transcript's own evidence did not move the session flag")
     }
 
+    /// A **restart that adds a worktree** adopts the checkout the engine reports.
+    ///
+    /// `RuntimeStateUpdater` seeds `runtime.cwd` from a channel's *first* `system/init` ever, which
+    /// is right for everything else and wrong here: a `RestartRequest(worktree:)` puts `-w` on a
+    /// channel that has already handshaked, so the seed is long taken, and clearing the flag without
+    /// adopting the reported directory would leave every later respawn running in the main working
+    /// copy under a channel whose transcript lives under the checkout's slug.
+    func testARestartThatAddsAWorktreeAdoptsTheReportedCheckout() async throws {
+        let harness = try Harness()
+        defer { Task { await harness.tearDown() } }
+        let checkout = harness.cwd.appending(path: ".claude/worktrees/added-later", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: checkout, withIntermediateDirectories: true)
+        try harness.home.trust(root: checkout)
+
+        // A channel that has already handshaked once, so the runtime seed has been taken.
+        let key = await harness.fleet.create(ChannelCreation(cwd: harness.cwd))
+        _ = try await harness.fleet.perform(.open, on: key)
+        let built = await harness.fleet.channel(key)
+        let supervisor = try XCTUnwrap(built)
+        await supervisor.handle(event: .frame(Self.systemInit(cwd: harness.cwd.path(percentEncoded: false),
+                                                              session: key.session),
+                                              ProcessEpoch.first))
+        try await harness.waitFor("the channel came up") { [fleet = harness.fleet] in
+            await fleet.state(of: key)?.origin == .owned(.ready)
+        }
+
+        // Now the restart adds the worktree, and the replacement reports the checkout.
+        _ = try? await harness.fleet.perform(.quiescentRestart(RestartRequest(worktree: .named("added-later"))),
+                                             on: key)
+        try await harness.waitFor("the restart built a process") { [launches = harness.launches] in
+            launches.count >= 2
+        }
+        let restart = try XCTUnwrap(harness.launches.all.dropFirst().first)
+        XCTAssertTrue(try Self.value(of: "-w", in: Self.argv(of: restart)) == "added-later",
+                      "the restart did not ask the CLI for the worktree the request named")
+
+        await supervisor.handle(event: .frame(Self.systemInit(cwd: checkout.path(percentEncoded: false),
+                                                              session: key.session),
+                                              ProcessEpoch(rawValue: 2)))
+        let stillAsks = await supervisor.holdsWorktree()
+        XCTAssertFalse(stillAsks, "the replacement's handshake left the launch line asking for a second checkout")
+
+        let adopted = await supervisor.runtimeState().cwd
+        XCTAssertTrue(adopted.path(percentEncoded: false) == checkout.path(percentEncoded: false),
+                      "the relocation cleared the flag without adopting the checkout the engine reported")
+    }
+
     /// A mirror carrying **no records** does not move the session flag.
     ///
     /// The frame's promise is the records the CLI just wrote; one carrying none has written none, so
@@ -726,7 +773,7 @@ final class TrustReviewPaneTests: XCTestCase {
         defer { Task { await harness.tearDown() } }
         let key = await harness.fleet.create(ChannelCreation(cwd: harness.cwd))
 
-        let request = try await harness.fleet.openInTerminal(key)
+        let request = try await harness.fleet.reviewTrustInTerminal(key)
 
         XCTAssertTrue(request.arguments.isEmpty,
                       "a trust review passed \(request.arguments.count) argument(s), so it opens a conversation")
@@ -750,7 +797,7 @@ final class TrustReviewPaneTests: XCTestCase {
         let key = await harness.fleet.create(ChannelCreation(cwd: harness.cwd))
         let before = await harness.fleet.state(of: key)
 
-        _ = try await harness.fleet.openInTerminal(key)
+        _ = try await harness.fleet.reviewTrustInTerminal(key)
 
         let after = await harness.fleet.state(of: key)
         XCTAssertEqual(harness.spawns.count, 0, "a trust review built a process")
@@ -769,7 +816,7 @@ final class TrustReviewPaneTests: XCTestCase {
         defer { Task { await harness.tearDown() } }
         let key = await harness.fleet.create(ChannelCreation(cwd: harness.cwd))
 
-        let request = try await harness.fleet.openInTerminal(key)
+        let request = try await harness.fleet.reviewTrustInTerminal(key)
         let pending = await harness.fleet.channel(key)?.pendingPaneRequest
         XCTAssertTrue(pending?.id == request.id, "the trust review is not the channel's pending pane request")
 
@@ -785,23 +832,98 @@ final class TrustReviewPaneTests: XCTestCase {
                        "the trust review's own exit was recorded as one nobody was waiting for")
     }
 
-    /// A channel with an owned process keeps today's hatch, unchanged.
+    /// The two verbs are two verbs, and each refuses what the other is for.
     ///
-    /// The negative half, and the one that makes the clauses above about a *processless* channel: a
-    /// press that always answered a trust review would have replaced the header's *Open in
-    /// terminal* with something that hands nothing over and leaves the child running.
-    func testAChannelWithAProcessStillGetsTheHatch() async throws {
+    /// This is the whole of the ruling that made the trust review its own X5 member: folding it into
+    /// `openInTerminal` made that verb's answer depend on the channel's origin, so the header's
+    /// *Open in Terminal* on an archived channel silently stopped meaning what its copy says. A
+    /// channel with a child has a session to hand over and the hatch is the verb for it; a channel
+    /// with none has nothing to hand over and the review is the verb for that.
+    func testTheHatchAndTheReviewRefuseEachOthersChannels() async throws {
+        let harness = try Harness(trusted: true)
+        defer { Task { await harness.tearDown() } }
+        let key = await harness.fleet.create(ChannelCreation(cwd: harness.cwd))
+
+        // No process: the hatch refuses, exactly as it did before item 47's work.
+        do {
+            _ = try await harness.fleet.openInTerminal(key)
+            XCTFail("the hatch handed over a channel with nothing running")
+        } catch let error as LifecycleError {
+            guard case .notOwned = error else {
+                return XCTFail("the hatch refused a processless channel for the wrong reason")
+            }
+        }
+
+        _ = try await harness.fleet.perform(.open, on: key)
+        XCTAssertEqual(harness.spawns.count, 1, "the channel came up with no process, so this proves nothing")
+
+        // A process: the hatch is a hatch, and the review refuses.
+        let hatch = try await harness.fleet.openInTerminal(key)
+        var isHatch = false
+        if case .hatch = hatch.purpose { isHatch = true }
+        XCTAssertTrue(isHatch, "an owned channel's Open in terminal stopped being a hatch")
+        XCTAssertTrue(hatch.arguments.contains("--resume"), "the hatch no longer resumes the session")
+    }
+
+    /// The review refuses a channel whose child is live.
+    func testTheReviewRefusesAChannelWithALiveChild() async throws {
         let harness = try Harness(trusted: true)
         defer { Task { await harness.tearDown() } }
         let key = await harness.fleet.create(ChannelCreation(cwd: harness.cwd))
         _ = try await harness.fleet.perform(.open, on: key)
-        XCTAssertEqual(harness.spawns.count, 1, "the channel came up with no process, so this proves nothing")
 
-        let request = try await harness.fleet.openInTerminal(key)
+        do {
+            _ = try await harness.fleet.reviewTrustInTerminal(key)
+            XCTFail("the review answered for a channel with a session to hand over")
+        } catch let error as LifecycleError {
+            guard case .busy = error else {
+                return XCTFail("the review refused a live channel for the wrong reason")
+            }
+        }
+    }
 
-        var isHatch = false
-        if case .hatch = request.purpose { isHatch = true }
-        XCTAssertTrue(isHatch, "an owned channel's Open in terminal stopped being a hatch")
-        XCTAssertTrue(request.arguments.contains("--resume"), "the hatch no longer resumes the session")
+    /// A stale hatch does not misroute a later review's exit.
+    ///
+    /// `PanelHostModel.run` can throw — `noPaneRunner` on a build with no Terminal leaf — and the
+    /// host discharges the request, but a `pendingHatch` this supervisor never cleared can still sit
+    /// there. Reading only the hatch, or giving it precedence, routed the review's **own** exit to
+    /// `staleExit` and left its request pending for ever; the match is by id, on either.
+    func testAStaleHatchDoesNotMisrouteALaterReviewsExit() async throws {
+        let harness = try Harness(trusted: true)
+        defer { Task { await harness.tearDown() } }
+        let key = await harness.fleet.create(ChannelCreation(cwd: harness.cwd))
+        _ = try await harness.fleet.perform(.open, on: key)
+        let hatch = try await harness.fleet.openInTerminal(key)
+
+        // The hatch's pane never ran, so nothing ever reports its exit. The channel is processless
+        // now — the handoff terminated its child — so the review is offered.
+        let review = try await harness.fleet.reviewTrustInTerminal(key)
+        XCTAssertFalse(review.id == hatch.id, "the review reused the hatch's request id")
+
+        await harness.fleet.paneExited(PaneExit(request: review, code: 0, observedAt: Date()))
+
+        let lines = try await harness.diagnosticLines()
+        XCTAssertTrue(lines.contains { $0["event"] as? String == "pane_ended" },
+                      "the review's exit was not matched, so nothing recorded it")
+        XCTAssertFalse(lines.contains { $0["event"] as? String == "stale_exit" },
+                       "the stale hatch swallowed the review's own exit")
+    }
+
+    /// A **dormant** channel gets the review — the original ruling's words — and its hatch still
+    /// works, because a dormant channel is owned and §7.4's table has that row.
+    func testADormantChannelGetsBothVerbs() async throws {
+        let harness = try Harness(trusted: true)
+        defer { Task { await harness.tearDown() } }
+        let key = await harness.fleet.create(ChannelCreation(cwd: harness.cwd))
+        _ = try await harness.fleet.perform(.open, on: key)
+        _ = try await harness.fleet.perform(.quit, on: key)
+        let origin = await harness.fleet.state(of: key)?.origin
+        XCTAssertTrue(origin == .owned(.dormant), "the channel is not dormant, so this proves nothing")
+
+        let review = try await harness.fleet.reviewTrustInTerminal(key)
+        var isReview = false
+        if case .trustReview = review.purpose { isReview = true }
+        XCTAssertTrue(isReview, "a dormant channel's review is not a trust review")
+        XCTAssertTrue(review.arguments.isEmpty, "the review passed arguments")
     }
 }

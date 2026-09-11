@@ -315,7 +315,12 @@ final class PathMemo {
         let exists = exists(key, provisional: provisionalRoot[key] != nil)
         if !exists, let provisional = provisionalRoot[key] { return provisional }
         probeCount += 1
-        let resolved = Self.native(CanonicalPath.string(ProjectRoot.canonical(for: cwd).root))
+        // **The checkout and not the trust key.** §8.2 sub-groups a repository that holds several
+        // checkouts, and that grouping is keyed on the directory a channel actually runs in; the
+        // trust key is the repository, so keying on it collapses every worktree into its repository
+        // body and the sub-grouping disappears. `WorktreeLink` below is what finds the repository
+        // for the section, from this root.
+        let resolved = Self.native(CanonicalPath.string(ProjectRoot.roots(for: cwd).checkout))
         if exists {
             rootOfCWD[key] = resolved
             provisionalRoot[key] = nil

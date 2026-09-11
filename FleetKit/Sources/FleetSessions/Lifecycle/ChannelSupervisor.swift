@@ -99,7 +99,18 @@ public actor ChannelSupervisor {
     /// Both, because `Fleet.paneExited` finds the channel by this id and an exit nobody claims is
     /// recorded as stale — so a trust-review pane that ended would otherwise leave a diagnostic
     /// saying afleet had lost track of a pane it asked for.
+    /// The requests a pane exit is matched against: a handoff's, or a trust review's.
+    ///
+    /// Both, because `Fleet.paneExited` finds the channel by this id and an exit nobody claims is recorded as
+    /// stale — so a trust-review pane that ended would otherwise leave a diagnostic saying afleet had lost track of
+    /// a pane it asked for. Nil only when neither is in flight.
     public var pendingPaneRequest: PaneRequest? { pendingHatch ?? pendingTrustReview }
+
+    /// Whether either pending request carries `id`. `paneExited` matches on **either**, never on a precedence: an
+    /// *Open in terminal* whose `PanelHostModel.run` threw — `noPaneRunner` on a build with no Terminal leaf — is
+    /// discharged by the host but a hatch this supervisor never cleared can still sit here, and reading only the
+    /// hatch would then route a later trust review's own exit to `staleExit` and leave its request pending for ever.
+    func isPendingPane(_ id: UUID) -> Bool { pendingHatch?.id == id || pendingTrustReview?.id == id }
     /// Zero until the first spawn, which takes `ProcessEpoch.first`; every later spawn takes `.next()`. No event can
     /// carry epoch zero, so the pump's "discard anything older" filter is correct before there is a process.
     private var epoch = ProcessEpoch(rawValue: 0)
@@ -276,11 +287,16 @@ public actor ChannelSupervisor {
     /// for a second worktree under the first (§7.4's table: `--worktree` is restart-required and "creates a new
     /// channel").
     ///
-    /// Nothing has to be computed. `RuntimeStateUpdater` already takes `runtime.cwd` from `system/init.cwd`, which
-    /// is the checkout, and `composedFromRuntime()` launches from there.
-    private func worktreeRelocationObserved() {
+    /// **It adopts the reported directory itself rather than trusting `RuntimeStateUpdater` to have.** That updater
+    /// seeds `runtime.cwd` from a channel's *first* `system/init` ever (`seededFromInit`), which is right for
+    /// everything else and wrong for exactly this case: a `RestartRequest(worktree:)` adds `-w` to a channel that
+    /// has already handshaked once, so the seed has been taken, the checkout the CLI then makes is never adopted,
+    /// and clearing the flag here would leave every later respawn running in the main working copy under a channel
+    /// whose transcript lives under the checkout's slug. The two facts move together or the pair is incoherent.
+    private func worktreeRelocationObserved(reportedCWD: String) {
         guard launchTemplate.worktree != nil else { return }
         launchTemplate.worktree = nil
+        runtime.cwd = URL(filePath: reportedCWD, directoryHint: .isDirectory)
     }
 
     /// The transcript exists, so every later launch of this channel resumes it.
@@ -753,29 +769,13 @@ public actor ChannelSupervisor {
         }
     }
 
-    /// The terminal hatch, or — for a channel with no owned process — §6.11's trust review.
-    ///
-    /// **Two answers to one press, because a channel with nothing running is not a handoff** (§14
-    /// item 47, tracker 314, ruled by the architect 2026-09-11). `handOff` refuses any origin that
-    /// is not `.owned(.ready)` or `.owned(.dormant)`, and an untrusted channel never spawns, so its
-    /// origin is `.archived` and the press threw `notOwned` before a pane could open — which made
-    /// item 47's second half unreachable in the running app however correctly the re-read was
-    /// wired. There is nothing to hand over: no child to terminate, no release to wait for, no
-    /// ownership to change, and no transition. What the user needs is `claude` on screen in this
-    /// project so the engine's own trust dialog runs, which is the argument-free launch below.
-    ///
-    /// The window between the returned request and the panel's spawn is accepted (spec Decision
+    /// The terminal hatch. The window between the returned request and the panel's spawn is accepted (spec Decision
     /// Log, 2026-09-05); everything before it is not.
+    ///
+    /// Unchanged by item 47's work: §6.11's trust review is `reviewTrustInTerminal()` below, a verb of its own, so
+    /// this one's answer does not depend on the channel's origin and the header's copy stays true.
     public func openInTerminal() async throws -> PaneRequest {
-        // **Archived, and only archived.** The ruling says "a channel with no owned process", and
-        // the narrowing is deliberate: §7.4's table has an *Open in terminal* row from **dormant**
-        // too, which is an owned channel that happens to have no process, and `handOff` accepts it —
-        // that hatch really does hand a session over and really does need the release wait. What
-        // §6.11's banner is drawn for is the history-only channel, whose origin is `.archived`
-        // because it never spawned. Every other origin keeps exactly what it did: a hatch where
-        // `handOff` allows one, and `notOwned` where it does not.
-        if case .archived = state.origin { return trustReviewRequest() }
-        return try await handOff(during: .openInTerminal, event: .openInTerminal, to: .foreignOwnTab) {
+        try await handOff(during: .openInTerminal, event: .openInTerminal, to: .foreignOwnTab) {
             let request = paneRequest(arguments: ["--resume", key.session.description],
                                       cwd: runtime.cwd, purpose: .hatch(key.session))
             pendingHatch = request
@@ -784,18 +784,24 @@ public actor ChannelSupervisor {
         }
     }
 
-    /// `claude`, no arguments, in the channel's own directory — and nothing else changes.
+    /// §6.11's *Review trust in terminal*: `claude`, **no arguments**, in the channel's own directory — and nothing
+    /// else changes (§14 item 47, tracker 314, ruled 2026-09-11).
     ///
-    /// **No arguments** is the whole point: `--resume` would open the conversation, and what §6.11
-    /// asks for is the interactive run whose *startup* puts the trust dialog up. The directory is
-    /// the runtime cwd, which for a created channel is the seed's — the project whose trust is
-    /// missing.
+    /// **No arguments** is the substance: `--resume` would open the conversation, and what §6.11 asks for is the
+    /// interactive run whose *startup* puts the trust dialog up. The directory is the runtime cwd, which for a
+    /// created channel is the seed's — the project whose trust is missing.
     ///
-    /// It is recorded as this channel's pending pane request so the exit matches, and in a field of
-    /// its own so `pendingHatch` keeps meaning *a handoff is in flight*: `OriginResolver` reads that
-    /// fact, and a trust review that claimed it would make an archived channel look like one whose
-    /// session had been let go.
-    private func trustReviewRequest() -> PaneRequest {
+    /// **It is not a handoff and performs none of one**: no child to terminate, no release to wait for, no
+    /// ownership change and no transition. It is offered whenever this channel holds no process — archived and
+    /// dormant alike — and refused while one is live, because a channel with a child has a session to hand over and
+    /// `openInTerminal` is the verb for that.
+    ///
+    /// The request is recorded as this channel's pending pane request so the exit matches, and in a field of its own
+    /// so `pendingHatch` keeps meaning *a handoff is in flight*: `OriginResolver` reads that fact, and a trust
+    /// review that claimed it would make an archived channel look like one whose session had been let go.
+    public func reviewTrustInTerminal() async throws -> PaneRequest {
+        guard process == nil else { throw LifecycleError.busy(.handOff) }
+        if let trace = state.wedged { throw LifecycleError.wedged(trace) }
         let request = paneRequest(arguments: [], cwd: runtime.cwd, purpose: .trustReview(key.session))
         pendingTrustReview = request
         diagnostics.record(.paneRequest(id: request.id, purpose: "trustReview",
@@ -1790,9 +1796,8 @@ public actor ChannelSupervisor {
             case .system(.initialize(let initFrame)):
                 state.apiKeySource = initFrame.apiKeySource
                 lastSystemInit = initFrame.fields
-                // The checkout the launch line asked for exists by now, and this frame's `cwd` — already adopted
-                // into `runtime` by `RuntimeStateUpdater` above — is where it is.
-                worktreeRelocationObserved()
+                // The checkout the launch line asked for exists by now, and this frame's `cwd` is where it is.
+                worktreeRelocationObserved(reportedCWD: initFrame.cwd)
                 publish()
             default:
                 break
@@ -1836,6 +1841,7 @@ public actor ChannelSupervisor {
         // nothing to re-adopt and no holder to wait out. Clearing the request is the whole of it,
         // and the channel is left exactly where it was — still untrusted, or trusted now, which
         // only a re-read of the global config document can tell.
+        // Checked before the hatch, and by id rather than by precedence — see `isPendingPane(_:)`.
         if let review = pendingTrustReview, review.id == exit.request.id {
             pendingTrustReview = nil
             diagnostics.record(.paneEnded(id: exit.request.id, purpose: "trustReview", code: exit.code))

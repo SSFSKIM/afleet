@@ -248,7 +248,9 @@ final class PrecommitModel {
         guard let evaluation, isCurrent(evaluation), claim() else { return }
         Task {
             do {
-                let request = try await lifecycle.openInTerminal(evaluation.channel)
+                // X5's own verb, not the hatch: the channel has no process to hand over, which is
+                // why this banner is drawn at all (tracker 314).
+                let request = try await lifecycle.reviewTrustInTerminal(evaluation.channel)
                 // Declared before the pane runs, because a spawn that never executes is reported at
                 // once — the panel synthesises exit code 127 — and a wait armed afterwards would
                 // have missed it.

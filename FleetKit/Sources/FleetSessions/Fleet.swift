@@ -229,9 +229,12 @@ public actor Fleet: LifecycleAPI {
         // under which the supervisor can still be holding it.
         guard case .new? = launches[key]?.session, await supervisor.transcriptObserved(),
               let launch = launches[key] else { return }
+        // Only the session start. The facade's copy is read by `preconditions(for:)`, which takes its
+        // `cwd` and its `settingSources` and nothing else, so clearing `worktree` here wrote a field
+        // with no reader — and the flag that decides a launch is the supervisor's template, moved by
+        // `worktreeRelocationObserved()` a whole handshake earlier (tracker 445).
         var promoted = launch
         promoted.session = .resume(key.session, fork: false)
-        promoted.worktree = nil
         launches[key] = promoted
     }
 
@@ -528,11 +531,19 @@ public actor Fleet: LifecycleAPI {
         return try await supervisor(for: key).openInTerminal()
     }
 
+    /// §6.11's *Review trust in terminal*, X5's own verb. See `ChannelSupervisor.reviewTrustInTerminal()`.
+    public func reviewTrustInTerminal(_ key: ChannelKey) async throws -> PaneRequest {
+        // The barrier for the same reason `openInTerminal` takes it: this runs `claude` interactively, and a
+        // `/logout` census that has already counted the fleet's processes must not have one started behind it.
+        try spawnBarrier.check()
+        return try await supervisor(for: key).reviewTrustInTerminal()
+    }
+
     /// A pane exit belongs to whichever channel is waiting on that request `id`, and to no other: two requests with
     /// identical fields are two requests. An exit nobody is waiting on is recorded and discarded.
     public func paneExited(_ exit: PaneExit) async {
         for supervisor in supervisors.values {
-            guard await supervisor.pendingPaneRequest?.id == exit.request.id else { continue }
+            guard await supervisor.isPendingPane(exit.request.id) else { continue }
             await supervisor.paneExited(exit)
             return
         }
@@ -591,7 +602,7 @@ public actor Fleet: LifecycleAPI {
     /// late. The fleet is the only place that knows which channels are in a project, so it answers that question
     /// here and hands the answer to the channel that performs the write.
     public func declineProjectServers(_ names: [String], project: URL) async throws {
-        let root = ProjectRoot.canonical(for: project).root
+        let root = ProjectRoot.roots(for: project).trustKey
         let inProject = await channels(under: root)
         var live = false
         for supervisor in inProject where await supervisor.livePID() != nil { live = true }
@@ -615,19 +626,31 @@ public actor Fleet: LifecycleAPI {
     }
 
     public func acceptProjectServers(_ servers: [ProjectMCPServer], project: URL) async {
-        let root = ProjectRoot.canonical(for: project).root
+        // **The checkout.** An acceptance is remembered per project, per server name, per entry hash,
+        // and `ProjectMCPConsent.evaluate` matches it against the root it discovered the servers
+        // under — which is the checkout, because that is where `.mcp.json` is read. Keyed on the
+        // trust key it would never match again and the sheet would reappear on every spawn.
+        let root = ProjectRoot.roots(for: project).checkout
         for server in servers { try? await preconditionsGate.accept(server, root: root, store: store) }
     }
 
     /// Every supervisor whose channel runs in this project root, in session order so the writer is the same channel
     /// twice.
+    ///
+    /// **The trust key, and compared as real-path strings.** §6.12's write target is the repository's
+    /// `.claude/settings.local.json`, so "no owned process in this project" has to mean no process in the
+    /// *repository* — a live channel in the main working copy and a declining channel in a worktree are two
+    /// checkouts of one project, and a `URL ==` would have read them as two and let the write land while a child
+    /// that had already loaded the server was running. `URL` equality is also the wrong comparison on its own
+    /// terms: one directory reached two ways differs by a trailing slash.
     private func channels(under root: URL) async -> [ChannelSupervisor] {
+        let wanted = RealPath.string(root)
         var matches: [ChannelSupervisor] = []
         for key in supervisors.keys.sorted(by: { $0.session.description < $1.session.description }) {
             guard let supervisor = supervisors[key] else { continue }
             // The runtime cwd, not the seed's: a `set_cwd` moves the project a channel is in.
             let cwd = await supervisor.runtimeState().cwd
-            guard ProjectRoot.canonical(for: cwd).root == root else { continue }
+            guard RealPath.string(ProjectRoot.roots(for: cwd).trustKey) == wanted else { continue }
             matches.append(supervisor)
         }
         return matches

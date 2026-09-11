@@ -176,6 +176,7 @@ actor LifecycleDouble: LifecycleAPI {
     func resolvedForkKey(of provisional: ChannelKey) async -> ChannelKey { unreachable("resolvedForkKey") }
     func run(_ strategy: RouteStrategy, arguments: [String], on key: ChannelKey, ui: any StrategyUI) async throws -> StrategyOutcome { unreachable("run") }
     func openInTerminal(_ key: ChannelKey) async throws -> PaneRequest { unreachable("openInTerminal") }
+    func reviewTrustInTerminal(_ key: ChannelKey) async throws -> PaneRequest { unreachable("reviewTrustInTerminal") }
     /// What the next `attach` or `logs` answers, in order, and what each verb was asked for.
     ///
     /// One queue for both verbs, because what a caller does with the answer is the same in both
@@ -341,6 +342,7 @@ actor FleetDouble: AppFleet {
     func resolvedForkKey(of provisional: ChannelKey) async -> ChannelKey { unreachable("resolvedForkKey") }
     func run(_ strategy: RouteStrategy, arguments: [String], on key: ChannelKey, ui: any StrategyUI) async throws -> StrategyOutcome { unreachable("run") }
     func openInTerminal(_ key: ChannelKey) async throws -> PaneRequest { unreachable("openInTerminal") }
+    func reviewTrustInTerminal(_ key: ChannelKey) async throws -> PaneRequest { unreachable("reviewTrustInTerminal") }
     func attach(_ job: JobShort) async throws -> PaneRequest { unreachable("attach") }
     func logs(_ job: JobShort) async throws -> PaneRequest { unreachable("logs") }
     func performJob(_ verb: JobVerb, _ short: JobShort) async throws { unreachable("performJob") }

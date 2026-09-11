@@ -33,20 +33,25 @@ public struct SpawnPreconditions: Sendable {
         if ManagedSettingsReader.isPending(configHome: key.configHome) {
             return (.managedSettingsPending, launch)
         }
-        let project = ProjectRoot.canonical(for: cwd)
-        guard TrustReader.isTrusted(root: project.root, globalConfig: configHome.globalConfig) else {
-            return (.untrusted(root: project.root), launch)
+        // **Trust on the trust key, project servers on the checkout.** A linked worktree's two roots
+        // are two directories: the repository is what `hasTrustDialogAccepted` is keyed on, and the
+        // checkout is what the engine reads `.mcp.json` from (see `ProjectRoots`). The local
+        // settings store — where a decline lands and where the rejection gate reads — is the trust
+        // key's, because that is the write target §6.12 names.
+        let project = ProjectRoot.roots(for: cwd)
+        guard TrustReader.isTrusted(root: project.trustKey, globalConfig: configHome.globalConfig) else {
+            return (.untrusted(root: project.trustKey), launch)
         }
 
         let sources = launch.settingSources ?? [.user, .project, .local]
-        if !sources.contains(.local), !consent.servers(root: project.root).isEmpty {
+        if !sources.contains(.local), !consent.servers(root: project.checkout).isEmpty {
             launch.strictMCPConfig = true
             return (.ready, launch)
         }
 
         let acceptances = (try? await store?.read([ProjectServerAcceptance].self, namespace: .fleetKit,
                                                   key: FleetKitKeys.projectServerAcceptances)) ?? nil
-        let verdicts = consent.evaluate(root: project.root, gitRoot: project.gitRoot, cwd: cwd,
+        let verdicts = consent.evaluate(root: project.checkout, gitRoot: project.trustKey, cwd: cwd,
                                         configHome: key.configHome, settingSources: launch.settingSources,
                                         acceptances: acceptances ?? [])
         let pending = verdicts.filter { $0.value == .pending }.keys.sorted { $0.name < $1.name }
@@ -78,9 +83,13 @@ public struct SpawnPreconditions: Sendable {
         guard !processIsLive else {
             throw LifecycleError.declineRefused(reason: LocalSettingsStore.Refusal.processLive.rawValue)
         }
-        let project = ProjectRoot.canonical(for: cwd)
+        // The trust key: §6.12's write target is the repository's `.claude/settings.local.json`, the
+        // same file the rejection gate reads, and a worktree's decline that landed in the checkout
+        // would be read by nobody.
+        let project = ProjectRoot.roots(for: cwd)
         do {
-            return try settings.decline(names: names, gitRoot: project.gitRoot, cwd: cwd, configHome: configHome)
+            return try settings.decline(names: names, gitRoot: project.trustKey, cwd: cwd,
+                                        configHome: configHome)
         } catch let refusal as LocalSettingsStore.Refusal {
             throw LifecycleError.declineRefused(reason: refusal.rawValue)
         }

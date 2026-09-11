@@ -45,6 +45,7 @@ actor ComposerLifecycleDouble: LifecycleAPI {
         case send(ChannelKey, subtype: String, payload: JSONValue)
         case run(ChannelKey, RouteStrategy, arguments: [String])
         case openInTerminal(ChannelKey)
+        case reviewTrustInTerminal(ChannelKey)
         case events(ChannelKey)
         case preconditions(ChannelKey)
         /// §7.4's busy question, asked of the fleet rather than of a surface. Recorded like every
@@ -70,6 +71,7 @@ actor ComposerLifecycleDouble: LifecycleAPI {
             case .send: "send"
             case .run: "run"
             case .openInTerminal: "openInTerminal"
+            case .reviewTrustInTerminal: "reviewTrustInTerminal"
             case .events: "events"
             case .preconditions: "preconditions"
             case .liveTaskIDs: "liveTaskIDs"
@@ -426,6 +428,12 @@ actor ComposerLifecycleDouble: LifecycleAPI {
     func openInTerminal(_ key: ChannelKey) async throws -> PaneRequest {
         calls.append(.openInTerminal(key))
         guard let paneRequest else { throw StagingError.nothingStaged(member: "openInTerminal") }
+        return try paneRequest.get()
+    }
+
+    func reviewTrustInTerminal(_ key: ChannelKey) async throws -> PaneRequest {
+        calls.append(.reviewTrustInTerminal(key))
+        guard let paneRequest else { throw StagingError.nothingStaged(member: "reviewTrustInTerminal") }
         return try paneRequest.get()
     }
 

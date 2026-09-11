@@ -37,37 +37,62 @@ enum RealPath {
     }
 }
 
-/// The canonical root of a channel: the real path of its directory walked up to the first entry containing `.git`
-/// (a file or a directory — a worktree's `.git` is a file), else the real path itself (parent §6.12, spec
-/// *Preconditions*) — and for a **linked worktree**, the common repository root that entry points at.
+/// The two roots a channel's directory resolves to, which are **not** the same directory for a
+/// linked worktree and are read for different decisions.
+///
+/// One value with two fields rather than one root, because the engine itself asks two questions and
+/// answers them from two places, and collapsing them breaks whichever one loses:
+///
+/// - **`trustKey`** is what `projects[<root>].hasTrustDialogAccepted` is keyed on, and what §6.12's
+///   decline writes its `.claude/settings.local.json` under. For a linked worktree the engine
+///   follows `gitdir:` and `commondir` to the **common repository root** (`WorktreeLayout`), so a
+///   repository trusted once covers every checkout of it. Keying trust on the checkout instead is a
+///   flat false `untrusted` on a project the user trusted.
+/// - **`checkout`** is the first `.git` walking up from the cwd, file or directory — the directory
+///   the engine reads `.mcp.json` and `.claude/settings.json` **from**, nearest winning (bundle
+///   `SPEC/31-mcp-client.md:361` and `:136`). A worktree is a full working tree with its own project
+///   files, so reading the repository's instead would offer the user consent for servers their
+///   checkout does not declare and miss the ones it does.
+///
+/// Both are real paths, produced through `RealPath.string` on every arm, so one directory has one
+/// spelling here however it was reached — a comparison against either is a string comparison and a
+/// trailing slash on one arm and not the other is the kind of difference that silently makes two
+/// projects out of one.
+public struct ProjectRoots: Hashable, Sendable {
+    public var trustKey: URL
+    public var checkout: URL
+    /// Nil exactly when the walk found no `.git` at all; the checkout is then the directory itself
+    /// and so is the trust key.
+    public var gitRoot: URL?
+
+    public init(trustKey: URL, checkout: URL, gitRoot: URL?) {
+        self.trustKey = trustKey; self.checkout = checkout; self.gitRoot = gitRoot
+    }
+}
+
+/// The real path of a channel's directory walked up to the first entry containing `.git` (a file or
+/// a directory — a worktree's `.git` is a file), and the repository that entry belongs to (parent
+/// §6.12, spec *Preconditions*).
 public enum ProjectRoot {
-    /// The root every trust and consent decision is keyed on, and the git root when there is one. They are the same
-    /// directory whenever a `.git` was found; `gitRoot` is nil exactly when the walk found none.
-    ///
-    /// **A linked worktree resolves to the repository that owns it, because that is the directory the engine keys
-    /// on.** The engine's own resolver follows the checkout's `gitdir:` and `commondir` and answers the common
-    /// repository root under the guards `WorktreeLayout.commonRepositoryRoot(ofWorktreeAt:)` transcribes (bundle
-    /// `SPEC/03-settings-and-configuration.md` §15.2). Stopping at the checkout instead — which this did until
-    /// 2026-09-11 — keys trust on a path no `projects` entry in the global config document names, so **every** `-w`
-    /// channel's spawn is refused `untrusted` on a repository the user trusted long ago. §8.2 promotes *New
-    /// isolated session*, so that is not a corner: it is the ordinary second spawn of a worktree channel.
-    ///
-    /// A checkout whose guards do not hold keeps the checkout root, which is the safe direction: a `.git` file that
-    /// merely looks like a worktree link cannot move the trust key somewhere the engine never reads.
-    public static func canonical(for cwd: URL) -> (root: URL, gitRoot: URL?) {
+    /// Both roots for one working directory. See `ProjectRoots` for which decision reads which.
+    public static func roots(for cwd: URL) -> ProjectRoots {
         let resolved = RealPath.string(cwd)
         var probe = resolved
         let fm = FileManager.default
         while true {
             if fm.fileExists(atPath: probe + "/.git") {
-                let found = URL(filePath: probe, directoryHint: .isDirectory)
-                let root = WorktreeLayout.commonRepositoryRoot(ofWorktreeAt: found) ?? URL(filePath: probe)
-                return (root, root)
+                let checkout = URL(filePath: probe, directoryHint: .isDirectory)
+                let trustKey = WorktreeLayout.commonRepositoryRoot(ofWorktreeAt: checkout)
+                    ?? URL(filePath: probe)
+                return ProjectRoots(trustKey: URL(filePath: RealPath.string(trustKey)),
+                                    checkout: URL(filePath: RealPath.string(checkout)),
+                                    gitRoot: URL(filePath: RealPath.string(checkout)))
             }
             guard let slash = probe.lastIndex(of: "/"), slash != probe.startIndex else { break }
             probe = String(probe[probe.startIndex..<slash])
         }
-        return (URL(filePath: resolved), nil)
+        let itself = URL(filePath: resolved)
+        return ProjectRoots(trustKey: itself, checkout: itself, gitRoot: nil)
     }
 }
 

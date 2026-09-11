@@ -365,6 +365,11 @@ final class RecordingAppFleet: AppFleet {
         log.note("openInTerminal")
         return try await inner.openInTerminal(key)
     }
+
+    func reviewTrustInTerminal(_ key: ChannelKey) async throws -> PaneRequest {
+        log.note("reviewTrustInTerminal")
+        return try await inner.reviewTrustInTerminal(key)
+    }
     func attach(_ job: JobShort) async throws -> PaneRequest { try await inner.attach(job) }
     func logs(_ job: JobShort) async throws -> PaneRequest { try await inner.logs(job) }
     func paneExited(_ exit: PaneExit) async { await inner.paneExited(exit) }
