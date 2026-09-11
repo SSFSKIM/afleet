@@ -425,7 +425,7 @@ final class ConsentAndTrustTests: XCTestCase {
 
         let banner = TrustBanner(isAnswering: model.isAnswering) { model.reviewTrustInTerminal() }
         try press("Review trust in terminal", in: banner.body)
-        await model.whenIdle()
+        await model.settledAfterPane()
 
         XCTAssertFalse(model.isHistoryOnly, "the channel stayed history-only after trust was granted")
         let opens = await lifecycle.actions.filter { if case .open = $0.action { return true }; return false }
@@ -684,7 +684,11 @@ final class ConsentAndTrustTests: XCTestCase {
 
         let banner = TrustBanner(isAnswering: model.isAnswering) { model.reviewTrustInTerminal() }
         try press("Review trust in terminal", in: banner.body)
-        await model.whenIdle()
+        // **The verdict and not the idle flag.** The re-read is no longer what the handoff returning
+        // does: `PanelHost.run` returns when the pane *starts*, so the model waits for the pane's
+        // exit and releases its in-flight slot at the handover. With no announcer — this model has
+        // none — the wait returns at once and the re-read follows, which is what this waits for.
+        await model.settledAfterPane()
 
         XCTAssertFalse(model.isHistoryOnly,
                        "the verdict was not re-read after the handoff, so the channel is still history-only")

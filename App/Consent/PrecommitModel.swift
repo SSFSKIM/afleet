@@ -268,15 +268,19 @@ final class PrecommitModel {
                 await paneExits?.whenExited(request.id)
                 await reread(evaluation)
             } catch let error as PanelHostError {
-                isAnswering = false
+                // Raised *before* the slot is released: a surface — or a test — that waits for the
+                // model to go idle must find the banner already there.
                 raise(Self.banner(for: error), for: evaluation)
+                isAnswering = false
             } catch let error as LifecycleError {
-                isAnswering = false
+                // Raised *before* the slot is released: a surface — or a test — that waits for the
+                // model to go idle must find the banner already there.
                 raise(RowBanner(error), for: evaluation)
-            } catch {
                 isAnswering = false
+            } catch {
                 raise(RowBanner(text: "The terminal handoff did not complete: \(type(of: error))."),
                       for: evaluation)
+                isAnswering = false
             }
         }
     }

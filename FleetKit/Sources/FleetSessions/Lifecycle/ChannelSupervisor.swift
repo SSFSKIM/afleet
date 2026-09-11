@@ -767,7 +767,14 @@ public actor ChannelSupervisor {
     /// The window between the returned request and the panel's spawn is accepted (spec Decision
     /// Log, 2026-09-05); everything before it is not.
     public func openInTerminal() async throws -> PaneRequest {
-        guard process != nil else { return trustReviewRequest() }
+        // **Archived, and only archived.** The ruling says "a channel with no owned process", and
+        // the narrowing is deliberate: §7.4's table has an *Open in terminal* row from **dormant**
+        // too, which is an owned channel that happens to have no process, and `handOff` accepts it —
+        // that hatch really does hand a session over and really does need the release wait. What
+        // §6.11's banner is drawn for is the history-only channel, whose origin is `.archived`
+        // because it never spawned. Every other origin keeps exactly what it did: a hatch where
+        // `handOff` allows one, and `notOwned` where it does not.
+        if case .archived = state.origin { return trustReviewRequest() }
         return try await handOff(during: .openInTerminal, event: .openInTerminal, to: .foreignOwnTab) {
             let request = paneRequest(arguments: ["--resume", key.session.description],
                                       cwd: runtime.cwd, purpose: .hatch(key.session))
