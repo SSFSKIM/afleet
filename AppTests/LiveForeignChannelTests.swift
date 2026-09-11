@@ -314,6 +314,12 @@ final class RecordingAppFleet: AppFleet {
         await inner.register(key, cwd: cwd, recent: recent)
     }
 
+    /// Not a naming act, and not counted as a registration: creating a channel spawns nothing and
+    /// touches no session anyone else holds. Forwarded so the decorator stays transparent.
+    func create(_ request: ChannelCreation) async -> ChannelKey {
+        await inner.create(request)
+    }
+
     func perform(_ action: LifecycleAction, on key: ChannelKey) async throws -> ChannelState {
         log.note(Self.name(of: action))
         return try await inner.perform(action, on: key)
@@ -358,6 +364,11 @@ final class RecordingAppFleet: AppFleet {
     func openInTerminal(_ key: ChannelKey) async throws -> PaneRequest {
         log.note("openInTerminal")
         return try await inner.openInTerminal(key)
+    }
+
+    func reviewTrustInTerminal(_ key: ChannelKey) async throws -> PaneRequest {
+        log.note("reviewTrustInTerminal")
+        return try await inner.reviewTrustInTerminal(key)
     }
     func attach(_ job: JobShort) async throws -> PaneRequest { try await inner.attach(job) }
     func logs(_ job: JobShort) async throws -> PaneRequest { try await inner.logs(job) }

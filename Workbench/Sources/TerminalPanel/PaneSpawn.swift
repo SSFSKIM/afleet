@@ -47,7 +47,10 @@ public enum PaneSpawn {
         switch purpose {
         case .attach:
             .detach
-        case .hatch, .logs, .shell, .command:
+        // A trust review takes the hatch's policy: it is the user's own interactive `claude`, so a
+        // Ctrl+Z is a job they suspended on purpose and the pane says *Suspended* and offers
+        // *Continue* rather than hanging the child up.
+        case .hatch, .trustReview, .logs, .shell, .command:
             .report
         }
     }

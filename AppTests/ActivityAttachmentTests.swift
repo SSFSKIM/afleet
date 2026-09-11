@@ -112,4 +112,10 @@ extension LifecycleDouble: AppFleet {
     func start() async {}
     func shutdown() async { finish() }
     func register(_ key: ChannelKey, cwd: URL, recent: Bool) async {}
+    /// Creation is `CreatorDouble`'s, for the reason registration is `RegistrarDouble`'s: keeping
+    /// the seams apart is what makes "the sheet minted exactly one channel" a claim a test can put
+    /// somewhere a lifecycle double cannot answer by accident.
+    func create(_ request: ChannelCreation) async -> ChannelKey {
+        fatalError("LifecycleDouble.create: creation is recorded by CreatorDouble")
+    }
 }

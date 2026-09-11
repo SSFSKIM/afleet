@@ -25,7 +25,6 @@ struct ChannelHeader: Hashable, Sendable {
     /// branch that moves under a selected channel therefore moves on screen, with no second watcher
     /// and no edit to a file another leaf owns.
     var branch: String?
-
     var glyph: OriginGlyph? { origin.map(OriginGlyph.init) }
 
     init(title: String = "No channel selected", origin: ChannelOrigin? = nil, presence: Presence? = nil,
@@ -192,6 +191,45 @@ final class ChannelTimelineModel {
 
     /// Why the transcript could not be read, as a shape and never a path (§11).
     private(set) var failure: String?
+
+    /// True for a channel the fleet has minted and whose transcript does not exist yet (§8.2's
+    /// *New channel*, §14 item 3).
+    ///
+    /// **No event subscription is taken while this holds, and none is needed.** The child spec's
+    /// directive said the awaiting path should subscribe to `lifecycle.events(of:)`; it does not,
+    /// because this model's only consumer of that stream is `StreamIngestion`, which cannot exist
+    /// without a file to read, and the header's readback loop takes a subscription of its own the
+    /// moment the channel has a process (`beginReadbacks`, which `adopt` triggers on every row
+    /// change). A subscription taken here would be a second fan-out with no reader, and the frames
+    /// it buffered would be dropped when the ingestion took its own. What the created channel needs
+    /// from the stream — the mode and the readbacks — it already gets. Recorded as tracker 453.
+    ///
+    /// **Not a failure, and that distinction is the whole of it.** The engine creates no transcript
+    /// at startup — `sessionFile` is null until the first `user`, `assistant` or `system` record is
+    /// written (bundle `SPEC/35-session-persistence.md` §35.6.3) — so a channel created and not yet
+    /// sent to has no file for the index to hold, and reporting "no transcript in the index" would
+    /// tell the user something is broken about a channel that is simply new. The column draws its
+    /// own placeholder for it and the composer is enabled: a send is what makes the transcript
+    /// exist.
+    private(set) var awaitsTranscript = false
+
+    /// Whether the row the column last handed this model is a **created** channel's — the one
+    /// `FleetBrowserModel` drew from a creation request rather than from an index entry.
+    ///
+    /// This is what tells a channel with no transcript *yet* from a channel whose transcript has
+    /// gone, and the fleet cannot answer it: `events(of:)` returns a stream for any registered
+    /// channel, and tracker 66's case — a transcript deleted between listing and opening — is a
+    /// registered channel too. The row is the surface's own statement about which kind of channel
+    /// this is, and a created one says so in `decidingRule` because no `ListingPolicy` rule listed
+    /// it.
+    ///
+    /// **Read from the row `open(_:)` is handed, and that is sufficient.** An earlier version
+    /// re-read it on every `adopt(_:)` so the field would be honest at all times; the field is read
+    /// in exactly one place — `performOpen`, which runs once per model behind `hasOpened` — and
+    /// every `open` is called with the row the column has just resolved, so the value it needs is
+    /// always the current one and a re-read changed nothing observable. Said plainly here rather
+    /// than kept as a line nothing can hold to account.
+    @ObservationIgnored private var isCreatedChannel = false
 
     /// The transcript the ingestion is reading, as the index spelled it. Held so a relocation is a
     /// comparison rather than a call: the coordinator hands the entry's path on every update to a
@@ -386,9 +424,17 @@ final class ChannelTimelineModel {
     /// which the registry owns, ends it.
     func open(_ row: ChannelRow) async {
         adopt(ChannelHeader(row: row))
+        isCreatedChannel = row.decidingRule == FleetBrowserModel.creationRule
+        // Awaiting a non-throwing task is not itself cancellable, so a cancelled view cannot leave
+        // a second caller here — see `openIngestion()`.
+        await openIngestion()
+    }
+
+    /// The one entrant to `performOpen`, shared by the column's `open(_:)` and the index delta that
+    /// first lists a created channel. A second caller waits for the first rather than starting a
+    /// second ingestion.
+    private func openIngestion() async {
         if let openingTask {
-            // A second caller waits for the first rather than starting a second ingestion. Awaiting
-            // a non-throwing task is not itself cancellable, so this is safe from a cancelled view.
             await openingTask.value
             return
         }
@@ -413,12 +459,28 @@ final class ChannelTimelineModel {
     /// not by this flag.
     private func performOpen(workspace: Workspace, lifecycle: any LifecycleAPI) async {
         guard let entry = await workspace.index.entry(key.session) else {
-            failure = "this channel has no transcript in the index"
+            // A created channel, or a transcript that has gone — and the row says which.
+            guard isCreatedChannel else {
+                failure = "this channel has no transcript in the index"
+                return
+            }
+            awaitsTranscript = true
+            failure = nil
+            // **One re-read, on entry to the wait.** The lookup above suspends, and the index delta
+            // that first lists this channel can land inside that suspension: `transcriptMoved` then
+            // finds `awaitsTranscript` still false, takes the relocation arm's early return, and the
+            // channel waits for a *second* delta that on a quiet channel never comes. Asking once
+            // more now closes the window against the state that was published while this call was
+            // in flight, rather than against a timer.
+            guard await workspace.index.entry(key.session) != nil, !isTerminated else { return }
+            awaitsTranscript = false
+            await performOpen(workspace: workspace, lifecycle: lifecycle)
             return
         }
         // The other half of tracker 66: a retry that found the entry has to clear the failure the
         // attempt before it recorded, or the channel keeps reporting a condition that is over.
         failure = nil
+        awaitsTranscript = false
         hasOpened = true
         // Every `await` below is a point where `close()` can run — the registry releases a channel
         // that left the index, and the model it releases must not go on to build what the release
@@ -499,6 +561,28 @@ final class ChannelTimelineModel {
     /// holds, so without this the channel would keep reading a file that is no longer there and a
     /// channel with no live tap would go quietly stale.
     func transcriptMoved(to path: URL) async {
+        // **The created channel's first transcript arrives here, and this is what reopens it.**
+        // `FleetCoordinator.indexChanged` forwards every added and updated entry's path to this
+        // registry, so the delta that first lists a created channel reaches this method — and the
+        // column's `.task(id:)` will not run again for a channel that stayed selected, which is
+        // the case *New channel* is always in. Tracker 66's retry left `hasOpened` false for
+        // exactly this, and this is the trigger it needed.
+        if awaitsTranscript, ingestion == nil {
+            // **The flag is not cleared here, and `performOpen` sets it on both outcomes.**
+            // `openIngestion()` can return without reading anything — a read started by the column
+            // may still be in flight — and clearing the flag on the way in would then leave the
+            // model with nothing waiting, nothing opened and nothing left to retrigger: the column
+            // would draw "Opening…" for a channel with no transcript until the user selected away
+            // and back. Left alone, the flag stays a live retry condition for the next delta.
+            //
+            // Through `open`'s own stored task and never `performOpen` directly. `hasOpened` is set
+            // only *after* the index lookup suspends, so a `.task(id:)` re-run landing inside that
+            // window would start a second read: both would assign `ingestion`, `effectsTask` and
+            // `changesTask` without cancelling the first, leaving a live tap and a change-feed
+            // subscription orphaned behind this model. `openIngestion()` is the one entrant.
+            await openIngestion()
+            return
+        }
         // `ingestion != nil` rather than a binding: since the rebind moved into
         // `signal(.relocated:)` nothing here needs the actor itself, and a bound-but-unused value
         // is a compiler warning, which the floor does not allow. The condition still matters — a

@@ -61,6 +61,18 @@ final class PaneSpawnTests: XCTestCase {
         XCTAssertEqual(spawn.stopPolicy, .report, "hatch=wrong-stop-policy")
     }
 
+    /// §6.11's trust review takes the hatch's policy: it is the user's own interactive `claude`, so a
+    /// Ctrl+Z is a job they suspended on purpose and the pane offers *Continue* rather than hanging
+    /// the child up.
+    func testTrustReviewPaneTakesTheReportPolicy() {
+        let spawn = PaneSpawn.spawnRequest(
+            for: request(purpose: .trustReview(SessionID())),
+            size: size,
+            terminal: terminal
+        )
+        XCTAssertEqual(spawn.stopPolicy, .report, "trustReview=wrong-stop-policy")
+    }
+
     func testAttachPaneTakesTheDetachPolicy() {
         let spawn = PaneSpawn.spawnRequest(
             for: request(purpose: .attach(JobShort(rawValue: "jd7"))),

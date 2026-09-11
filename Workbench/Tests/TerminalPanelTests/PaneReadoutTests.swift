@@ -25,6 +25,7 @@ final class PaneReadoutTests: XCTestCase {
 
     private let everyPurpose: [PanePurpose] = [
         .hatch(SessionID(uuid: UUID(uuidString: "11111111-2222-3333-4444-555555555555")!)),
+        .trustReview(SessionID(uuid: UUID(uuidString: "11111111-2222-3333-4444-555555555555")!)),
         .attach(JobShort(rawValue: "ab12")),
         .logs(JobShort(rawValue: "ab12")),
         .shell,
@@ -42,7 +43,7 @@ final class PaneReadoutTests: XCTestCase {
                      "a shell pane sent the user somewhere else for a pane it can reopen itself")
     }
 
-    /// One assertion per `PanePurpose`, and all five say no. W8 is binding — the panel never
+    /// One assertion per `PanePurpose`, and all of them say no. W8 is binding — the panel never
     /// spawns `claude` on its own initiative — and item 47's `.command` *is* `claude`, so the
     /// button would be exactly that. A model that admitted `.command` fails this once.
     func testNoPaneRequestPurposeOffersRestartWhenItExits() {

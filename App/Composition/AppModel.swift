@@ -100,6 +100,15 @@ final class AppModel: FilesTabHost, SourceControlTabHost {
     /// none.
     let branchChanges = BranchChangeLink<ChannelKey>()
 
+    /// Where a pane afleet asked for is announced to have ended (§14 item 47, tracker 314).
+    ///
+    /// **One instance, app-scoped**, for the reason every registry above it is: the announcement is
+    /// teed off the panel host's own context composition, and the surface that waits on it — the
+    /// trust banner's `PrecommitModel`, built per column — has to be listening to the same object
+    /// the host announces into. A second one would leave the banner waiting on a pane whose exit
+    /// was announced elsewhere.
+    let paneExits = PaneExitAnnouncer()
+
     /// C7.4's map from a channel to its Terminal panes.
     ///
     /// **One instance, and it is the whole point of the property.** The registered tab and the
@@ -194,6 +203,7 @@ final class AppModel: FilesTabHost, SourceControlTabHost {
          sequence: LaunchSequence = LaunchSequence(),
          coordinatorFactory: (@MainActor @Sendable (Workspace) -> any WorkspaceCoordinating)? = nil) {
         let panels = PanelHostModel()
+        panels.paneExits = paneExits
         self.panels = panels
         self.shell = ShellModel(panels: panels)
         self.sequence = sequence
@@ -287,6 +297,32 @@ final class AppModel: FilesTabHost, SourceControlTabHost {
         } catch {
             assertionFailure("the Browser is registered on a freshly built host and nothing else holds .browser")
         }
+    }
+
+    /// The *New channel* sheet's model, over the workspace the last launch reached (§8.2, §14
+    /// item 3).
+    ///
+    /// **The Developer setting is read here, from the store, at the moment the sheet is opened.**
+    /// Settings writes `isolatedSettingsForNewChannels` into that document as the toggle moves, so
+    /// a value captured at launch would be the value the app started with rather than the one the
+    /// user has since chosen — and this setting decides whether the channel's own launch line
+    /// carries `--setting-sources ""`, which no later restart of that channel can be talked out of
+    /// without a quiescent restart.
+    ///
+    /// Nil when no launch has reached a workspace, which is the same condition that leaves the
+    /// sidebar showing a progress view.
+    func makeNewChannelModel(root: URL?) async -> NewChannelModel? {
+        guard let workspace = route.workspace, let browser,
+              let coordinator = coordinator as? FleetCoordinator else { return nil }
+        let settings = await AfleetSettingsStore.read(from: workspace.store)
+        return NewChannelModel(root: root,
+                               isolatedSettings: settings.developer.isolatedSettingsForNewChannels,
+                               browser: browser,
+                               lifecycle: workspace.fleet,
+                               shell: shell,
+                               create: { [weak coordinator] request in
+                                   await coordinator?.createChannel(request) ?? nil
+                               })
     }
 
     /// Registers the Browser's `.url` and `.pullRequest` targets on the app's one link registry

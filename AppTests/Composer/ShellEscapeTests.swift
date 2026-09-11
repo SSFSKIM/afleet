@@ -972,6 +972,7 @@ private actor SlowStateLifecycle: LifecycleAPI {
         try await inner.run(strategy, arguments: arguments, on: key, ui: ui)
     }
     func openInTerminal(_ key: ChannelKey) async throws -> PaneRequest { try await inner.openInTerminal(key) }
+    func reviewTrustInTerminal(_ key: ChannelKey) async throws -> PaneRequest { try await inner.reviewTrustInTerminal(key) }
     func attach(_ job: JobShort) async throws -> PaneRequest { try await inner.attach(job) }
     func logs(_ job: JobShort) async throws -> PaneRequest { try await inner.logs(job) }
     func paneExited(_ exit: PaneExit) async { await inner.paneExited(exit) }

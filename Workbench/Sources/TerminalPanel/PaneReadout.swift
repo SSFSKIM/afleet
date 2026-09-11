@@ -90,6 +90,10 @@ public struct PaneReadout: Hashable, Sendable {
         guard let request else { return "Shell" }
         return switch request.purpose {
         case .hatch: "Interactive session"
+        // §6.11's *Review trust in terminal* on a channel with no process. Named for what the user
+        // asked for rather than for what it runs: the pane is `claude` with no arguments, and
+        // "Interactive session" would read as the channel's own conversation, which it is not.
+        case .trustReview: "Trust review"
         case let .attach(job): "Attached to job \(job.rawValue)"
         case let .logs(job): "Logs for job \(job.rawValue)"
         case .shell: "Shell"
@@ -147,6 +151,8 @@ public struct PaneReadout: Hashable, Sendable {
         switch purpose {
         case .hatch:
             "Open in terminal, in the channel's header, opens a new one."
+        case .trustReview:
+            "Review trust in terminal, above the channel's conversation, opens a new one."
         case .attach:
             "Attach, in the Background section, opens a new one."
         case .logs:

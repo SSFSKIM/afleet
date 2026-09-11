@@ -93,8 +93,18 @@ public actor ChannelSupervisor {
     private var isRecent: Bool
 
     public private(set) var state: ChannelState
-    /// The hatch this channel is waiting on an exit for, matched by `id` and never by value.
-    public var pendingPaneRequest: PaneRequest? { pendingHatch }
+    /// The requests a pane exit is matched against: a handoff's, or a trust review's.
+    ///
+    /// Both, because `Fleet.paneExited` finds the channel by this id and an exit nobody claims is recorded as
+    /// stale — so a trust-review pane that ended would otherwise leave a diagnostic saying afleet had lost track of
+    /// a pane it asked for. Nil only when neither is in flight.
+    public var pendingPaneRequest: PaneRequest? { pendingHatch ?? pendingTrustReview }
+
+    /// Whether either pending request carries `id`. `paneExited` matches on **either**, never on a precedence: an
+    /// *Open in terminal* whose `PanelHostModel.run` threw — `noPaneRunner` on a build with no Terminal leaf — is
+    /// discharged by the host but a hatch this supervisor never cleared can still sit here, and reading only the
+    /// hatch would then route a later trust review's own exit to `staleExit` and leave its request pending for ever.
+    func isPendingPane(_ id: UUID) -> Bool { pendingHatch?.id == id || pendingTrustReview?.id == id }
     /// Zero until the first spawn, which takes `ProcessEpoch.first`; every later spawn takes `.next()`. No event can
     /// carry epoch zero, so the pump's "discard anything older" filter is correct before there is a process.
     private var epoch = ProcessEpoch(rawValue: 0)
@@ -105,6 +115,10 @@ public actor ChannelSupervisor {
     /// wire that no caller ever saw.
     private var queuedInput: [(input: UserInput, uuid: UUID)] = []
     private var pendingHatch: PaneRequest?
+    /// The trust-review pane this channel is waiting on, which is **not** a hatch: nothing was
+    /// handed over, so `OriginResolver` must not be told a handoff is pending and `paneExited` must
+    /// not re-adopt anything when it ends.
+    private var pendingTrustReview: PaneRequest?
     /// Where the channel was when it became Contended, so a holder set that settles to nothing goes back there
     /// rather than to a state the table would refuse.
     private var contendedFrom: LifecycleTable.StateName?
@@ -242,6 +256,65 @@ public actor ChannelSupervisor {
 
     /// The record a restart relaunches from.
     public func runtimeState() -> SessionRuntimeState { runtime }
+
+    // MARK: - The `.new` to `.resume` transition (parent §6.1, §14 item 3)
+
+    /// Whether this channel's launch line still names `--session-id`. Read by the invariant's own tests and by
+    /// nothing in production, which asks through `transcriptObserved()` instead — so it is internal, like that one,
+    /// rather than part of the package's surface.
+    func holdsNewSession() -> Bool {
+        if case .new = launchTemplate.session { return true }
+        return false
+    }
+
+    /// Whether this channel's launch line still asks the CLI to make a worktree. The invariant's own tests read it.
+    func holdsWorktree() -> Bool { launchTemplate.worktree != nil }
+
+    /// The checkout exists, so no later launch of this channel asks for one.
+    ///
+    /// **Separate from the session flag, and moved by different evidence, because the two facts are different
+    /// ages.** `-w <name>` makes the CLI create the checkout during *startup*, before the handshake — so from the
+    /// first `system/init` the worktree is there and its path is what the engine reports as the cwd, while the
+    /// transcript still does not exist until the first record. Clearing the flag only with the session flag left
+    /// every respawn in between — the thirty-minute reap's resume, a crash respawn, a restart-required change, a
+    /// quit and return inside one app run — passing `-w <name>` again, from *inside* the checkout, asking the CLI
+    /// for a second worktree under the first (§7.4's table: `--worktree` is restart-required and "creates a new
+    /// channel").
+    ///
+    /// **It adopts the reported directory itself rather than trusting `RuntimeStateUpdater` to have.** That updater
+    /// seeds `runtime.cwd` from a channel's *first* `system/init` ever (`seededFromInit`), which is right for
+    /// everything else and wrong for exactly this case: a `RestartRequest(worktree:)` adds `-w` to a channel that
+    /// has already handshaked once, so the seed has been taken, the checkout the CLI then makes is never adopted,
+    /// and clearing the flag here would leave every later respawn running in the main working copy under a channel
+    /// whose transcript lives under the checkout's slug. The two facts move together or the pair is incoherent.
+    private func worktreeRelocationObserved(reportedCWD: String) {
+        guard launchTemplate.worktree != nil else { return }
+        launchTemplate.worktree = nil
+        runtime.cwd = URL(filePath: reportedCWD, directoryHint: .isDirectory)
+    }
+
+    /// The transcript exists, so every later launch of this channel resumes it.
+    ///
+    /// `--session-id <id>` is **refused** once `<projects>/<projectKey>/<id>.jsonl` exists — *Session ID <id> is
+    /// already in use.*, 2.1.263 `cli.pretty.js:294952`, whose predicate at `:799909` is a `stat` of that file —
+    /// and `--resume <id>` needs the file to exist. So the flag has to change exactly once, at the moment the file
+    /// appears, which is the rule the engine's own background respawn applies (`:362837`: resume when the found
+    /// transcript `hasMessages`, else `--session-id`).
+    ///
+    /// **The worktree is not cleared here** — `worktreeRelocationObserved()` owns it, and it fires a whole
+    /// handshake earlier. The checkout exists before the transcript does, so the two flags cannot share one
+    /// trigger without leaving every respawn in between asking for a second checkout.
+    ///
+    /// Answers whether it did anything, so the facade can promote its own copy of the launch line — the one
+    /// `preconditions(for:)` reads — under the same decision rather than under a second guess at it. Idempotent:
+    /// the two pieces of evidence, this channel's frames and the index's registration, arrive in either order and
+    /// often both.
+    @discardableResult
+    func transcriptObserved() -> Bool {
+        guard case .new(let id) = launchTemplate.session else { return false }
+        launchTemplate.session = .resume(id, fork: false)
+        return true
+    }
 
     /// Everything `CommandRouter.route` reads off a channel, in one hop: the engine's own report of what it offers
     /// and what the channel is currently running. Nothing here is derived; each value is the newest one the engine
@@ -692,6 +765,9 @@ public actor ChannelSupervisor {
 
     /// The terminal hatch. The window between the returned request and the panel's spawn is accepted (spec Decision
     /// Log, 2026-09-05); everything before it is not.
+    ///
+    /// Unchanged by item 47's work: §6.11's trust review is `reviewTrustInTerminal()` below, a verb of its own, so
+    /// this one's answer does not depend on the channel's origin and the header's copy stays true.
     public func openInTerminal() async throws -> PaneRequest {
         try await handOff(during: .openInTerminal, event: .openInTerminal, to: .foreignOwnTab) {
             let request = paneRequest(arguments: ["--resume", key.session.description],
@@ -700,6 +776,31 @@ public actor ChannelSupervisor {
             diagnostics.record(.paneRequest(id: request.id, purpose: "hatch", session: key.session.description))
             return request
         }
+    }
+
+    /// §6.11's *Review trust in terminal*: `claude`, **no arguments**, in the channel's own directory — and nothing
+    /// else changes (§14 item 47, tracker 314, ruled 2026-09-11).
+    ///
+    /// **No arguments** is the substance: `--resume` would open the conversation, and what §6.11 asks for is the
+    /// interactive run whose *startup* puts the trust dialog up. The directory is the runtime cwd, which for a
+    /// created channel is the seed's — the project whose trust is missing.
+    ///
+    /// **It is not a handoff and performs none of one**: no child to terminate, no release to wait for, no
+    /// ownership change and no transition. It is offered whenever this channel holds no process — archived and
+    /// dormant alike — and refused while one is live, because a channel with a child has a session to hand over and
+    /// `openInTerminal` is the verb for that.
+    ///
+    /// The request is recorded as this channel's pending pane request so the exit matches, and in a field of its own
+    /// so `pendingHatch` keeps meaning *a handoff is in flight*: `OriginResolver` reads that fact, and a trust
+    /// review that claimed it would make an archived channel look like one whose session had been let go.
+    public func reviewTrustInTerminal() async throws -> PaneRequest {
+        guard process == nil else { throw LifecycleError.busy(.handOff) }
+        if let trace = state.wedged { throw LifecycleError.wedged(trace) }
+        let request = paneRequest(arguments: [], cwd: runtime.cwd, purpose: .trustReview(key.session))
+        pendingTrustReview = request
+        diagnostics.record(.paneRequest(id: request.id, purpose: "trustReview",
+                                        session: key.session.description))
+        return request
     }
 
     /// The shape both handoffs share: an owned channel lets go of its process, waits for the release, and only then
@@ -1588,7 +1689,15 @@ public actor ChannelSupervisor {
     /// the agent's `initialPrompt` as a user turn behind the connecting glyph (parent §7.4).
     private func relaunch(from snapshot: RestartSnapshot, applying request: RestartRequest) -> LaunchConfiguration {
         var launch = launchTemplate
-        launch.session = .resume(key.session, fork: false)
+        // A restart resumes **this** channel's session, which is what makes a template naming a fork's source, or
+        // carrying `--fork-session`, safe to relaunch from. The one template it must not overwrite is a created
+        // channel's `.new(id)`: the engine's own rule is that `--resume` needs an existing transcript and
+        // `--session-id` is refused once one exists (§6.1), so a restart-required setting changed before the first
+        // turn — which is exactly when a user is most likely to change one — would relaunch with `--resume` against
+        // a session that has never been written and be refused outright. The id is the same either way; only the
+        // flag differs, and only the transcript's existence decides which is legal. `transcriptObserved()` is what
+        // moves it, and until then this keeps the flag the channel came up with.
+        if case .new = launch.session {} else { launch.session = .resume(key.session, fork: false) }
         launch.cwd = snapshot.cwd
         launch.model = snapshot.model
         launch.permissionMode = snapshot.permissionMode
@@ -1662,9 +1771,27 @@ public actor ChannelSupervisor {
                 turnRunning = true
                 pushEligibility()
                 publish()
+            case .transcriptMirror(let mirror) where !mirror.entries.isEmpty:
+                // The first evidence a created channel's transcript exists, and the earliest the engine offers:
+                // `--session-mirror` emits `transcript_mirror {filePath, entries}` with the JSONL records the CLI
+                // *just wrote* (§6.1, *Parity F-20*), so the file named is on disk. In `Fixtures/plain-two-turn` —
+                // recorded as a fresh `--session-id` launch — the first one arrives at frame 17, ahead of the
+                // `user` echo at 19 and the turn's `result` at 36, which is why the mirror is the chosen evidence
+                // and not the `result`.
+                //
+                // Matched on the file's own name, because a mirror can also name a subagent's sidechain file and
+                // that one says nothing about this channel's transcript.
+                // **And on a non-empty `entries`**, which is the case guard above. The frame's promise is the
+                // records the CLI *just wrote*; one carrying none has written none, so a file may still not exist
+                // and `--resume` would be refused.
+                if mirror.filePath.hasSuffix("/\(key.session.description).jsonl") {
+                    transcriptObserved()
+                }
             case .system(.initialize(let initFrame)):
                 state.apiKeySource = initFrame.apiKeySource
                 lastSystemInit = initFrame.fields
+                // The checkout the launch line asked for exists by now, and this frame's `cwd` is where it is.
+                worktreeRelocationObserved(reportedCWD: initFrame.cwd)
                 publish()
             default:
                 break
@@ -1704,6 +1831,16 @@ public actor ChannelSupervisor {
     /// The tab closing is not the release. The record it wrote is, so the re-adoption waits for that record to go
     /// and for its pid to die, exactly as every other handoff does.
     public func paneExited(_ exit: PaneExit) async {
+        // The trust review first, and it ends here: the pane was never a handoff, so there is
+        // nothing to re-adopt and no holder to wait out. Clearing the request is the whole of it,
+        // and the channel is left exactly where it was — still untrusted, or trusted now, which
+        // only a re-read of the global config document can tell.
+        // Checked before the hatch, and by id rather than by precedence — see `isPendingPane(_:)`.
+        if let review = pendingTrustReview, review.id == exit.request.id {
+            pendingTrustReview = nil
+            diagnostics.record(.paneEnded(id: exit.request.id, purpose: "trustReview", code: exit.code))
+            return
+        }
         guard let pending = pendingHatch, pending.id == exit.request.id else {
             diagnostics.record(.staleExit(id: exit.request.id, purpose: String(describing: exit.request.purpose)))
             return

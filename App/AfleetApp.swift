@@ -60,7 +60,8 @@ struct AfleetApp: App {
         }
     }
 
-    /// §8.7's shortcuts: the four C5 owns, C7.4's Cmd+Shift+T and C7.5's Cmd+S.
+    /// §8.7's shortcuts: the four C5 owns, C7.4's Cmd+Shift+T, C7.5's Cmd+S and §8.2's
+    /// Cmd+Shift+N.
     ///
     /// **Cmd+, is absent on purpose and is not missing.** SwiftUI gives a `Settings` scene the
     /// standard *Settings…* item under the application menu with Cmd+, already bound; declaring a
@@ -74,6 +75,28 @@ struct AfleetApp: App {
     /// which is not what a user pressing it from the Thread tab means.
     @CommandsBuilder
     private var shellCommands: some Commands {
+        CommandGroup(after: .newItem) {
+            // §8.2's global *New channel*, for a directory that has never been opened in Claude
+            // Code and therefore has no project section to raise the item from — which is exactly
+            // the situation item 47 is stated over. The sheet chooses its own directory.
+            //
+            // **Cmd+Shift+N, and Cmd+N is deliberately not taken.** Cmd+1…7 select the Nth panel
+            // tab and `ShellModel.selectPanelTab(at:)` is the shortcut those keys reach; a plain
+            // Cmd+N alongside them reads as a member of that range rather than as *New*. The item
+            // sits at `.newItem` so it lands in the **File** menu, where a user reaches for it.
+            // **Disabled until a launch has reached the workspace route.** The sheet is presented by
+            // the sidebar, which `RootView` mounts on that route alone, so a press before it would
+            // set a request nothing can present and nothing can clear — and the sheet would then
+            // appear unasked the moment the sidebar mounted.
+            //
+            // The **route** and not `model.browser`: the coordinator is built inside the launch and
+            // the browser it owns therefore exists while the route is still `.launching`, which is
+            // exactly the window a user has the menu open in.
+            Button("New Channel…") { shell.presentNewChannel(root: nil) }
+                .keyboardShortcut("n", modifiers: [.command, .shift])
+                .disabled(model.route.workspace == nil)
+        }
+
         CommandGroup(after: .sidebar) {
             Button("Quick Switcher…") { shell.presentSwitcher() }
                 .keyboardShortcut("k", modifiers: .command)

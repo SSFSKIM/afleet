@@ -12,6 +12,17 @@ protocol ChannelRegistering: Sendable {
     func register(_ key: ChannelKey, cwd: URL, recent: Bool) async
 }
 
+/// Minting a channel: §8.2's *New channel*, and the composition root's to call.
+///
+/// A seam of its own beside `ChannelRegistering`, and **not** part of `LifecycleAPI`, for the same
+/// reason `register` is not: creation belongs to the object that owns the supervisor table, so a
+/// `LifecycleAPI` double cannot record one and every C6 and C7 surface that only ever *acts* on a
+/// channel keeps a protocol with no way to make one. `AppFleet` refines both, so `Workspace.fleet`
+/// is each without a cast.
+protocol ChannelCreating: Sendable {
+    func create(_ request: ChannelCreation) async -> ChannelKey
+}
+
 /// The listing join: C3's index on one side, C4's `ListingPolicy` in the middle, `Fleet.register`
 /// on the other (spec §3, §4).
 ///

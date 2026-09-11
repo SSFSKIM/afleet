@@ -32,6 +32,15 @@ struct SidebarView: View {
             if let session = focus.session { browser.select(session) }
         }
         .task { await browser.refreshBackground() }
+        // §8.2's *New channel*, presented here and not in `RootView`, which Task 5 closed: this is
+        // the view that is on screen for the whole workspace route, and the one whose section
+        // headers raise the other entry point. Both entries write `ShellModel.newChannelRequest`,
+        // so the global item in the app's command group has somewhere to put a press that has no
+        // view to reach.
+        .sheet(item: Binding(get: { shell.newChannelRequest },
+                             set: { if $0 == nil { shell.dismissNewChannel() } })) { request in
+            NewChannelSheet(request: request) { shell.dismissNewChannel() }
+        }
     }
 
     // MARK: - Projects
@@ -64,10 +73,7 @@ struct SidebarView: View {
                 .font(.caption)
             }
         } header: {
-            HStack(spacing: 4) {
-                if section.isPinned { Image(systemName: "pin.fill").font(.caption2) }
-                Text(section.title)
-            }
+            ProjectSectionHeader(section: section, shell: shell)
         }
     }
 
@@ -183,6 +189,47 @@ struct SidebarView: View {
                         .opacity(0.65)
                 }
             }
+        }
+    }
+}
+
+/// One project section's header: the pin, the title, and §8.2's *New channel…* item pre-filled with
+/// the section's own root.
+///
+/// **A view of its own, not four lines inside `SidebarView.body`**, on the precedent
+/// `SidebarView.openJobPane` and `PanelColumnView.resolvePendingPanelIndex` set here: the press is
+/// the only thing connecting the header to the sheet, and an item whose action named a different
+/// project would leave every model-level assertion green. `SidebarView.body` builds a
+/// `List(selection:)` a test cannot evaluate, so this is the value a test can.
+struct ProjectSectionHeader: View {
+
+    let section: ProjectSection
+    let shell: ShellModel
+
+    /// The item's accessible name, which names the project: two headers' items are two actions and
+    /// a shared label would leave a test — and VoiceOver — unable to tell them apart.
+    static func itemLabel(_ section: ProjectSection) -> String { "New channel in \(section.title)" }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            if section.isPinned { Image(systemName: "pin.fill").font(.caption2) }
+            Text(section.title)
+            Spacer(minLength: 4)
+            // A button rather than a context menu: the header is the affordance §8.2 names, and a
+            // menu on a `List` section header is not reliably reachable.
+            // A `Label` under `.iconOnly` rather than a bare `Image`: the item *draws* the plus a
+            // section header has room for, and still carries its name, so VoiceOver and the help
+            // tag both say which project it is for. `Button(_ title:)` would have drawn the whole
+            // sentence in the header, which is what an earlier version of this line did.
+            Button {
+                shell.presentNewChannel(root: section.root)
+            } label: {
+                Label(Self.itemLabel(section), systemImage: "plus")
+                    .labelStyle(.iconOnly)
+            }
+            .buttonStyle(.borderless)
+            .font(.caption2)
+            .help(Self.itemLabel(section))
         }
     }
 }

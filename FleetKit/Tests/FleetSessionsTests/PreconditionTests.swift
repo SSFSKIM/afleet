@@ -94,18 +94,18 @@ final class PreconditionTests: XCTestCase {
         let nested = project.root.appending(path: "a/b")
         try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
 
-        let walked = ProjectRoot.canonical(for: nested)
+        let walked = ProjectRoot.roots(for: nested)
         // Booleans, not equalities, everywhere two resolved roots are compared in this file: both operands are
         // rooted in the temporary directory, which carries the account hash of the machine running the suite
         // (tracker entry 75, §6.3). The message names the relation; it never names either path.
-        XCTAssertTrue(walked.root.path(percentEncoded: false) == TemporaryProject.realpath(project.root),
+        XCTAssertTrue(walked.checkout.path(percentEncoded: false) == TemporaryProject.realpath(project.root),
                       "the walked root is not the project's real root")
         XCTAssertTrue(walked.gitRoot?.path(percentEncoded: false) == TemporaryProject.realpath(project.root),
                       "the git root is not the project's real root")
 
         let plain = try newProject(git: false)
-        let alone = ProjectRoot.canonical(for: plain.root)
-        XCTAssertTrue(alone.root.path(percentEncoded: false) == TemporaryProject.realpath(plain.root),
+        let alone = ProjectRoot.roots(for: plain.root)
+        XCTAssertTrue(alone.checkout.path(percentEncoded: false) == TemporaryProject.realpath(plain.root),
                       "a directory with no `.git` above it did not resolve to itself")
         XCTAssertNil(alone.gitRoot, "no `.git` above it, so the root is the directory itself")
 
@@ -114,10 +114,10 @@ final class PreconditionTests: XCTestCase {
         let underTmp = URL(filePath: "/tmp").appending(path: "afleet-c4-tmp-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: underTmp, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: underTmp) }
-        let resolved = ProjectRoot.canonical(for: underTmp)
-        XCTAssertTrue(resolved.root.path(percentEncoded: false) == TemporaryProject.realpath(underTmp),
+        let resolved = ProjectRoot.roots(for: underTmp)
+        XCTAssertTrue(resolved.checkout.path(percentEncoded: false) == TemporaryProject.realpath(underTmp),
                       "the canonical root under /tmp is not the directory's real path")
-        let resolvedUnderTmp = resolved.root.path(percentEncoded: false)
+        let resolvedUnderTmp = resolved.checkout.path(percentEncoded: false)
         XCTAssertTrue(resolvedUnderTmp.hasPrefix("/private/tmp/"),
                       "the canonical root kept the `/tmp` spelling instead of the real one")
         XCTAssertTrue(underTmp.resolvingSymlinksInPath().path(percentEncoded: false)
@@ -218,9 +218,9 @@ final class PreconditionTests: XCTestCase {
 
         let homeWitness = TreeWitness(home.url)
         let consent = ProjectMCPConsent()
-        let root = ProjectRoot.canonical(for: project.root)
+        let root = ProjectRoot.roots(for: project.root)
 
-        var verdicts = consent.evaluate(root: root.root, gitRoot: root.gitRoot, cwd: project.root,
+        var verdicts = consent.evaluate(root: root.checkout, gitRoot: root.trustKey, cwd: project.root,
                                         configHome: home.url, settingSources: nil, acceptances: [])
         XCTAssertEqual(verdict(verdicts, "a"), .rejected(.localSettings))
         XCTAssertEqual(verdict(verdicts, "b"), .approved(.projectSettings))
@@ -229,20 +229,20 @@ final class PreconditionTests: XCTestCase {
         XCTAssertEqual(verdict(verdicts, "e"), .pending, "nor is its enabled array")
 
         try project.writeProjectSettings(["enabledMcpjsonServers": ["b"], "enableAllProjectMcpServers": true])
-        verdicts = consent.evaluate(root: root.root, gitRoot: root.gitRoot, cwd: project.root,
+        verdicts = consent.evaluate(root: root.checkout, gitRoot: root.trustKey, cwd: project.root,
                                     configHome: home.url, settingSources: nil, acceptances: [])
         XCTAssertEqual(verdict(verdicts, "d"), .approved(.projectSettings))
         XCTAssertEqual(verdict(verdicts, "e"), .approved(.projectSettings))
 
         try project.writeProjectSettings(["enabledMcpjsonServers": ["b"]])
-        verdicts = consent.evaluate(root: root.root, gitRoot: root.gitRoot, cwd: project.root,
+        verdicts = consent.evaluate(root: root.checkout, gitRoot: root.trustKey, cwd: project.root,
                                     configHome: home.url, settingSources: [.local, .project], acceptances: [])
         XCTAssertEqual(verdict(verdicts, "c"), .pending, "the user settings source is off for this launch")
 
         // Rejected wins over approved, whichever source approved it.
         try project.writeLocalSettings(["disabledMcpjsonServers": ["a", "b"]])
         let projectWitness = TreeWitness(project.root)
-        verdicts = consent.evaluate(root: root.root, gitRoot: root.gitRoot, cwd: project.root,
+        verdicts = consent.evaluate(root: root.checkout, gitRoot: root.trustKey, cwd: project.root,
                                     configHome: home.url, settingSources: nil, acceptances: [])
         XCTAssertEqual(verdict(verdicts, "b"), .rejected(.localSettings))
 
@@ -261,9 +261,9 @@ final class PreconditionTests: XCTestCase {
 
         let preconditions = SpawnPreconditions()
         let consent = ProjectMCPConsent()
-        let root = ProjectRoot.canonical(for: project.root)
+        let root = ProjectRoot.roots(for: project.root)
         func now(_ acceptances: [ProjectServerAcceptance]) -> [ProjectMCPServer: ServerVerdict] {
-            consent.evaluate(root: root.root, gitRoot: root.gitRoot, cwd: project.root, configHome: home.url,
+            consent.evaluate(root: root.checkout, gitRoot: root.trustKey, cwd: project.root, configHome: home.url,
                              settingSources: nil, acceptances: acceptances)
         }
 
@@ -271,13 +271,13 @@ final class PreconditionTests: XCTestCase {
         XCTAssertEqual(verdict(now([]), "d"), .pending)
 
         let witness = TreeWitness(project.root)
-        try await preconditions.accept(pending, root: root.root, store: store)
+        try await preconditions.accept(pending, root: root.checkout, store: store)
         witness.assertUnchanged("the project tree across an accept")
 
         let recorded = try await store.read([ProjectServerAcceptance].self, namespace: .fleetKit,
                                             key: FleetKitKeys.projectServerAcceptances) ?? []
         // A boolean: `ProjectServerAcceptance` carries the project root, so an equality prints it twice.
-        XCTAssertTrue(recorded == [ProjectServerAcceptance(projectRoot: root.root.path(percentEncoded: false),
+        XCTAssertTrue(recorded == [ProjectServerAcceptance(projectRoot: root.checkout.path(percentEncoded: false),
                                                            serverName: "d", entryHash: pending.entryHash)],
                       "the store holds \(recorded.count) acceptance(s), and not the one this project recorded")
         XCTAssertEqual(verdict(now(recorded), "d"), .approved(.acceptance))
@@ -307,9 +307,9 @@ final class PreconditionTests: XCTestCase {
 
         let preconditions = SpawnPreconditions()
         let consent = ProjectMCPConsent()
-        let root = ProjectRoot.canonical(for: project.root)
+        let root = ProjectRoot.roots(for: project.root)
         func now(_ acceptances: [ProjectServerAcceptance]) -> [ProjectMCPServer: ServerVerdict] {
-            consent.evaluate(root: root.root, gitRoot: root.gitRoot, cwd: project.root, configHome: home.url,
+            consent.evaluate(root: root.checkout, gitRoot: root.trustKey, cwd: project.root, configHome: home.url,
                              settingSources: nil, acceptances: acceptances)
         }
 
@@ -321,7 +321,7 @@ final class PreconditionTests: XCTestCase {
         XCTAssertEqual(server(verdicts, "e")?.transport, .sse(url: "https://example.invalid/sse"))
 
         let http = try XCTUnwrap(server(verdicts, "h"))
-        try await preconditions.accept(http, root: root.root, store: store)
+        try await preconditions.accept(http, root: root.checkout, store: store)
         var recorded = try await store.read([ProjectServerAcceptance].self, namespace: .fleetKit,
                                             key: FleetKitKeys.projectServerAcceptances) ?? []
         XCTAssertEqual(verdict(now(recorded), "h"), .approved(.acceptance))
@@ -970,21 +970,21 @@ final class PreconditionTests: XCTestCase {
 
         let preconditions = SpawnPreconditions()
         let consent = ProjectMCPConsent()
-        let root = ProjectRoot.canonical(for: project.root)
+        let root = ProjectRoot.roots(for: project.root)
         let key = ChannelKey(configHome: home.url, session: SessionID())
 
-        _ = ProjectRoot.canonical(for: project.root.appending(path: "nowhere"))
-        _ = TrustReader.isTrusted(root: root.root, globalConfig: home.configHome.globalConfig)
+        _ = ProjectRoot.roots(for: project.root.appending(path: "nowhere"))
+        _ = TrustReader.isTrusted(root: root.trustKey, globalConfig: home.configHome.globalConfig)
         _ = ManagedSettingsReader.isPending(configHome: home.url)
-        _ = LocalSettingsStore().resolve(gitRoot: root.gitRoot, cwd: project.root)
-        _ = consent.evaluate(root: root.root, gitRoot: root.gitRoot, cwd: project.root, configHome: home.url,
+        _ = LocalSettingsStore().resolve(gitRoot: root.trustKey, cwd: project.root)
+        _ = consent.evaluate(root: root.checkout, gitRoot: root.trustKey, cwd: project.root, configHome: home.url,
                              settingSources: nil, acceptances: [])
         _ = await preconditions.evaluate(key: key, cwd: project.root, launch: launch(cwd: project.root),
                                          configHome: home.configHome, wedged: nil, foreignHolders: [], store: store)
         try home.trust(root: project.root)
-        let verdicts = consent.evaluate(root: root.root, gitRoot: root.gitRoot, cwd: project.root,
+        let verdicts = consent.evaluate(root: root.checkout, gitRoot: root.trustKey, cwd: project.root,
                                         configHome: home.url, settingSources: nil, acceptances: [])
-        for pending in verdicts.keys { try await preconditions.accept(pending, root: root.root, store: store) }
+        for pending in verdicts.keys { try await preconditions.accept(pending, root: root.checkout, store: store) }
         _ = await preconditions.evaluate(key: key, cwd: project.root, launch: launch(cwd: project.root),
                                          configHome: home.configHome, wedged: nil, foreignHolders: [], store: store)
 

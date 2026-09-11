@@ -64,6 +64,20 @@ public protocol LifecycleAPI: Sendable {
                                 ui: any StrategyUI) async throws -> StrategyOutcome
     /// The §7.4 open-in-terminal row up to the handoff; purpose `.hatch`.
     func openInTerminal(_ key: ChannelKey) async throws -> PaneRequest
+    /// §6.11's *Review trust in terminal*; purpose `.trustReview`.
+    ///
+    /// **A verb of its own and not an arm of `openInTerminal`**, because the two are different acts
+    /// on different channels. A hatch is a handoff: it terminates this channel's child, waits for
+    /// the release and gives the session away, and §7.4's table has that row from ready and from
+    /// dormant. A trust review hands nothing over — the channel has no process, which is *why*
+    /// §6.11's banner is drawn — and runs `claude` with no arguments so the engine's own trust
+    /// dialog comes up. Folding it into `openInTerminal` made that verb's answer depend on the
+    /// channel's origin, so the header's *Open in Terminal* on an archived channel would have
+    /// silently stopped meaning what its copy says.
+    ///
+    /// Answers a request whenever the channel holds no process, and throws `busy` when one is live:
+    /// a channel with a child has a session to hand over, and the hatch is the verb for that.
+    func reviewTrustInTerminal(_ key: ChannelKey) async throws -> PaneRequest
     /// `claude attach <short>`; purpose `.attach`.
     func attach(_ job: JobShort) async throws -> PaneRequest
     /// `claude logs <short>`; purpose `.logs`.

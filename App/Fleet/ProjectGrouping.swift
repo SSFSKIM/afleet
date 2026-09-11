@@ -145,9 +145,14 @@ struct ProjectGrouping: Sendable {
     /// candidate's `.git`. Memoising that only inside one call meant the whole set of probes was
     /// repeated from scratch on every rebuild — and a rebuild happens on every `ChannelState`, every
     /// delta, every failed action and every dismissed banner, all on the main actor. The cache
-    /// outlives the call so the probes are paid once per distinct directory per launch.
+    /// outlives the call so the probes are paid once per distinct directory per launch — except for
+    /// a directory that does not exist, which costs one `stat` per rebuild and is re-derived once if
+    /// it appears; see `PathMemo`.
     @MainActor
     func sections(from rows: [ChannelRow], paths: PathMemo) -> [ProjectSection] {
+        // One generation per rebuild: the memo asks the filesystem about a still-missing directory
+        // once per generation rather than once per row that names it.
+        paths.beginGeneration()
         var buckets: [String: [String: [ChannelRow]]] = [:]   // repository -> root -> rows
 
         for row in rows {
@@ -219,14 +224,52 @@ struct ProjectGrouping: Sendable {
 /// root, and which repository owns that root. Both answers are properties of the filesystem rather
 /// than of the fleet, so they are the same on every rebuild and are cached across all of them.
 ///
-/// The cache is deliberately not invalidated. A project root moving under a running app is rare and
-/// its consequence is cosmetic — a section drawn under the directory the channel was started in —
-/// where re-probing three thousand rows on every state transition is a stall the user feels. A
-/// relaunch re-reads everything.
+/// A settled answer is deliberately never invalidated. A project root moving under a running app is
+/// rare and its consequence is cosmetic — a section drawn under the directory the channel was
+/// started in — where re-probing three thousand rows on every state transition is a stall the user
+/// feels. A relaunch re-reads everything.
+///
+/// **An answer about a directory that does not exist is a different thing and is held separately.**
+/// It is not a property of the filesystem yet: the case that produces it is §8.2's worktree
+/// creation, which names `<repo>/.claude/worktrees/<name>` before the CLI has made the checkout, and
+/// the fallback answer for that path is the repository itself — so settling it would group the
+/// checkout's channel into the repository's own rows for the life of the process, once the checkout
+/// finally exists. Such an answer therefore goes in `provisional`, and each rebuild pays **one
+/// `stat`** to ask whether the directory has appeared: on a real config home 452 of 3,244 rows point
+/// at a directory that is gone, and re-deriving all of them per rebuild — a `realpath` plus an
+/// upward walk of seven-odd components each — would put four thousand syscalls on the main actor
+/// per `ChannelState`, which is the stall this type was introduced to remove.
 @MainActor
 final class PathMemo {
     private var rootOfCWD: [String: String] = [:]
     private var repositoryOfRoot: [String: String] = [:]
+    /// Answers about directories that did not exist when they were derived, keyed the same way.
+    /// Re-derived on the first rebuild that finds the directory there, and settled then.
+    private var provisionalRoot: [String: String] = [:]
+    private var provisionalRepository: [String: String] = [:]
+    /// Which (question, path) pairs this rebuild has already asked the filesystem about, so each is
+    /// asked once per rebuild rather than once per row.
+    ///
+    /// A rebuild groups two rows of one missing project — the ordinary case, since a project the
+    /// user worked in has several channels — and `root(of:)` is asked once per row. Without this the
+    /// stat is paid per row, and `repository(of:)` pays a second one for the same directory: four
+    /// stats for one absent project with two channels.
+    ///
+    /// **Keyed by the question and not by the path alone.** A missing directory with no `.git` above
+    /// it is its own root, so `root(of:)` and `repository(of:)` are asked about the *same* path: the
+    /// first is handed `cwd.path` and the second the canonical root, and `URL.path` strips a
+    /// directory URL's trailing slash, so those are one identical string. A set keyed on paths alone
+    /// therefore made the second question skip its own stat and hand back a provisional answer that
+    /// a checkout appearing would never refresh. Cleared by `beginGeneration()`, which
+    /// `sections(from:paths:)` calls.
+    private var askedThisGeneration: Set<Question> = []
+
+    /// Which of the two answers a memo entry is about, with the path it is about.
+    private struct Question: Hashable {
+        enum Kind: Hashable { case root, repository }
+        var kind: Kind
+        var path: String
+    }
 
     /// How many times the filesystem was actually consulted — a miss, not an entry.
     ///
@@ -235,17 +278,72 @@ final class PathMemo {
     /// time and overwrote the same keys has the same entry count as one that never re-probed. This
     /// counts the probes themselves, which is the thing the cache exists to avoid and the only
     /// number a test can hold it to. A count, per §11 — never a path.
+    ///
+    /// It does **not** count the one `fileExists` a missing directory costs per rebuild: that stat
+    /// is the gate that keeps the derivation from being re-run, not the derivation.
     private(set) var probeCount = 0
+
+    /// How many times the filesystem was asked *whether a path exists* — the gate that keeps a
+    /// missing directory from being re-derived.
+    ///
+    /// Counted separately from `probeCount` and counted at all for one reason: it is a syscall on
+    /// the main actor inside a rebuild, so it is a cost, and a cost no test can see is a cost that
+    /// grows. `probeCount` stays what it was — the derivation the cache exists to avoid — because
+    /// folding the two would make the existing cost test unable to tell them apart.
+    private(set) var existenceCheckCount = 0
 
     init() {}
 
+    /// Starts a new rebuild's generation, forgetting which paths this memo has already asked about.
+    ///
+    /// Called by `ProjectGrouping.sections(from:paths:)` and by nothing else: the generation is a
+    /// rebuild, and a caller that grouped twice under one generation would be told a directory is
+    /// still missing after it appeared.
+    func beginGeneration() { askedThisGeneration.removeAll(keepingCapacity: true) }
+
+    /// Whether `path` is on disk, asked at most once per (question, path) per rebuild.
+    ///
+    /// The first generation that meets a path costs one stat per question — there is no provisional
+    /// answer yet, so the caller is going to derive anyway and a gate would buy nothing — and every
+    /// later generation costs one per question until the directory appears.
+    private func exists(_ path: String, _ kind: Question.Kind, provisional: Bool) -> Bool {
+        guard provisional else { return checkedExists(path) }
+        let asked = Question(kind: kind, path: path)
+        guard !askedThisGeneration.contains(asked) else { return false }
+        askedThisGeneration.insert(asked)
+        return checkedExists(path)
+    }
+
+    private func checkedExists(_ path: String) -> Bool {
+        existenceCheckCount += 1
+        return FileManager.default.fileExists(atPath: path)
+    }
+
     /// The canonical project root of a working directory: up to the first `.git`, else the directory.
+    ///
+    /// A directory that does not exist yet is answered **provisionally**: the answer is returned so
+    /// the row is placed, and the next rebuild re-derives it if the directory has appeared. See the
+    /// note on the type for why that case is worth one `stat` a rebuild and why settling it is not.
     func root(of cwd: URL) -> String {
         let key = cwd.path
         if let known = rootOfCWD[key] { return known }
+        // The gate is not counted as a probe — `probeCount` measures the derivation the cache exists
+        // to avoid — but it *is* counted, under `existenceCheckCount`: see that property.
+        let exists = exists(key, .root, provisional: provisionalRoot[key] != nil)
+        if !exists, let provisional = provisionalRoot[key] { return provisional }
         probeCount += 1
-        let resolved = Self.native(CanonicalPath.string(ProjectRoot.canonical(for: cwd).root))
-        rootOfCWD[key] = resolved
+        // **The checkout and not the trust key.** §8.2 sub-groups a repository that holds several
+        // checkouts, and that grouping is keyed on the directory a channel actually runs in; the
+        // trust key is the repository, so keying on it collapses every worktree into its repository
+        // body and the sub-grouping disappears. `WorktreeLink` below is what finds the repository
+        // for the section, from this root.
+        let resolved = Self.native(CanonicalPath.string(ProjectRoot.roots(for: cwd).checkout))
+        if exists {
+            rootOfCWD[key] = resolved
+            provisionalRoot[key] = nil
+        } else {
+            provisionalRoot[key] = resolved
+        }
         return resolved
     }
 
@@ -267,43 +365,37 @@ final class PathMemo {
     }
 
     /// The repository a root belongs to: itself, or the main checkout when the root is a worktree.
+    ///
+    /// Provisional for a root that does not exist, for `root(of:)`'s reason: a worktree's `.git` is
+    /// the file that identifies it, and a checkout the CLI has not made yet has none.
     func repository(of root: String) -> String {
         if let known = repositoryOfRoot[root] { return known }
+        let exists = exists(root, .repository, provisional: provisionalRepository[root] != nil)
+        if !exists, let provisional = provisionalRepository[root] { return provisional }
         probeCount += 1
         let resolved = Self.native(WorktreeLink.mainRepository(of: root) ?? root)
-        repositoryOfRoot[root] = resolved
+        if exists {
+            repositoryOfRoot[root] = resolved
+            provisionalRepository[root] = nil
+        } else {
+            provisionalRepository[root] = resolved
+        }
         return resolved
     }
 
 }
 
-/// A git worktree's link back to the repository that owns it.
+/// A git worktree's link back to the repository that owns it, for **grouping**.
 ///
-/// A worktree's `.git` is a *file* holding `gitdir: <repo>/.git/worktrees/<name>`, where an ordinary
-/// checkout's is a directory. That one difference is the whole detection: no `git` process is run,
-/// nothing is written, and a `.git` that is neither shape simply is not a worktree.
-///
-/// **The `gitdir` may be relative, and it is relative to the worktree.** `git worktree add` writes a
-/// relative path whenever the repository is configured for one, so this is an ordinary checkout
-/// rather than an exotic one; resolving it as though it were relative to the process names a
-/// directory that depends on where the app was launched from and is usually nowhere. The worktree
-/// then groups under a repository that does not exist, apart from the real one.
+/// The parsing is `WorktreeLayout`'s, in FleetSessions, so the sidebar and the trust reader cannot
+/// drift about what a `gitdir:` line means or about resolving a relative one against the worktree.
+/// What is different here is the *question*: grouping wants the repository a user knows a checkout
+/// by, so it takes the tolerant answer and asks none of the engine's trust guards. A checkout whose
+/// repository has moved still draws under the repository it was made from; keying a trust read that
+/// way would be a defect, which is why `ProjectRoot.canonical` takes the guarded answer instead.
 enum WorktreeLink {
     static func mainRepository(of root: String) -> String? {
-        let dotGit = root + "/.git"
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: dotGit, isDirectory: &isDirectory),
-              !isDirectory.boolValue,
-              let data = FileManager.default.contents(atPath: dotGit),
-              let text = String(data: data, encoding: .utf8)
-        else { return nil }
-        let marker = "gitdir:"
-        guard let line = text.split(separator: "\n").first(where: { $0.hasPrefix(marker) }) else { return nil }
-        let gitDir = line.dropFirst(marker.count).trimmingCharacters(in: .whitespaces)
-        guard let separator = gitDir.range(of: "/.git/worktrees/") else { return nil }
-        let repository = String(gitDir[gitDir.startIndex..<separator.lowerBound])
-        guard !repository.isEmpty else { return nil }
-        let base = URL(fileURLWithPath: root, isDirectory: true)
-        return CanonicalPath.string(URL(fileURLWithPath: repository, isDirectory: true, relativeTo: base))
+        WorktreeLayout.repositoryByPathShape(ofWorktreeAt: URL(filePath: root, directoryHint: .isDirectory))
+            .map { CanonicalPath.string($0) }
     }
 }

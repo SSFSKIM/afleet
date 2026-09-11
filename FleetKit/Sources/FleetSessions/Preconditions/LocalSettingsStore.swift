@@ -69,6 +69,15 @@ public struct LocalSettingsStore: Sendable {
     /// `<root>/.claude/settings.local.json` when `stat(root)`, `lstat(root/.git)` and `lstat(root/.claude)` are all
     /// owned by the effective uid and root is not the real home directory; otherwise `<cwd>/.claude/settings.local.json`,
     /// with the cwd file read as the legacy overlay when the store moved to the git root.
+    ///
+    /// **`.git` must be *there*, and `.claude` need not.** The engine's resolver `lstat`s
+    /// `join(root, ".git")` **unguarded** (2.1.263 `chunk-aqbb35ee.js`); the may-be-absent licence in
+    /// `SPEC/03` §4.4 step 4 is granted to `.claude` alone. The difference is not academic: a
+    /// worktree of a **bare** repository canonicalises to the bare directory, which has no `.git`
+    /// inside it, so the engine keeps its store at the checkout — and afleet, treating an absent
+    /// entry as "not foreign", moved the store to the bare directory. A decline written there is a
+    /// file afleet then reads back as authoritative while the engine reads the checkout's, so the
+    /// declined server loads and §6.12's one write has been made in a place nobody honours.
     public func resolve(gitRoot: URL?, cwd: URL) -> Resolution {
         let me = geteuid()
         let cwdReal = RealPath.url(cwd)
@@ -79,7 +88,7 @@ public struct LocalSettingsStore: Sendable {
             let home = RealPath.string(FileManager.default.homeDirectoryForCurrentUser)
             if RealPath.string(root) != home,
                ownerUID(.path(root)) == me,
-               owned(root.appending(path: ".git"), by: me),
+               presentAndOwned(root.appending(path: ".git"), by: me),
                owned(root.appending(path: ".claude"), by: me) {
                 directory = root
                 atGitRoot = true
@@ -95,10 +104,18 @@ public struct LocalSettingsStore: Sendable {
         return resolution
     }
 
-    /// An entry that is not there is not a foreign one.
+    /// An entry that is not there is not a foreign one. `.claude`'s rule, and `.claude`'s alone.
     private func owned(_ url: URL, by me: uid_t) -> Bool {
         var st = stat()
         guard lstat(url.path(percentEncoded: false), &st) == 0 else { return true }
+        return ownerUID(.path(url)) == me
+    }
+
+    /// The entry must exist **and** be ours. `.git`'s rule, because the engine's `lstat` of it is
+    /// unguarded: a root with no `.git` is a root the engine does not move its store to.
+    private func presentAndOwned(_ url: URL, by me: uid_t) -> Bool {
+        var st = stat()
+        guard lstat(url.path(percentEncoded: false), &st) == 0 else { return false }
         return ownerUID(.path(url)) == me
     }
 
