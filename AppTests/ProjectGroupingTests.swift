@@ -322,40 +322,43 @@ final class ProjectGroupingTests: XCTestCase {
         XCTAssertGreaterThan(added, 0, "the gate is not being asked at all, so this measures nothing")
     }
 
-    /// A missing directory that is **its own root** does not make the repository answer stale.
+    /// **Two questions about one path are two questions**, so a generation that asks both pays one
+    /// existence check for each.
     ///
-    /// With no `.git` above it the path is both the root and the root whose repository is asked for,
-    /// so `root(of:)` and `repository(of:)` are asked about the *same* path. Keyed by the path
-    /// alone, the per-rebuild memo made the second of them skip its own stat and hand back a
-    /// provisional answer — so a checkout that appeared was never re-derived for the repository
-    /// question and the section it grouped under never moved.
-    func testAMissingDirectoryThatIsItsOwnRootStillRefreshesItsRepositoryAnswer() throws {
+    /// The memo's per-rebuild gate is keyed by (question, path). Keyed by the path alone, a path both
+    /// questions were asked about would make the second skip its own stat and answer from a
+    /// provisional value that a directory appearing would never refresh.
+    ///
+    /// **That collision is not reachable today, and the keying is not what prevents it.** The two
+    /// lookups are keyed by strings that differ: `root(of:)` uses `cwd.path`, which carries a
+    /// trailing slash for a directory URL, and `repository(of:)` is handed the canonical string,
+    /// which does not. So the fix is the correct keying rather than a repair of an observed break,
+    /// and what this holds is the keying itself — see tracker 455 for the trailing slash the two
+    /// currently rely on.
+    func testAGenerationAsksEachQuestionAboutAPathOnce() throws {
         let tree = try TempTree()
-        let repository = try tree.directory("repo-gamma")
-        try tree.directory("repo-gamma/.git")
-        // A checkout that does not exist yet, under a repository that does. Both questions are about
-        // this one path: with no `.git` inside it, its root is itself.
-        let checkout = tree.root.appending(path: "not-yet", directoryHint: .isDirectory)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: checkout.path),
-                       "the checkout exists, so this test measures nothing")
+        let missing = tree.root.appending(path: "vanished/checkout", directoryHint: .isDirectory)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: missing.path),
+                       "the fixture path exists, so nothing here is missing")
 
         let memo = PathMemo()
         memo.beginGeneration()
-        let firstRoot = memo.root(of: checkout)
-        let firstRepository = memo.repository(of: firstRoot)
-        XCTAssertTrue(firstRepository == firstRoot,
-                      "a missing directory with no .git inside it is not its own repository")
-
-        // It appears, as a real linked worktree of the repository.
-        try FileManager.default.createDirectory(at: checkout, withIntermediateDirectories: true)
-        try Data("gitdir: \(repository.path)/.git/worktrees/not-yet\n".utf8)
-            .write(to: checkout.appending(path: ".git"))
+        let root = memo.root(of: missing)
+        _ = memo.repository(of: root)
 
         memo.beginGeneration()
-        let secondRoot = memo.root(of: checkout)
-        let secondRepository = memo.repository(of: secondRoot)
-        XCTAssertTrue(secondRepository == CanonicalPath.string(repository),
-                      "the repository answer stayed provisional after the checkout appeared")
+        let before = memo.existenceCheckCount
+        _ = memo.root(of: missing)
+        _ = memo.repository(of: root)
+        XCTAssertEqual(memo.existenceCheckCount - before, 2,
+                       "a generation asking both questions paid "
+                       + "\(memo.existenceCheckCount - before) existence check(s), not one each")
+
+        // And asking the same question twice in one generation pays nothing more.
+        _ = memo.root(of: missing)
+        _ = memo.repository(of: root)
+        XCTAssertEqual(memo.existenceCheckCount - before, 2,
+                       "a repeated question in one generation paid a second check")
     }
 
     // MARK: - Ordering

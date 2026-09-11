@@ -2412,17 +2412,22 @@ the gap between 141 and 157 is C6.1's and C6.2's reservations and is expected. (
      Filed 2026-09-09 at C6.3's third review round (hard stop).
 
      **Closed 2026-09-11 — `corrective/c6-new-channel`, merge pending; the owner line above is
-     superseded by the architect's ruling of the same day.** `Fleet.openInTerminal` on a supervisor
-     that holds no process answers a `PaneRequest` running the binary with **no arguments** in the
-     channel's runtime cwd, purpose `.trustReview(SessionID)` — a new `PanePurpose` case — with no
-     transition, no `pendingHatch` and no ownership change. No arguments is the substance and not a
-     detail: `--resume` opens the conversation, and what §6.11 needs is the interactive run whose
-     *startup* puts the trust dialog up. The request is recorded in a field of its own so
-     `paneExited` matches it, clears it, records `pane_ended` and re-adopts nothing, while
-     `pendingHatch` keeps meaning that a handoff is in flight, which `OriginResolver` reads. A
-     channel with an owned process keeps today's hatch unchanged. C7.4 handles the case where it
-     switches on `PanePurpose`: the readout labels it *Trust review* and names the banner as where a
-     fresh pane comes from, the stop policy takes the hatch's `.report`, and `isHatch` stays false by
+     superseded by the architect's ruling of the same day.** `LifecycleAPI.reviewTrustInTerminal(_:)`
+     is X5's own verb — **not** an arm of `openInTerminal`, which keeps exactly its previous
+     semantics, so the header's *Open in Terminal* still means what its copy says whatever the
+     channel's origin. It answers a `PaneRequest` running the binary with **no arguments** in the
+     channel's runtime cwd, purpose `.trustReview(SessionID)` — a new `PanePurpose` case — whenever
+     the supervisor holds no process, archived and dormant alike, and throws `busy` when a child is
+     live, because a channel with one has a session to hand over and the hatch is the verb for that.
+     No arguments is the substance and not a detail: `--resume` opens the conversation, and what
+     §6.11 needs is the interactive run whose *startup* puts the trust dialog up. There is no
+     transition, no `pendingHatch` and no ownership change. The request is recorded in a field of its
+     own so `paneExited` matches it — by id, against **either** pending request, so a hatch the host
+     refused and this supervisor never cleared cannot swallow a review's own exit — clears it,
+     records `pane_ended` and re-adopts nothing, while `pendingHatch` keeps meaning that a handoff is
+     in flight, which `OriginResolver` reads. C7.4 handles the case where it switches on
+     `PanePurpose`: the readout labels it *Trust review* and names the banner as where a fresh pane
+     comes from, the stop policy takes the hatch's `.report`, and `isHatch` stays false by
      construction.
 
      The re-read that item 47's second half turns on is driven by the pane's **exit** and not by the
@@ -2432,6 +2437,14 @@ the gap between 141 and 157 is C6.1's and C6.2's reservations and is expected. (
      `App/Panels/PaneExitAnnouncer.swift` is a listener teed off the one closure that already carries
      the exit to X5 (`PanelHostModel.makeContext`'s `reportPaneExit`), announced after X5 has been
      told: no timer, and no second source of truth.
+
+     The spawn the flip earns belongs to the **channel** and not to one observation point. Three
+     things can be first to notice that trust was granted — the pane's exit, an answer's re-read, and
+     `evaluate`, which runs on every selection *and* on every return to the front — so hanging it off
+     one of them dropped it whenever another got there first, which is exactly what switching
+     applications while the dialog is open does. `PrecommitModel.applyVerdict` is the one place, and
+     the flip still requires a previous `untrusted` verdict for that same channel, so a channel the
+     user has merely clicked onto spawns nothing.
 
 315. **The thread's generic reply to a question card answers only the first question.** A thread
      reply (`App/Threads/ThreadModel.swift`, against `App/Decisions/QuestionCardView.swift`) builds one response from the text in the composer and files it against the first
@@ -4330,7 +4343,10 @@ needs more. Nothing above is renumbered.
      only the supervisor, so from then on the fleet's copy can still say `.new` for a channel whose
      every spawn resumes. Inert today, because nothing reads `session` off it, and left that way
      rather than plumbing a callback from the supervisor back into the facade for a field with no
-     reader. Its live consequence is a wasted round trip **per registration, not one**: `register`
+     reader — and since 2026-09-11 it does not write one: `register` promotes only the session start,
+     because the `worktree` it used to clear had no reader either and the flag that decides a launch
+     is the supervisor's template, moved a whole handshake earlier by `worktreeRelocationObserved()`.
+     Its live consequence is a wasted round trip **per registration, not one**: `register`
      gates its cross-actor ask on `launches[key].session == .new`, and once the *frame* evidence has
      moved the supervisor's template the fleet's copy still says `.new` for ever — so every later
      `register` for that key pays an `await` into the supervisor that answers `false`. That is one
@@ -4410,4 +4426,53 @@ needs more. Nothing above is renumbered.
      took its own. Filed rather than left as a comment alone, because it is a deliberate divergence
      from a binding directive and the next reader of that directive should find it. Closer: none
      unless a consumer appears that needs frames before the transcript does. Owner: C6.
+
+## From corrective/c6-new-channel's fix wave 2, 2026-09-11 (454-458)
+
+454. **The *New channel* sheet's `.task(id: request)` keying has no test.** A replacing request —
+     a section header's item, then Cmd+Shift+N over the open sheet — is two `NewChannelRequest`
+     values for one `.sheet(item:)` presentation, and the content is keyed on the request so the
+     model is rebuilt for the second root. SwiftUI owns `@State` and a task's lifetime through the
+     render tree and neither exists outside one, so nothing here can observe that the replaced item
+     re-ran the task; what is asserted is the model factory per root and the two presses being two
+     distinct values, which is what makes the keying fire at all. Closer: a rendered-hierarchy
+     harness, if one ever becomes worth its weight for this tree (see also entry 443, which is the
+     same wall from the other side). Owner: C6.
+
+455. **`PathMemo`'s two questions avoid colliding by a trailing slash, not by design.**
+     `root(of:)` keys its cache and its per-rebuild gate on `cwd.path`, which carries a trailing
+     slash for a directory URL, while `repository(of:)` is handed the canonical string, which does
+     not — so the two never key on the same string even for a path that is its own root. The gate is
+     now keyed by (question, path), which is correct independently, but the *caches* still lean on
+     that difference: normalise one side and two unrelated answers start sharing a key. Closer: key
+     both maps on `RealPath.string` of the directory, which is what every comparison in the fleet
+     already uses. Owner: C5's successor on the sidebar.
+
+456. **The engine's guarded-path checks on `gitdir:` and `commondir` pointers are not
+     transcribed.** `WorktreeLayout` reads both pointer files and compares real paths, and the engine
+     additionally refuses a pointer file that is a symlink, a pointer containing `..`, and one
+     resolving outside the repository root. Hostile input only — a `.git` file inside a project the
+     user has opened — and the consequence is bounded by what the answer is used for: a trust key
+     pointing somewhere the engine does not key would read as `untrusted`, which refuses to spawn
+     rather than spawning wrongly, and the §6.12 decline target is the same key. Closer: transcribe
+     the three checks, with a test per arm. Owner: C4.
+
+457. **`TrustReader.isTrusted` is an exact-key lookup where the engine also walks ancestors.** The
+     engine reads `projects[<root>].hasTrustDialogAccepted` for the resolved root and, failing that,
+     for each ancestor up to and including the git root, and it NFC-normalises the key before
+     looking it up. afleet looks up one key, unnormalised. Pre-existing, and the failure direction is
+     a false `untrusted` — the channel refuses to spawn and the banner tells the user to review trust
+     in the terminal, which is recoverable — rather than a false trust. It bites a user who trusted a
+     parent directory once and a user whose project path carries a decomposed character, which on
+     macOS is anything typed into Finder with an accent. Closer: walk the ancestors bounded by the
+     git root inclusive, and normalise the key. Owner: C4.
+
+458. **A child that dies after `git worktree add` but before `system/init` leaves `-w` set.** The
+     worktree flag is cleared by the engine's first `system/init`, whose `cwd` is the checkout — so a
+     child killed between the CLI creating the checkout during startup and emitting that frame leaves
+     the flag on, and the next spawn passes `-w <name>` for a checkout that already exists and fails
+     with *Error creating worktree*. Beside entry 450, which is the same shape one step later in
+     startup, and with the same shape of recovery missing: nothing re-reads the filesystem to notice.
+     Closer: treat the CLI's own refusal as evidence, or `stat` `<repo>/.claude/worktrees/<name>`
+     before composing a `-w` respawn. Owner: C4.
 
